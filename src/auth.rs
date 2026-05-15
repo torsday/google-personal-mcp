@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
 
 const TOKEN_FILE: &str = "token.json";
-const CONFIG_DIR: &str = "gmail-mcp";
+const CONFIG_DIR: &str = "google-personal-mcp";
 const REDIRECT_PORT: u16 = 8080;
 
 /// Persisted token data
@@ -65,7 +65,7 @@ pub(crate) async fn load_token() -> Result<StoredToken> {
     let path = token_path()?;
     if !path.exists() {
         bail!(
-            "Not authenticated. Run `gmail-mcp auth` first.\n\
+            "Not authenticated. Run `google-personal-mcp auth` first.\n\
              Ensure credentials.json is at: {}",
             credentials_path()?.display()
         );

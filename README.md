@@ -1,10 +1,10 @@
-# gmail-mcp
+# google-personal-mcp
 
 > **Status: design phase — code in this repo is a working prototype that is being rewritten from scratch.**
 >
 > The architecture for the rewrite is captured in [`docs/adr/`](docs/adr/) — read those before sending PRs against the source tree. Highlights:
 >
-> - Crate / binary will rename from `gmail-mcp` to **`google-mcp`** ([ADR-0001](docs/adr/0001-monolithic-google-mcp-architecture.md)). Repo name stays `gmail-mcp` for now.
+> - Crate, binary, and repo are all **`google-personal-mcp`** (renamed from `gmail-mcp` on 2026-05-15, see [ADR-0001](docs/adr/0001-monolithic-google-personal-mcp-architecture.md)).
 > - **Scope: personal-data Google services only** — Gmail (Phase 1), Calendar, Contacts, Tasks, Drive, Keep, Photos, Docs/Sheets/Slides, Chat, YouTube *personal slice* (subscriptions / playlists / history / your channel). Out of scope: Maps, Translate, Cloud APIs, public-corpus YouTube — those belong in separate MCPs. This MCP is a *data source* consumed by other knowledge tools, not a knowledge layer itself.
 > - **Multi-account from day one** with hot-reload of the account registry ([ADR-0002](docs/adr/0002-multi-account-architecture.md)) and `account = "*"` fan-out for read tools ([ADR-0013](docs/adr/0013-cross-account-fan-out.md)).
 > - **Dual transport**: stdio (Claude Desktop integration) + Streamable HTTP (VPS daemon), selectable at runtime ([ADR-0003](docs/adr/0003-transport-stdio-and-streamable-http.md)).
@@ -14,6 +14,7 @@
 > - **Dry-run + automatic send-deduplication** for destructive ops ([ADR-0012](docs/adr/0012-idempotency-and-dry-run.md)) — safety nets against agent failure modes.
 > - **Self-introspection** via `mcp_status` tool ([ADR-0014](docs/adr/0014-status-introspection-tool.md)) — daemon health from inside the MCP session.
 > - Typed error model, configurable retry policy, structured logging, per-account rate limiting, Prometheus metrics, systemd + nginx deployment template — see [ADR-0004](docs/adr/0004-oauth-token-refresh.md) through [ADR-0008](docs/adr/0008-observability-and-deployment.md).
+> - **Tool surface and parameter conventions** locked in [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md). **Secrets at rest** (token-file permissions, redacted Debug, deferred keyring) in [ADR-0017](docs/adr/0017-secrets-at-rest.md). **Prompt-injection defense** (untrusted-content wrapping) in [ADR-0018](docs/adr/0018-email-content-trust.md).
 >
 > The text below this banner describes the current prototype, not the rewrite target.
 
@@ -55,7 +56,7 @@ This server is designed to run **forever** on a small personal VPS or homelab no
 3. Enable the **Gmail API**
 4. Create **OAuth 2.0 credentials** → Desktop application
 5. Download `credentials.json`
-6. Place it at `~/.config/gmail-mcp/credentials.json`
+6. Place it at `~/.config/google-personal-mcp/credentials.json`
 
 ### 2. Build
 
@@ -66,10 +67,10 @@ cargo build --release
 ### 3. Authenticate
 
 ```bash
-./target/release/gmail-mcp auth
+./target/release/google-personal-mcp auth
 ```
 
-This opens your browser, runs the OAuth2 PKCE flow, and saves a token to `~/.config/gmail-mcp/token.json`. You only need to do this once.
+This opens your browser, runs the OAuth2 PKCE flow, and saves a token to `~/.config/google-personal-mcp/token.json`. You only need to do this once.
 
 ### 4. Wire into Claude
 
@@ -79,7 +80,7 @@ Add to your MCP client config (e.g. `~/.claude/mcp.json` or Claude Desktop's `cl
 {
   "mcpServers": {
     "gmail": {
-      "command": "/path/to/gmail-mcp",
+      "command": "/path/to/google-personal-mcp",
       "args": []
     }
   }
@@ -93,7 +94,7 @@ Add to your MCP client config (e.g. `~/.claude/mcp.json` or Claude Desktop's `cl
 ```
 src/
 ├── main.rs          Entry point — `auth` subcommand or MCP stdio server
-├── auth.rs          OAuth2 PKCE flow, token persistence (~/.config/gmail-mcp/)
+├── auth.rs          OAuth2 PKCE flow, token persistence (~/.config/google-personal-mcp/)
 ├── gmail/
 │   ├── mod.rs       GmailClient — typed wrappers around Gmail REST API
 │   └── types.rs     Thread, Message, Label, and related types
@@ -129,7 +130,7 @@ The long-term goal is a single `personal-mcp` binary: one always-on daemon, one 
 cargo build
 
 # Run with debug logging
-RUST_LOG=gmail_mcp=debug ./target/debug/gmail-mcp
+RUST_LOG=gmail_mcp=debug ./target/debug/google-personal-mcp
 
 # Check for issues
 cargo clippy

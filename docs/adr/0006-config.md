@@ -1,4 +1,4 @@
-# ADR-0006: Configuration via optional TOML at `~/.config/google-mcp/config.toml`
+# ADR-0006: Configuration via optional TOML at `~/.config/google-personal-mcp/config.toml`
 
 **Date:** 2026-04-25
 **Status:** Accepted
@@ -7,7 +7,7 @@
 
 ## Context
 
-The prototype hardcodes everything: credentials path (`~/.config/gmail-mcp/credentials.json`), token path, OAuth redirect port (8080), Gmail scopes, and there is no way to enable/disable services. As soon as Calendar arrives ([ADR-0001](0001-monolithic-google-mcp-architecture.md)), this becomes painful: the maintainer has to fork the binary or add per-service feature flags to disable services they haven't authorized for an account.
+The prototype hardcodes everything: credentials path (`~/.config/google-personal-mcp/credentials.json`), token path, OAuth redirect port (8080), Gmail scopes, and there is no way to enable/disable services. As soon as Calendar arrives ([ADR-0001](0001-monolithic-google-personal-mcp-architecture.md)), this becomes painful: the maintainer has to fork the binary or add per-service feature flags to disable services they haven't authorized for an account.
 
 A long-running daemon also has tunables that change deployment-to-deployment without code changes:
 
@@ -25,7 +25,7 @@ If no decision were made, every tunable becomes either a hardcoded constant (for
 
 ## Decision
 
-We will load configuration from an optional TOML file at `~/.config/google-mcp/config.toml`. Every key is optional and has a documented default. Missing file = use all defaults. Malformed file = fail loudly at startup with a helpful error pointing at the offending key.
+We will load configuration from an optional TOML file at `~/.config/google-personal-mcp/config.toml`. Every key is optional and has a documented default. Missing file = use all defaults. Malformed file = fail loudly at startup with a helpful error pointing at the offending key.
 
 ### File schema (full reference; all keys optional)
 
@@ -37,7 +37,7 @@ log_format = "compact"                              # "compact" | "json" (json f
 
 # ── Google OAuth client (shared across all accounts in v1) ───────────
 [google]
-credentials_path = "~/.config/google-mcp/credentials/google.json"
+credentials_path = "~/.config/google-personal-mcp/credentials/google.json"
 
 [google.oauth]
 redirect_port = 8080                                # local listener port for OAuth redirect during `auth add`
@@ -192,7 +192,7 @@ We choose TOML. Same format as `accounts.toml`, same parser dep already in scope
 | --- | --- | --- |
 | (f) Single config file, no overlays | Simplest; one source of truth | No way to override per-machine without editing the file |
 | **(g) Single config file + two specific env var overrides (chosen)** | Trivial mental model; no surprises | Less flexible than full env-var overrides |
-| (h) Layered: `/etc/google-mcp/config.toml` then `~/.config/google-mcp/config.toml` then env vars | System/user/runtime separation familiar from many tools | Multi-source debugging is "where did this value come from"; YAGNI for personal-use solo daemon |
+| (h) Layered: `/etc/google-personal-mcp/config.toml` then `~/.config/google-personal-mcp/config.toml` then env vars | System/user/runtime separation familiar from many tools | Multi-source debugging is "where did this value come from"; YAGNI for personal-use solo daemon |
 
 We choose (g). For a personal daemon, layered config is over-engineering. The two env vars (`RUST_LOG`, `GOOGLE_MCP_CONFIG`) cover the actual use cases (debugging, alt config for testing).
 
@@ -210,7 +210,7 @@ We choose (j). For a personal daemon under one operator, the coordination cost o
 
 **Positive:**
 
-- Everything tunable in one file, with comments. Operator can `cat ~/.config/google-mcp/config.toml` to see the entire surface.
+- Everything tunable in one file, with comments. Operator can `cat ~/.config/google-personal-mcp/config.toml` to see the entire surface.
 - Strict validation means "I changed X but it didn't take effect" cannot happen — the daemon either refuses to start or honors the change.
 - Disabled services (`services.calendar.enabled = false`) means the binary ships with all services compiled in but only enabled ones contribute tools. Adding a new service is a config flip plus token re-auth (per [ADR-0002]'s `auth add` flow which requests current scopes).
 - Defaults are documented in the ADR (this file) and in code (`Default` impls). The README points operators here for the schema.

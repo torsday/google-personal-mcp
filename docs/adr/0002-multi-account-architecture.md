@@ -11,12 +11,12 @@ The maintainer routinely uses multiple Google accounts (10+ Gmail accounts: pers
 
 Google's OAuth model permits multiple accounts under a single OAuth client (one Google Cloud project's `credentials.json`). Each account has its own browser consent and produces its own refresh + access token pair. All scopes for an account are shared across Google services for that account (one token covers Gmail + Calendar + Contacts for that user).
 
-Per [ADR-0001](0001-monolithic-google-mcp-architecture.md), `google-mcp` is a single monolithic daemon. The multi-account question is therefore: how does one process manage N tokens, address tool calls to specific accounts, and expose account discovery to MCP clients?
+Per [ADR-0001](0001-monolithic-google-personal-mcp-architecture.md), `google-personal-mcp` is a single monolithic daemon. The multi-account question is therefore: how does one process manage N tokens, address tool calls to specific accounts, and expose account discovery to MCP clients?
 
 This decision is load-bearing because it shapes:
 
 - Token storage layout on disk
-- The auth CLI surface (`google-mcp auth ...` subcommands)
+- The auth CLI surface (`google-personal-mcp auth ...` subcommands)
 - Every tool's parameter schema (whether `account` is a parameter)
 - The `TokenManager` API (per [ADR-0003], yet to be written)
 - Per-account rate limiting (Gmail's quota is per-user-per-second)
@@ -38,7 +38,7 @@ Concretely:
   - Aliases are **case-sensitive** in storage but case-insensitive on lookup (`work` and `Work` both reach the same account; `Work` is rejected at creation time as not-lowercase).
   - These rules exist primarily to prevent path-injection attacks (alias is interpolated into `tokens/<alias>.json`) and CLI / URL ambiguity.
   - Validation lives in `auth::account::validate_alias(s: &str) -> Result<(), Error>` so a single function is the source of truth for both `auth add` and runtime tool-parameter validation.
-- **Account registry:** TOML file at `~/.config/google-mcp/accounts.toml`:
+- **Account registry:** TOML file at `~/.config/google-personal-mcp/accounts.toml`:
 
   ```toml
   [accounts.personal]
@@ -53,9 +53,9 @@ Concretely:
 
   Exactly one account has `default = true`. The CLI enforces this invariant.
 
-- **Tokens:** stored per-account at `~/.config/google-mcp/tokens/<alias>.json`. File contains access token, refresh token, expires-at timestamp, and the granted scopes. One Google OAuth client (one `credentials.json`) is shared across all accounts.
+- **Tokens:** stored per-account at `~/.config/google-personal-mcp/tokens/<alias>.json`. File contains access token, refresh token, expires-at timestamp, and the granted scopes. One Google OAuth client (one `credentials.json`) is shared across all accounts.
 - **Auth CLI:**
-  - `google-mcp auth add [--alias <name>]` — runs OAuth PKCE flow in browser, captures token, prompts for alias if not given (with the email as the suggested default), registers account. First account added is automatically the default. Daemon picks up the new account automatically (see Hot-reload below).
+  - `google-personal-mcp auth add [--alias <name>]` — runs OAuth PKCE flow in browser, captures token, prompts for alias if not given (with the email as the suggested default), registers account. First account added is automatically the default. Daemon picks up the new account automatically (see Hot-reload below).
 
     **CLI write order is load-bearing for hot-reload correctness:**
     1. Validate alias (per the rules above).
@@ -65,12 +65,12 @@ Concretely:
     Write order matters because the hot-reload subsystem watches `accounts.toml`. If the registry were written first, the daemon could observe the new alias before its token file exists, briefly producing `AuthRequired` errors during the race window. Token-then-registry guarantees that any registry entry the daemon sees has a corresponding readable token. The daemon's lazy-token-load pattern then works correctly.
 
     `auth remove` reverses the order: registry first (so the daemon stops trying to use the account), then token file deletion. `auth set-default` modifies only the registry.
-  - `google-mcp auth list` — prints accounts with alias, email, default marker, expires-at.
-  - `google-mcp auth remove <alias>` — **revokes the OAuth grant at Google** (calls `https://oauth2.googleapis.com/revoke` with the refresh token), then deletes the local token file and the registry entry. Revoking server-side cleans up the entry on `myaccount.google.com/permissions` so old refresh tokens don't accumulate forever in the user's Google account. If revocation fails (network error, token already invalid at Google), the local removal still proceeds and a WARN is logged with the reason. Order: registry first (so the daemon stops trying to use the account during the brief window), then revoke, then delete token file. Daemon picks up the registry change automatically.
+  - `google-personal-mcp auth list` — prints accounts with alias, email, default marker, expires-at.
+  - `google-personal-mcp auth remove <alias>` — **revokes the OAuth grant at Google** (calls `https://oauth2.googleapis.com/revoke` with the refresh token), then deletes the local token file and the registry entry. Revoking server-side cleans up the entry on `myaccount.google.com/permissions` so old refresh tokens don't accumulate forever in the user's Google account. If revocation fails (network error, token already invalid at Google), the local removal still proceeds and a WARN is logged with the reason. Order: registry first (so the daemon stops trying to use the account during the brief window), then revoke, then delete token file. Daemon picks up the registry change automatically.
 
     `--keep-grant` flag: skip the Google-side revocation; only delete local state. Use this when the local token file is corrupted but the grant itself is healthy (you'll re-add the same account without a fresh consent screen). Rare; the safe default is full revoke.
-  - `google-mcp auth set-default <alias>` — updates the default flag. Daemon picks up the change automatically.
-  - `google-mcp auth refresh <alias>` — forces a refresh-token roundtrip (for testing or recovery from suspected bad state). **v1 limitation:** because this writes only a token file (not `accounts.toml`), the daemon does not pick up the new token until restart. The CLI prints a restart reminder. Lifting this limitation is deferred to a future ADR.
+  - `google-personal-mcp auth set-default <alias>` — updates the default flag. Daemon picks up the change automatically.
+  - `google-personal-mcp auth refresh <alias>` — forces a refresh-token roundtrip (for testing or recovery from suspected bad state). **v1 limitation:** because this writes only a token file (not `accounts.toml`), the daemon does not pick up the new token until restart. The CLI prints a restart reminder. Lifting this limitation is deferred to a future ADR.
 - **Tool parameter:** every Google-service tool (today: gmail; future: calendar, contacts, ...) gains an optional `account: Option<String>` parameter. If omitted, the default account is used. Tool descriptions explicitly mention the parameter and its default behavior.
 - **Discovery tool:** `list_accounts` (returns the contents of the registry) is added to the tool surface so an MCP client can choose an account programmatically.
 - **Tool response convention:** every tool response includes which account was used (e.g., a structured field or an explicit prefix in the text response). This makes misroutes diagnosable.
@@ -115,7 +115,7 @@ Concretely:
   - **Hot-reload swaps `Arc<AccountState>` atomically** via `ArcSwap` (see Hot-reload below). In-flight tool calls hold their snapshot's `Arc` and continue using the pre-reload `AccountServices`; new calls see the new state.
   - **Disabled services** at `[services.<name>].enabled = false` produce `None` in the `AccountServices` field; tool dispatch for that service returns `Error::InvalidArgument { field: "service", detail: "<name> is not enabled in config" }`.
 
-- **Account hot-reload:** **Supported in v1.** The daemon watches the **parent directory** `~/.config/google-mcp/` via the `notify` crate, filtering events to those affecting `accounts.toml`. (Watching the parent dir rather than the file directly is the `notify`-recommended pattern for surviving atomic-rename writes — when the CLI does `tmpfile + rename`, watching the file's old inode breaks; watching the parent catches the `IN_MOVED_TO` / `Create` event reliably.) On registry change, the in-memory account registry is atomically swapped (via `arc-swap`); tokens for newly-added accounts are loaded from disk on next access; in-memory state for removed accounts is dropped. In-flight tool calls take an `Arc` snapshot of the registry + token state at tool entry and use that snapshot for the duration of the call, so a mid-call removal does not corrupt the call. Token files (`tokens/<alias>.json`, in a subdirectory) are explicitly **not** watched, even though the parent watch could be widened — this avoids spurious reloads when the daemon's own proactive token-refresh logic writes them. Reloads are debounced (~100ms) to coalesce burst writes. Reload-failure-mode: on parse or validation failure, keep the previous good registry, log a WARN, continue serving.
+- **Account hot-reload:** **Supported in v1.** The daemon watches the **parent directory** `~/.config/google-personal-mcp/` via the `notify` crate, filtering events to those affecting `accounts.toml`. (Watching the parent dir rather than the file directly is the `notify`-recommended pattern for surviving atomic-rename writes — when the CLI does `tmpfile + rename`, watching the file's old inode breaks; watching the parent catches the `IN_MOVED_TO` / `Create` event reliably.) On registry change, the in-memory account registry is atomically swapped (via `arc-swap`); tokens for newly-added accounts are loaded from disk on next access; in-memory state for removed accounts is dropped. In-flight tool calls take an `Arc` snapshot of the registry + token state at tool entry and use that snapshot for the duration of the call, so a mid-call removal does not corrupt the call. Token files (`tokens/<alias>.json`, in a subdirectory) are explicitly **not** watched, even though the parent watch could be widened — this avoids spurious reloads when the daemon's own proactive token-refresh logic writes them. Reloads are debounced (~100ms) to coalesce burst writes. Reload-failure-mode: on parse or validation failure, keep the previous good registry, log a WARN, continue serving.
 
 ## Options Considered
 
@@ -138,7 +138,7 @@ We choose (c). It is the only option that preserves a clean tool surface (one to
 | --- | --- | --- |
 | (g) No hot reload — restart required | Simplest; no concurrency; no extra deps | Real ops friction with 10+ accounts during initial setup; retrofitting later requires invasive refactor (TokenManager holders → `Arc<ArcSwap<...>>`); manual edits to `accounts.toml` for debugging require restart |
 | **(h) File watching on `accounts.toml` via `notify` crate** (chosen) | No CLI ↔ daemon coupling (no PID file, no signal infra); works for any source of change including manual edits; reactive to its own config | Adds `notify` dep with platform-specific quirks (FSEvents aggregation on macOS, inotify watch limits on Linux); requires snapshot pattern for in-flight calls; reload error paths must be handled |
-| (i) SIGHUP from CLI to daemon | No new dep; well-known UNIX idiom; CLI knows exactly when to reload | Requires PID file management (`~/.config/google-mcp/daemon.pid`) with stale-PID handling; doesn't help if user manually edits `accounts.toml`; CLI must handle "no daemon running" case |
+| (i) SIGHUP from CLI to daemon | No new dep; well-known UNIX idiom; CLI knows exactly when to reload | Requires PID file management (`~/.config/google-personal-mcp/daemon.pid`) with stale-PID handling; doesn't help if user manually edits `accounts.toml`; CLI must handle "no daemon running" case |
 | (j) Watch both `accounts.toml` and the `tokens/` directory | Picks up CLI's `auth refresh` automatically | Spurious reloads from the daemon's own proactive token-refresh writes; requires dedup logic (compare content hash, track in-flight writes) — all complexity for the `auth refresh` edge case |
 | (k) MCP admin tool (`_reload_accounts`) | Reload triggered from within the MCP session | Conflates admin concerns with the user-facing tool surface; the model could trigger reload accidentally; doesn't help when the daemon is running but no MCP client is connected |
 
@@ -171,7 +171,7 @@ We choose (h). File watching gives us the cleanest operational model — the CLI
 - *Risk:* Model misroutes a tool call to the wrong account (e.g., sends a personal email from the work account because it defaulted to `work`).
   *Mitigation:* (1) Every tool response includes the account that was used, so misroutes are visible. (2) Tool descriptions emphasize specifying `account` explicitly when the context is ambiguous. (3) The `send_email` tool in particular should require `account` (no default-fallback for destructive cross-account-confusable operations); this rule should be codified per-tool in their descriptions and validated in the tool layer.
 - *Risk:* Tokens revoked for one account (user changed Google password, revoked OAuth grant) cause noisy errors that could be misread as a system-wide failure.
-  *Mitigation:* Per-account error reporting in [ADR-0004]. The `Error::AuthRequired` variant carries the account alias. The CLI command `google-mcp auth refresh <alias>` re-runs the OAuth flow for that account only (subject to the v1 restart limitation).
+  *Mitigation:* Per-account error reporting in [ADR-0004]. The `Error::AuthRequired` variant carries the account alias. The CLI command `google-personal-mcp auth refresh <alias>` re-runs the OAuth flow for that account only (subject to the v1 restart limitation).
 - *Risk:* Account registry corruption (manual edit, partial write) leaves the daemon in an inconsistent state.
   *Mitigation:* Atomic writes (tmpfile + rename) for `accounts.toml` on the CLI write path. Reload validates the parsed TOML before applying; on parse or validation failure, the daemon keeps the previous good registry, logs an error at WARN level, and continues serving. Document the file format in the README.
 - *Risk:* Hot-reload race between an in-flight tool call and a registry mutation (e.g., the call references account `work` while the CLI removes it).
@@ -185,7 +185,7 @@ We choose (h). File watching gives us the cleanest operational model — the CLI
 
 ## References
 
-- [ADR-0001](0001-monolithic-google-mcp-architecture.md) — Monolithic Google-services MCP daemon (parent decision; defines the single-process scope this ADR builds within)
+- [ADR-0001](0001-monolithic-google-personal-mcp-architecture.md) — Monolithic Google-services MCP daemon (parent decision; defines the single-process scope this ADR builds within)
 - Future ADRs that inherit from this:
   - ADR-0003 — OAuth token refresh (TokenManager keyed by account alias; uses snapshot pattern for hot-reload safety)
   - ADR-0004 — Error model (per-account error variants like `AuthRequired { account: String }`)

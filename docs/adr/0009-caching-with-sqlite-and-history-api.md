@@ -7,7 +7,7 @@
 
 ## Context
 
-`google-mcp` will be consumed primarily by LLM agents asking question patterns like "summarize my last 50 emails," "find emails from X this month," or "what did Y email me about last week." A naive stateless implementation answers each of these with the natural N+1 pattern: one `threads.list` call returning N IDs, then N `messages.get` calls fetching each body.
+`google-personal-mcp` will be consumed primarily by LLM agents asking question patterns like "summarize my last 50 emails," "find emails from X this month," or "what did Y email me about last week." A naive stateless implementation answers each of these with the natural N+1 pattern: one `threads.list` call returning N IDs, then N `messages.get` calls fetching each body.
 
 This is bad in three distinct ways:
 
@@ -29,7 +29,7 @@ We will implement a **per-account SQLite cache** with **Gmail History API for in
 
 ### Storage layout
 
-One SQLite database file per account at `~/.config/google-mcp/cache/<account>.db`. WAL mode enabled (concurrent readers don't block during writes). Tokens / config never live in the cache DB; only Gmail data.
+One SQLite database file per account at `~/.config/google-personal-mcp/cache/<account>.db`. WAL mode enabled (concurrent readers don't block during writes). Tokens / config never live in the cache DB; only Gmail data.
 
 ### Schema (v1)
 
@@ -194,7 +194,7 @@ const MIGRATIONS: &[Migration] = &[
 
 On connection open: read `account_state.schema_version` (or treat missing table as version 0); apply each migration with `from_version <= current < to_version` in order; update version atomically per migration. Each migration runs in a transaction; failure rolls back the whole DB to the previous version.
 
-**Compatibility rule:** the daemon refuses to start if it encounters a schema version *higher* than its highest known migration target — this prevents a downgrade from accidentally truncating columns. Operator gets a clear error pointing at the version mismatch and instructs them to upgrade the binary or wipe the cache (`rm ~/.config/google-mcp/cache/<account>.db`).
+**Compatibility rule:** the daemon refuses to start if it encounters a schema version *higher* than its highest known migration target — this prevents a downgrade from accidentally truncating columns. Operator gets a clear error pointing at the version mismatch and instructs them to upgrade the binary or wipe the cache (`rm ~/.config/google-personal-mcp/cache/<account>.db`).
 
 **Testing:** every migration is exercised by a test that loads the previous version's snapshot fixture and verifies the upgrade. The test corpus grows with each migration — a v1→v2→v3 path is verified end-to-end.
 
@@ -243,7 +243,7 @@ That's a 20–∞× reduction in steady state.
 ```toml
 [cache]
 enabled = true
-dir = "~/.config/google-mcp/cache"            # where the .db files live
+dir = "~/.config/google-personal-mcp/cache"            # where the .db files live
 max_size_bytes_per_account = 524_288_000      # 500 MiB
 query_ttl_seconds = 300                       # search-result TTL
 labels_ttl_seconds = 3600                     # label catalog TTL
@@ -321,7 +321,7 @@ We choose (c). The combination of immutable bodies + History API is exactly what
 
 ## References
 
-- [ADR-0001](0001-monolithic-google-mcp-architecture.md) — defines the long-running daemon model that makes persistent cache feasible
+- [ADR-0001](0001-monolithic-google-personal-mcp-architecture.md) — defines the long-running daemon model that makes persistent cache feasible
 - [ADR-0002](0002-multi-account-architecture.md) — per-account scope; cache files keyed by account alias
 - [ADR-0006](0006-config.md) — `[cache]` config section
 - [ADR-0008](0008-observability-and-deployment.md) — `gmcp_cache_hits_total`, `gmcp_cache_misses_total`, `gmcp_cache_size_bytes` metrics

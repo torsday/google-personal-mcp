@@ -7,13 +7,13 @@
 
 ## Context
 
-The MCP tools exposed by `google-mcp` are a public contract. Once consumers — Claude Desktop sessions, downstream MCP-of-MCP layers ([ADR-0001](0001-monolithic-google-mcp-architecture.md) explicitly anticipates these), CI scripts that drive the daemon — start using a tool, the tool's name, parameter schema, and response shape become things they depend on.
+The MCP tools exposed by `google-personal-mcp` are a public contract. Once consumers — Claude Desktop sessions, downstream MCP-of-MCP layers ([ADR-0001](0001-monolithic-google-personal-mcp-architecture.md) explicitly anticipates these), CI scripts that drive the daemon — start using a tool, the tool's name, parameter schema, and response shape become things they depend on.
 
 Without a versioning policy, every PR that touches a tool risks silently breaking downstream consumers. The failure mode is bad: an LLM consumer that worked yesterday returns wrong-typed errors today because the response shape changed. Worse, no compile-time signal — the consumer's prompts to the model are themselves brittle.
 
-This problem is sharper for `google-mcp` than for most MCP servers because:
+This problem is sharper for `google-personal-mcp` than for most MCP servers because:
 
-1. The "data source for other knowledge tools" framing in [ADR-0001](0001-monolithic-google-mcp-architecture.md) explicitly invites downstream MCPs to consume our output.
+1. The "data source for other knowledge tools" framing in [ADR-0001](0001-monolithic-google-personal-mcp-architecture.md) explicitly invites downstream MCPs to consume our output.
 2. We expose a relatively large tool surface (12+ tools across multi-account ops, status, audit, cache, fan-out).
 3. The combinatorics of `dry_run` × `account` × `accounts` × per-tool params means the parameter schema isn't trivially stable across casual edits.
 
@@ -169,7 +169,7 @@ Six months is a reasonable middle ground for a personal-data tool. Destructive o
 
 ## References
 
-- [ADR-0001](0001-monolithic-google-mcp-architecture.md) — "data source for other knowledge tools" framing that makes this policy load-bearing
+- [ADR-0001](0001-monolithic-google-personal-mcp-architecture.md) — "data source for other knowledge tools" framing that makes this policy load-bearing
 - [ADR-0007](0007-testing-strategy.md) — Layer 4 snapshot tests (the enforcement mechanism)
 - [ADR-0013](0013-cross-account-fan-out.md) — `fanout: true` response convention
 - [ADR-0014](0014-status-introspection-tool.md) — `schema_version` on `mcp_status` response (the only currently-versioned response shape)

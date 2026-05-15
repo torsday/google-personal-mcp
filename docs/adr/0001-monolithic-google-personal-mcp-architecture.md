@@ -1,4 +1,4 @@
-# ADR-0001: Monolithic Google-services MCP daemon (`google-mcp`)
+# ADR-0001: Monolithic Google-services MCP daemon (`google-personal-mcp`)
 
 **Date:** 2026-04-25
 **Status:** Accepted
@@ -9,7 +9,7 @@
 
 ## Context
 
-The existing prototype is a single-purpose Gmail MCP server (`gmail-mcp`) — working code at `src/auth.rs`, `src/gmail/`, `src/tools/mod.rs`, `src/main.rs`. The maintainer has confirmed willingness to discard it and rewrite cleanly. Two architectural questions need to be settled before any rewrite begins, because they shape every other decision (auth, error model, config, testing):
+The existing prototype is a single-purpose Gmail MCP server (originally crate `gmail-mcp`, renamed to `google-personal-mcp` on 2026-05-15 to match the broader scope) — working code at `src/auth.rs`, `src/gmail/`, `src/tools/mod.rs`, `src/main.rs`. The maintainer has confirmed willingness to discard it and rewrite cleanly. Two architectural questions need to be settled before any rewrite begins, because they shape every other decision (auth, error model, config, testing):
 
 1. **Topology** — single monolithic binary spanning multiple services, modular per-service binaries, or hybrid workspace-with-shared-library?
 2. **Scope** — what data sources does this MCP cover?
@@ -24,18 +24,18 @@ Constraints:
 - Personal-use ops budget: prefer one daemon and one config over four
 - Multi-account is a real requirement (10+ Gmail accounts) — orthogonal to topology, addressed in [ADR-0002](0002-multi-account-architecture.md)
 
-If no decision were made, the default path is continuing to evolve `gmail-mcp` as single-purpose, paying the rename + restructure cost at the Phase 2 (Calendar) boundary, after install paths and OAuth redirect URIs are bound to the `gmail-mcp` name.
+If no decision were made, the default path would have been to continue evolving the (then) `gmail-mcp` crate as a Gmail-only service, paying the rename + restructure cost at the Phase 2 (Calendar) boundary — after install paths, OAuth redirect URIs, and downstream consumer references had ossified around the Gmail-only name.
 
 ## Decision
 
-We will build a **monolithic Rust daemon called `google-mcp`** that exposes Google services through MCP tools.
+We will build a **monolithic Rust daemon called `google-personal-mcp`** that exposes Google services through MCP tools.
 
 Specifically:
 
-- **Crate name:** `google-mcp`
-- **Binary name:** `google-mcp`
-- **CLI:** `google-mcp auth ...` (account management — see [ADR-0002](0002-multi-account-architecture.md)) and `google-mcp serve` (run the MCP server)
-- **Config directory:** `~/.config/google-mcp/`
+- **Crate name:** `google-personal-mcp`
+- **Binary name:** `google-personal-mcp`
+- **CLI:** `google-personal-mcp auth ...` (account management — see [ADR-0002](0002-multi-account-architecture.md)) and `google-personal-mcp serve` (run the MCP server)
+- **Config directory:** `~/.config/google-personal-mcp/`
 - **Scope:** *Personal-data* Google services only — see the explicit in/out list below. Phase 1 = Gmail (rewrite). Future phases added as service modules without changing the foundation.
 
   **In scope** (services where the OAuth grant is "access this user's account data"):
@@ -91,28 +91,30 @@ Specifically:
 
 - **Tool routing:** Each service's `tools.rs` declares `#[tool_router(router = <service>_router, vis = "pub")] impl GoogleServer { ... }`. `GoogleServer::new()` composes them via `+`.
 - **OAuth client:** One Google OAuth client (one `credentials.json` from one GCP project), shared across all enabled services. Scopes are additive within the single consent screen per account.
-- **Repo name:** GitHub repo stays `gmail-mcp` for now. Renaming the public repo is decoupled from this ADR and can happen anytime (or never).
+- **Repo name:** `google-personal-mcp` (renamed from `gmail-mcp` on 2026-05-15).
 
-  **Rename plan (when triggered):**
+  **Rename: completed 2026-05-15.** Performed before the rewrite to avoid carving the legacy Gmail-only name into the new code base. The operations that happened:
 
-  1. **GitHub side:** Settings → Rename to `google-mcp`. GitHub auto-creates a redirect from `torsday/gmail-mcp` → `torsday/google-mcp` for clones, web, and API access. Old URL works indefinitely (until the maintainer creates a *new* repo with the old name, which we won't).
-  2. **Local clones:** `git remote set-url origin git@github.com:torsday/google-mcp.git` — one command per clone. The old URL keeps working via the redirect, so this isn't urgent for any clone.
-  3. **README + Cargo.toml:** update `[package].repository` field of `Cargo.toml` and any inline link in README. The redirect makes broken links impossible, but the canonical URL should reflect reality.
-  4. **Releases / install instructions:** any cached install scripts (e.g., `curl https://raw.githubusercontent.com/torsday/gmail-mcp/...`) keep working via the GitHub redirect. Future install scripts use the new URL.
-  5. **MCP client configs:** Claude Desktop's `mcpServers.google.command` references the binary path on disk, not the repo. Unaffected.
-  6. **OAuth client:** the GCP-side OAuth client name doesn't reference the repo. Redirect URIs (`http://localhost:8080`) don't reference the repo. Unaffected.
+  1. **GitHub side:** `gh repo rename google-personal-mcp` → GitHub auto-redirects `torsday/gmail-mcp` URLs to the new repo indefinitely.
+  2. **Local clone:** `git remote set-url` happened automatically as part of `gh repo rename`.
+  3. **Cargo.toml `[package].name` + `[[bin]].name` + `[package].repository`:** updated to `google-personal-mcp`.
+  4. **`Cargo.lock`:** regenerated via `cargo update --workspace`.
+  5. **Source references:** `src/auth.rs::CONFIG_DIR`, tracing filters, CLI hint strings, log messages — all updated.
+  6. **ADRs + README + project memory:** mass replace via `sed`; historical-context references preserved (this section, ADR-0001 Context).
+  7. **Local filesystem directory:** **NOT renamed.** The on-disk path remains `/Users/torsday/src/github.com/torsday/gmail-mcp/` because (a) the project-memory directory is keyed to the same path; (b) the local-dir name has zero functional consequences (GitHub redirect handles `git push`/`pull`; the binary, crate name, and config dir are all already `google-personal-mcp`). The operator can `mv` the local directory whenever convenient — at which point the project-memory directory at `~/.claude/projects/-Users-torsday-src-github-com-torsday-gmail-mcp/` should be `mv`'d in lockstep so future sessions resume context.
 
-  Total operator effort: ~30 seconds + the `git remote set-url` per machine. The rename is genuinely cheap because all the load-bearing references (binary path, config dir, OAuth client) are already `google-mcp`-named per the rewrite. Only the GitHub URL is left over as an artifact.
-
-  **Trigger condition:** rename when a meaningful audience exists outside the maintainer (the moment the project is shared / linked from anywhere external). Until then, the URL doesn't matter and the rename creates only redirect churn.
+  **Things that were unaffected by the rename:**
+  - GCP-side OAuth client (name doesn't reference the repo; redirect URI `http://localhost:8080` doesn't either)
+  - Claude Desktop `mcpServers.<name>.command` — references the binary path, not the repo
+  - Cached/external install scripts using the old `gmail-mcp` URL — still work via GitHub redirect
 
 ## Options Considered
 
 | Option | Pros | Cons |
 | --- | --- | --- |
-| (a) Status quo: single-purpose `gmail-mcp`, ship separate binaries per future Google service | Simplest scope per binary; matches MCP ecosystem norm; failure isolation between services | Pays design + integration cost N times; users run N daemons; multiple OAuth flows / consent screens per account; cross-service composition lives in the client only |
-| **(b) Monolithic `google-mcp`** (chosen) | One Google OAuth flow per account (single consent screen, all enabled scopes); one daemon to deploy and monitor; shared infra (auth, http, error, retry) without workspace ceremony; cross-service tool composition trivially possible; one rmcp dependency to maintain; one config file | Single point of failure (a panic in calendar code kills gmail too); harder to share / publish individual services as standalone MCPs; one rmcp version pin spans all services |
-| (c) Hybrid: Cargo workspace with `google-mcp-core` library + per-service binaries | Failure isolation per binary; shared core code without duplication; independent ship cadence per service | Workspace ceremony for a personal daemon; cross-binary token storage requires filesystem coordination; still N daemons to operate; per-service auth setup; defeats the single-OAuth-flow benefit unless you build a separate OAuth-helper process |
+| (a) Status quo: single-purpose `google-personal-mcp`, ship separate binaries per future Google service | Simplest scope per binary; matches MCP ecosystem norm; failure isolation between services | Pays design + integration cost N times; users run N daemons; multiple OAuth flows / consent screens per account; cross-service composition lives in the client only |
+| **(b) Monolithic `google-personal-mcp`** (chosen) | One Google OAuth flow per account (single consent screen, all enabled scopes); one daemon to deploy and monitor; shared infra (auth, http, error, retry) without workspace ceremony; cross-service tool composition trivially possible; one rmcp dependency to maintain; one config file | Single point of failure (a panic in calendar code kills gmail too); harder to share / publish individual services as standalone MCPs; one rmcp version pin spans all services |
+| (c) Hybrid: Cargo workspace with `google-personal-mcp-core` library + per-service binaries | Failure isolation per binary; shared core code without duplication; independent ship cadence per service | Workspace ceremony for a personal daemon; cross-binary token storage requires filesystem coordination; still N daemons to operate; per-service auth setup; defeats the single-OAuth-flow benefit unless you build a separate OAuth-helper process |
 | (d) Broader scope: `personal-mcp` covering Notion, Obsidian, arbitrary providers in addition to Google | Maximum flexibility; "one MCP for all personal data" | Out of stated scope — maintainer explicitly limited this MCP to Google interactions; abstraction tax with no current beneficiary; non-Google providers belong in separate MCPs that other knowledge tools compose |
 
 We reject (a) and (c) because Google's OAuth model rewards a single client (one consent, one refresh token per account, additive scopes) and personal-VPS solo ops favors one daemon over four. We reject (d) because the maintainer explicitly scoped this MCP to Google data; broader-scope second-brain functionality lives in consumers, not here.
@@ -123,7 +125,7 @@ We choose (b). Per the maintainer's framing: this MCP is a *data source* used by
 
 **Positive:**
 
-- One binary, one daemon, one `~/.config/google-mcp/`, one systemd unit. Minimum ops surface for personal-VPS deployment.
+- One binary, one daemon, one `~/.config/google-personal-mcp/`, one systemd unit. Minimum ops surface for personal-VPS deployment.
 - One Google Cloud OAuth client. One consent screen per account, all current and future enabled scopes presented at once.
 - Adding a new Google service is: a new directory under `src/`, a `tools.rs` exporting a router function, one line added to `GoogleServer::new()`. No foundation changes.
 - The "low-level primitives only" rule keeps the tool surface predictable and composable. Consumers (Claude, an Obsidian plugin, a CLI script, another MCP that aggregates) get raw Google data and decide what to do with it.

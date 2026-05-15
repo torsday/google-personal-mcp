@@ -1,22 +1,17 @@
 [package]
-name = "gmail-mcp"
+name = "google-personal-mcp"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.95.0"
-description = "A Gmail MCP server built in Rust"
+description = "An MCP server exposing personal-data Google services (Gmail first; Calendar, Contacts, etc. to follow)"
 license = "MIT"
-repository = "https://github.com/torsday/gmail-mcp"
+repository = "https://github.com/torsday/google-personal-mcp"
 readme = "README.md"
 keywords = ["mcp", "gmail", "google", "oauth2"]
 categories = ["command-line-utilities", "email"]
 
-# NOTE: per docs/adr/0001-monolithic-google-mcp-architecture.md, the rewrite
-# renames this crate to `google-mcp` (binary, config dir, CLI surface). The
-# rename happens during the rewrite, not now, to avoid breaking the prototype
-# build during the design phase.
-
 [[bin]]
-name = "gmail-mcp"
+name = "google-personal-mcp"
 path = "src/main.rs"
 
 # ── Lints ─────────────────────────────────────────────────────────────────────
