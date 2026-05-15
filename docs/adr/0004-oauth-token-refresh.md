@@ -7,13 +7,13 @@
 
 ## Context
 
-Google OAuth access tokens expire approximately one hour after issue. The `google-mcp` daemon is designed to run forever (per [ADR-0001](0001-monolithic-google-mcp-architecture.md)), serving 10+ accounts (per [ADR-0002](0002-multi-account-architecture.md)). Tokens for every account must be refreshed continuously without operator intervention. The prototype's current behavior — load token at startup, use forever, fail when expired — is unusable beyond the first hour.
+Google OAuth access tokens expire approximately one hour after issue. The `google-personal-mcp` daemon is designed to run forever (per [ADR-0001](0001-monolithic-google-personal-mcp-architecture.md)), serving 10+ accounts (per [ADR-0002](0002-multi-account-architecture.md)). Tokens for every account must be refreshed continuously without operator intervention. The prototype's current behavior — load token at startup, use forever, fail when expired — is unusable beyond the first hour.
 
 Google's OAuth returns a `refresh_token` (alongside the `access_token`) on initial authorization with `access_type=offline`. The refresh token is long-lived and can be exchanged for a new access token via a `grant_type=refresh_token` call to Google's token endpoint. Google occasionally rotates the refresh token (returns a new one in a refresh response); we must handle this.
 
 Constraints from prior ADRs:
 
-- Per-account token storage at `~/.config/google-mcp/tokens/<alias>.json` ([ADR-0002])
+- Per-account token storage at `~/.config/google-personal-mcp/tokens/<alias>.json` ([ADR-0002])
 - Hot-reload safety: in-flight tool calls take an `Arc` snapshot of the TokenManager; new accounts can appear, removed accounts are dropped, but live calls must continue ([ADR-0002])
 - Both stdio and Streamable HTTP transports use the same TokenManager — concurrent calls from multiple HTTP clients must be safe ([ADR-0003])
 - Typed Error variants for refresh failures ([ADR-0005]) — `AuthRequired { account, reason }` for the unrecoverable cases
@@ -46,7 +46,7 @@ pub struct TokenManager {
     states: HashMap<String, Arc<RwLock<TokenState>>>,
     http: reqwest::Client,
     token_uri: String,                   // shared (Google's endpoint)
-    tokens_dir: PathBuf,                 // ~/.config/google-mcp/tokens/
+    tokens_dir: PathBuf,                 // ~/.config/google-personal-mcp/tokens/
 }
 ```
 
@@ -183,22 +183,22 @@ The tokens directory is **not** watched by the hot-reload subsystem (per [ADR-00
 
 If a refresh fails with anything other than `invalid_grant`, repeated calls to `access_token(alias)` should not hammer Google. Each failed refresh marks the account's TokenState with a cooldown timestamp (`failed_until: Option<Instant>`); calls during cooldown return the previous error immediately without attempting refresh. Cooldown grows exponentially from 1s up to 60s ceiling, resets on successful refresh.
 
-`invalid_grant` does not cool down — it goes straight to `AuthRequired` and stays there until the user runs `google-mcp auth refresh <alias>` (which writes a new token file; daemon restart picks it up per [ADR-0002] v1 limitation).
+`invalid_grant` does not cool down — it goes straight to `AuthRequired` and stays there until the user runs `google-personal-mcp auth refresh <alias>` (which writes a new token file; daemon restart picks it up per [ADR-0002] v1 limitation).
 
-### Incremental scope grant — `google-mcp auth grant <alias>`
+### Incremental scope grant — `google-personal-mcp auth grant <alias>`
 
 When the operator enables a new service in `[services.calendar].enabled = true` ([ADR-0006](0006-config.md)), the existing token for an account doesn't have the new service's scopes. Without an incremental-grant path, the only recovery is `auth remove <alias>` + `auth add --alias <alias>` — which revokes and re-consents from scratch, including all the existing scopes. Annoying.
 
 Google's OAuth supports **incremental authorization** via the `include_granted_scopes=true` URL parameter on the auth flow. The new grant is **additive** on top of existing grants; the user sees a consent screen showing only the *new* scopes being requested, and the resulting token covers all previously granted scopes plus the new ones.
 
-`google-mcp auth grant <alias> [--scope <scope-url>]...` runs the OAuth flow with:
+`google-personal-mcp auth grant <alias> [--scope <scope-url>]...` runs the OAuth flow with:
 
 - `include_granted_scopes=true`
 - Scopes = (currently granted scopes for this account, from `tokens/<alias>.json`) ∪ (currently configured scopes from `[services.<enabled-services>].scopes`) ∪ (any explicit `--scope` arguments)
 
 The existing token file is replaced atomically (tmpfile + rename). The daemon picks up the new scopes via the same lazy-load path as `auth refresh`.
 
-**Startup scope-mismatch warning:** at daemon startup, for each account, the granted scopes are compared against the union of enabled services' configured scopes. If any service's scopes are missing from any account, the daemon logs WARN naming the affected `(account, service)` pairs and pointing at `auth grant`. The daemon does **not** refuse to serve — disabled-per-account services just return `Error::InvalidArgument { detail: "service <X> not granted for account <Y>; run google-mcp auth grant <Y>" }` when called.
+**Startup scope-mismatch warning:** at daemon startup, for each account, the granted scopes are compared against the union of enabled services' configured scopes. If any service's scopes are missing from any account, the daemon logs WARN naming the affected `(account, service)` pairs and pointing at `auth grant`. The daemon does **not** refuse to serve — disabled-per-account services just return `Error::InvalidArgument { detail: "service <X> not granted for account <Y>; run google-personal-mcp auth grant <Y>" }` when called.
 
 This pattern means turning on a new service is a 30-second flow: enable in config, restart daemon, see the WARN, run `auth grant` once per account that needs the new scope. No re-consenting from scratch.
 
@@ -251,7 +251,7 @@ We choose (c). The proactive check is essentially free; the 401 fallback handles
 
 ## References
 
-- [ADR-0001](0001-monolithic-google-mcp-architecture.md) — defines the always-on daemon model that requires refresh
+- [ADR-0001](0001-monolithic-google-personal-mcp-architecture.md) — defines the always-on daemon model that requires refresh
 - [ADR-0002](0002-multi-account-architecture.md) — per-account state structure that this ADR builds on; hot-reload snapshot pattern
 - [ADR-0003](0003-transport-stdio-and-streamable-http.md) — shared TokenManager across both transports; multi-client HTTP mode demands the per-account RwLock granularity
 - [ADR-0005](0005-error-model.md) — `Error::AuthRequired { account, reason }`, `Error::Upstream`, `Error::Parse` variants used here

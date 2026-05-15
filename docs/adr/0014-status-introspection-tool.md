@@ -7,7 +7,7 @@
 
 ## Context
 
-Operational visibility for `google-mcp` is split across three places after [ADR-0008](0008-observability-and-deployment.md):
+Operational visibility for `google-personal-mcp` is split across three places after [ADR-0008](0008-observability-and-deployment.md):
 
 - **Logs** — stderr / journald — debugging detail, not summary.
 - **Metrics** — Prometheus on `127.0.0.1:9100/metrics` — numerical, requires Prometheus or `curl | grep`.
@@ -131,7 +131,7 @@ All fields default to true; the parameters exist so a noisy "give me everything 
   },
   "audit": {
     "enabled": true,
-    "current_log_file": "~/.config/google-mcp/audit/2026-04.log",
+    "current_log_file": "~/.config/google-personal-mcp/audit/2026-04.log",
     "current_log_size_bytes": 89_412
   },
   "last_hot_reload": {
@@ -251,7 +251,7 @@ Calls to `mcp_status` are recorded in the audit log per [ADR-0011](0011-audit-lo
 
 ## References
 
-- [ADR-0001](0001-monolithic-google-mcp-architecture.md) — single-process daemon model; status is global to that process
+- [ADR-0001](0001-monolithic-google-personal-mcp-architecture.md) — single-process daemon model; status is global to that process
 - [ADR-0002](0002-multi-account-architecture.md) — per-account state surfaced in `accounts` field; `last_hot_reload` reflects the file-watcher subsystem
 - [ADR-0004](0004-oauth-token-refresh.md) — `auth_state` and `expires_at` come from `TokenManager`
 - [ADR-0005](0005-error-model.md) — `errors_last_hour.by_kind` keys are the `Error` variant names

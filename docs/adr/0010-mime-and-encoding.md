@@ -85,7 +85,7 @@ pub struct AttachmentMeta {
 
 ### Truncation
 
-`config.toml` adds `[messages] max_body_bytes = 100_000` (default). Bodies over this limit are truncated per-representation (text and html each capped) with `truncated = true`. Truncation message appended: `"\n\n[truncated by google-mcp at <N> bytes]"`. The full body remains available to the cache (per [ADR-0009](0009-caching-with-sqlite-and-history-api.md)) — only the MCP response is truncated.
+`config.toml` adds `[messages] max_body_bytes = 100_000` (default). Bodies over this limit are truncated per-representation (text and html each capped) with `truncated = true`. Truncation message appended: `"\n\n[truncated by google-personal-mcp at <N> bytes]"`. The full body remains available to the cache (per [ADR-0009](0009-caching-with-sqlite-and-history-api.md)) — only the MCP response is truncated.
 
 This bounds what the LLM consumer sees per-message without losing data.
 
@@ -98,7 +98,7 @@ Attachments are surfaced as metadata in every `get_thread` / `get_message` respo
   - If `save_to` is provided: writes the file to that path (must be within `[messages] attachment_save_dir` allowlist for security), returns `{path, size_bytes, mime_type}`.
   - If `save_to` is omitted: returns `{base64, size_bytes, mime_type}` — base64 in the MCP response (capped at `[messages] max_attachment_inline_bytes`, default 1 MiB; larger requires `save_to`).
 
-Tradeoff: forcing operator allowlist prevents the model from arbitrary file-writes. Allowlist defaults to `~/Downloads/google-mcp/` if unset.
+Tradeoff: forcing operator allowlist prevents the model from arbitrary file-writes. Allowlist defaults to `~/Downloads/google-personal-mcp/` if unset.
 
 ### Forwarded messages
 

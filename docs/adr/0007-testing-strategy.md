@@ -87,7 +87,7 @@ Notable patterns:
 
 Target: catastrophic regression detection (e.g., we accidentally start sending wrong Authorization header).
 
-**Test config isolation.** The e2e tests do **not** read from the operator's real `~/.config/google-mcp/` (which has live accounts; tests would make real API calls against personal data). They read from a dedicated test installation pointed at by the env var **`GOOGLE_MCP_TEST_CONFIG_DIR`**:
+**Test config isolation.** The e2e tests do **not** read from the operator's real `~/.config/google-personal-mcp/` (which has live accounts; tests would make real API calls against personal data). They read from a dedicated test installation pointed at by the env var **`GOOGLE_MCP_TEST_CONFIG_DIR`**:
 
 ```
 $GOOGLE_MCP_TEST_CONFIG_DIR/
@@ -99,7 +99,7 @@ $GOOGLE_MCP_TEST_CONFIG_DIR/
 └── config.toml               # test-specific config (cache dir, etc.)
 ```
 
-The setup is one-time per test environment: create a separate Google account, separate GCP project, run `GOOGLE_MCP_CONFIG=$TEST_DIR google-mcp auth add --alias test`. Document in `tests/README.md`.
+The setup is one-time per test environment: create a separate Google account, separate GCP project, run `GOOGLE_MCP_TEST_CONFIG_DIR=$TEST_DIR google-personal-mcp auth add --alias test`. Document in `tests/README.md`.
 
 ```rust
 #[tokio::test]

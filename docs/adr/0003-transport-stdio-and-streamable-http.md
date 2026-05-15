@@ -7,7 +7,7 @@
 
 ## Context
 
-[ADR-0001](0001-monolithic-google-mcp-architecture.md) declared `google-mcp` as a monolithic daemon designed to "run forever on a personal VPS." The prototype uses **stdio transport** — the standard MCP pattern for local servers, where the MCP client (Claude Desktop, a CLI tool, etc.) launches the daemon as a subprocess and communicates via the daemon's stdin/stdout.
+[ADR-0001](0001-monolithic-google-personal-mcp-architecture.md) declared `google-personal-mcp` as a monolithic daemon designed to "run forever on a personal VPS." The prototype uses **stdio transport** — the standard MCP pattern for local servers, where the MCP client (Claude Desktop, a CLI tool, etc.) launches the daemon as a subprocess and communicates via the daemon's stdin/stdout.
 
 These two facts are in tension. Stdio transport has properties incompatible with the stated VPS-daemon vision:
 
@@ -37,12 +37,12 @@ Concretely:
 
 - **Cargo features:** Both `transport-io` and `transport-streamable-http-server-session` enabled by default. Users can disable either via `default-features = false` if they want a smaller binary, but the standard build includes both.
 - **CLI surface:**
-  - `google-mcp serve --stdio` — stdio mode (default for local development and Claude Desktop integration). Reads MCP from stdin, writes to stdout, logs to stderr.
-  - `google-mcp serve --http <addr>` — Streamable HTTP mode. Listens on the given address (e.g., `127.0.0.1:8765` for local-only HTTP, `0.0.0.0:8765` for network-exposed; the latter is intended to be fronted by nginx + TLS for production).
-  - Default if no flag: `--stdio` (least-surprise for users running `google-mcp serve` interactively to test).
+  - `google-personal-mcp serve --stdio` — stdio mode (default for local development and Claude Desktop integration). Reads MCP from stdin, writes to stdout, logs to stderr.
+  - `google-personal-mcp serve --http <addr>` — Streamable HTTP mode. Listens on the given address (e.g., `127.0.0.1:8765` for local-only HTTP, `0.0.0.0:8765` for network-exposed; the latter is intended to be fronted by nginx + TLS for production).
+  - Default if no flag: `--stdio` (least-surprise for users running `google-personal-mcp serve` interactively to test).
   - Exactly one of `--stdio` or `--http` may be specified.
 - **Tools and state are transport-agnostic.** The `GoogleServer` struct, the per-account `TokenManager`, the rate limiter, all error handling — everything below the transport adapter is identical between modes. Only the bytes-in / bytes-out path differs.
-- **Auth is always local.** The OAuth PKCE flow uses a localhost HTTP listener for the redirect. Therefore `google-mcp auth add ...` always runs locally on a machine with a browser, regardless of where the daemon will eventually serve from. Tokens written by `auth add` (to `~/.config/google-mcp/tokens/<alias>.json`) are portable: copy them to the VPS via `scp`/`rsync` (or run `auth add` directly on the VPS via SSH X-forwarding, or use a Cloudflare tunnel during the redirect window — operator's choice). The `serve` subcommand never runs OAuth flows.
+- **Auth is always local.** The OAuth PKCE flow uses a localhost HTTP listener for the redirect. Therefore `google-personal-mcp auth add ...` always runs locally on a machine with a browser, regardless of where the daemon will eventually serve from. Tokens written by `auth add` (to `~/.config/google-personal-mcp/tokens/<alias>.json`) are portable: copy them to the VPS via `scp`/`rsync` (or run `auth add` directly on the VPS via SSH X-forwarding, or use a Cloudflare tunnel during the redirect window — operator's choice). The `serve` subcommand never runs OAuth flows.
 - **HTTP mode uses session-based MCP (per spec 2025-03-26).** Each connecting client gets a session ID; sessions are tracked server-side. Session cleanup on disconnect; idle session expiry tunable via config (default: 1 hour).
 - **Local-only HTTP is the default address shape.** Binding to `127.0.0.1` requires reverse-proxy + TLS for any non-loopback access. The CLI emits a WARN on startup if bound to a non-loopback address without TLS. Refusing to bind 0.0.0.0 by default would be more strict; we choose to allow it with a warning because legitimate VPS deployments need it.
 
@@ -54,7 +54,7 @@ Concretely:
 | (b) Streamable HTTP only | Pure VPS-daemon model; matches stated long-running goal; multi-client capable | Breaks local Claude Desktop integration (Claude Desktop's stdio-spawn pattern is the standard local path); requires HTTP listener even for trivial local dev |
 | **(c) Both transports, runtime-selectable** (chosen) | Covers all deployment scenarios with one binary; same code below the transport adapter; users pick their model per-deployment without rebuilding | Slightly larger binary; two test paths (one per transport); more deps (`hyper` / `axum` style HTTP stack pulled in by `transport-streamable-http-server-session`) |
 | (d) stdio over SSH wrapper | No HTTP server needed on VPS; reuses stdio model | Hacky; not idiomatic MCP; SSH wrapper is per-user setup friction; doesn't multi-client |
-| (e) Two separate binaries (`google-mcp-stdio` + `google-mcp-http`) | Clean separation; smaller per-binary footprint; clearer deployment model | More CI complexity; same code base; users need to know which binary to install; defeats the "single binary" simplicity that monolithic-daemon ADR-0001 settled on |
+| (e) Two separate binaries (`google-personal-mcp-stdio` + `google-personal-mcp-http`) | Clean separation; smaller per-binary footprint; clearer deployment model | More CI complexity; same code base; users need to know which binary to install; defeats the "single binary" simplicity that monolithic-daemon ADR-0001 settled on |
 
 We choose (c). The cost (slightly bigger binary, more deps, two test paths) is small relative to the operational flexibility it preserves. Either constraint — "must be local-only" or "must be VPS-only" — would be a significant limitation for a daemon meant to serve a maintainer's full personal-data workflow.
 
@@ -82,7 +82,7 @@ We choose (c). The cost (slightly bigger binary, more deps, two test paths) is s
 - *Risk:* `rmcp` 1.5's Streamable HTTP server API may have rough edges (it is the newer transport; less battle-tested than stdio).
   *Mitigation:* The HTTP transport adapter is isolated to one module (`transport/http.rs`). If we hit rmcp limitations, we can replace with a hand-rolled MCP-over-HTTP layer using `axum` directly. Compile-test the HTTP path before committing to it during implementation.
 - *Risk:* Token portability (auth-then-scp model) creates accidental long-lived tokens on dev laptops that the maintainer forgets to delete.
-  *Mitigation:* `google-mcp auth list` shows where tokens live (path on disk). Documentation recommends restrictive file permissions (`chmod 600`) and explicitly lists the cleanup step ("delete `~/.config/google-mcp/tokens/work.json` from your laptop after copying to the VPS, if you don't intend to authenticate from the laptop").
+  *Mitigation:* `google-personal-mcp auth list` shows where tokens live (path on disk). Documentation recommends restrictive file permissions (`chmod 600`) and explicitly lists the cleanup step ("delete `~/.config/google-personal-mcp/tokens/work.json` from your laptop after copying to the VPS, if you don't intend to authenticate from the laptop").
 - *Risk:* Session lifecycle in Streamable HTTP mode is non-trivial — clients reconnecting expect session continuity; orphaned sessions accumulate memory.
   *Mitigation:* Idle-session timeout (1 hour default, configurable in [ADR-0006]); session count metric exposed via [ADR-0008]'s observability surface so we can spot leaks.
 - *Risk:* The "two transports in one binary" pattern is not demonstrated in `rmcp` examples (we verified this), so we are pioneering the integration.
@@ -90,7 +90,7 @@ We choose (c). The cost (slightly bigger binary, more deps, two test paths) is s
 
 ## References
 
-- [ADR-0001](0001-monolithic-google-mcp-architecture.md) — declared the VPS-daemon goal that requires HTTP transport
+- [ADR-0001](0001-monolithic-google-personal-mcp-architecture.md) — declared the VPS-daemon goal that requires HTTP transport
 - [ADR-0002](0002-multi-account-architecture.md) — auth flow per account; this ADR clarifies that auth is always local regardless of serve transport
 - Future ADRs:
   - [ADR-0006](0006-config.md) — session timeout, HTTP bind address, related transport tunables

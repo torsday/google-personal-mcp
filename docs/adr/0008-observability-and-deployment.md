@@ -81,21 +81,21 @@ A starter alertmanager ruleset ships at `deploy/alerts.yml`:
 
 ```yaml
 groups:
-- name: google-mcp
+- name: google-personal-mcp
   rules:
   - alert: GoogleMcpHighErrorRate
     expr: rate(gmcp_tool_calls_total{outcome!="success"}[5m]) / rate(gmcp_tool_calls_total[5m]) > 0.05
     for: 10m
     labels: { severity: warning }
     annotations:
-      summary: "google-mcp tool error rate > 5% on {{ $labels.instance }}"
+      summary: "google-personal-mcp tool error rate > 5% on {{ $labels.instance }}"
 
   - alert: GoogleMcpRefreshFailures
     expr: rate(gmcp_token_refreshes_total{outcome!="success"}[1h]) > 0.01
     for: 30m
     labels: { severity: warning }
     annotations:
-      summary: "google-mcp token refresh failing — likely revoked token; run google-mcp auth refresh"
+      summary: "google-personal-mcp token refresh failing — likely revoked token; run google-personal-mcp auth refresh"
 
   - alert: GoogleMcpAccountStuck
     expr: gmcp_active_accounts - sum(account_auth_ok) > 0
@@ -126,11 +126,11 @@ groups:
       summary: "hot-reload failing for {{ $value }}/hr — accounts.toml may be malformed"
 
   - alert: GoogleMcpDown
-    expr: up{job="google-mcp"} == 0
+    expr: up{job="google-personal-mcp"} == 0
     for: 2m
     labels: { severity: critical }
     annotations:
-      summary: "google-mcp daemon is down"
+      summary: "google-personal-mcp daemon is down"
 ```
 
 These rules assume a Prometheus job is scraping `http://127.0.0.1:9100/metrics` from the daemon. Operator drops the file into their alertmanager and tunes thresholds per traffic.
@@ -154,31 +154,31 @@ These rules assume a Prometheus job is scraping `http://127.0.0.1:9100/metrics` 
 {
   "mcpServers": {
     "google": {
-      "command": "/usr/local/bin/google-mcp",
+      "command": "/usr/local/bin/google-personal-mcp",
       "args": ["serve", "--stdio"]
     }
   }
 }
 ```
 
-That's the entirety of the local-mode deployment story. Auth happens via `google-mcp auth add`; tokens live in `~/.config/google-mcp/tokens/`.
+That's the entirety of the local-mode deployment story. Auth happens via `google-personal-mcp auth add`; tokens live in `~/.config/google-personal-mcp/tokens/`.
 
 #### VPS — systemd + nginx + Streamable HTTP
 
-A unit file template ships at `deploy/google-mcp.service`:
+A unit file template ships at `deploy/google-personal-mcp.service`:
 
 ```ini
 [Unit]
-Description=google-mcp — Google services MCP daemon
-Documentation=https://github.com/torsday/gmail-mcp
+Description=google-personal-mcp — Google services MCP daemon
+Documentation=https://github.com/torsday/google-personal-mcp
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=google-mcp
-Group=google-mcp
-ExecStart=/usr/local/bin/google-mcp serve --http 127.0.0.1:8765
+User=google-personal-mcp
+Group=google-personal-mcp
+ExecStart=/usr/local/bin/google-personal-mcp serve --http 127.0.0.1:8765
 Restart=always
 RestartSec=2s
 Environment=RUST_LOG=google_mcp=info,reqwest=warn,hyper=warn
@@ -186,10 +186,10 @@ Environment=RUST_LOG=google_mcp=info,reqwest=warn,hyper=warn
 # Hardening
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=read-only           # google-mcp reads its own ~/.config; nothing else
+ProtectHome=read-only           # google-personal-mcp reads its own ~/.config; nothing else
 ProtectSystem=strict
-ReadWritePaths=/home/google-mcp/.config/google-mcp
-ReadOnlyPaths=/usr/local/bin/google-mcp
+ReadWritePaths=/home/google-personal-mcp/.config/google-personal-mcp
+ReadOnlyPaths=/usr/local/bin/google-personal-mcp
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -212,7 +212,7 @@ A reverse-proxy template ships at `deploy/nginx.conf.example` with TLS terminati
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name google-mcp.your-domain.tld;
+    server_name google-personal-mcp.your-domain.tld;
 
     ssl_certificate     /etc/letsencrypt/live/your-domain.tld/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/your-domain.tld/privkey.pem;
@@ -229,7 +229,7 @@ server {
     }
 
     # Optional: client-cert auth or basic auth at this layer
-    # auth_basic "google-mcp"; auth_basic_user_file /etc/nginx/google-mcp.htpasswd;
+    # auth_basic "google-personal-mcp"; auth_basic_user_file /etc/nginx/google-personal-mcp.htpasswd;
 }
 ```
 
@@ -237,16 +237,16 @@ Metrics and `/healthz` are served on `127.0.0.1:9100` and intentionally NOT expo
 
 #### Install steps (documented in `deploy/INSTALL.md`)
 
-1. Create `google-mcp` system user: `useradd -r -s /usr/sbin/nologin -d /home/google-mcp -m google-mcp`
-2. Build release binary on a build host; `scp target/release/google-mcp root@vps:/usr/local/bin/`; `chmod 755 /usr/local/bin/google-mcp`
-3. On the VPS, create `~/.config/google-mcp/credentials/google.json` (the GCP OAuth client) with mode 600
-4. On a **local** machine with a browser, run `google-mcp auth add --alias <name>` for each account (per [ADR-0003] auth-always-local rule)
-5. `scp ~/.config/google-mcp/tokens/*.json root@vps:/home/google-mcp/.config/google-mcp/tokens/`
-6. `chown -R google-mcp:google-mcp /home/google-mcp/.config && chmod 600 /home/google-mcp/.config/google-mcp/tokens/*.json`
-7. Install systemd unit: `cp deploy/google-mcp.service /etc/systemd/system/`
+1. Create `google-personal-mcp` system user: `useradd -r -s /usr/sbin/nologin -d /home/google-personal-mcp -m google-personal-mcp`
+2. Build release binary on a build host; `scp target/release/google-personal-mcp root@vps:/usr/local/bin/`; `chmod 755 /usr/local/bin/google-personal-mcp`
+3. On the VPS, create `~/.config/google-personal-mcp/credentials/google.json` (the GCP OAuth client) with mode 600
+4. On a **local** machine with a browser, run `google-personal-mcp auth add --alias <name>` for each account (per [ADR-0003] auth-always-local rule)
+5. `scp ~/.config/google-personal-mcp/tokens/*.json root@vps:/home/google-personal-mcp/.config/google-personal-mcp/tokens/`
+6. `chown -R google-personal-mcp:google-personal-mcp /home/google-personal-mcp/.config && chmod 600 /home/google-personal-mcp/.config/google-personal-mcp/tokens/*.json`
+7. Install systemd unit: `cp deploy/google-personal-mcp.service /etc/systemd/system/`
 8. Configure nginx: copy template, edit, `systemctl reload nginx`
-9. `systemctl enable --now google-mcp`
-10. Verify: `curl https://google-mcp.your-domain.tld/...` (expect MCP-protocol response)
+9. `systemctl enable --now google-personal-mcp`
+10. Verify: `curl https://google-personal-mcp.your-domain.tld/...` (expect MCP-protocol response)
 
 ### Process model
 
@@ -300,13 +300,13 @@ Metrics and `/healthz` are served on `127.0.0.1:9100` and intentionally NOT expo
 - `/healthz` enables systemd watchdog and external uptime monitoring.
 - Deployment story is concrete: one systemd unit, one nginx config, one INSTALL.md. The maintainer (or future them in 18 months) can reproduce a deploy from documentation.
 - systemd hardening (`ProtectSystem=strict`, `NoNewPrivileges`, etc.) is meaningful security with zero runtime cost. Excellence.
-- Auth-always-local + token-file-portability ([ADR-0003]) means the VPS user (`google-mcp` system user) never sees a browser flow. Tokens arrive via scp.
+- Auth-always-local + token-file-portability ([ADR-0003]) means the VPS user (`google-personal-mcp` system user) never sees a browser flow. Tokens arrive via scp.
 - Graceful shutdown (drain + flush) means restarts during deploy / config-change don't drop in-flight tool calls.
 
 **Negative:**
 
 - Metrics-exporter-prometheus is HTTP-server-spawning behavior; in stdio mode it requires a separate listener (or being disabled). Adds `[metrics]` config section.
-- The systemd hardening directives are conservative — if we ever need to write to a path outside `~/.config/google-mcp`, we'll hit `ProtectSystem=strict` and have to widen `ReadWritePaths`. Acceptable; the constraint is the point.
+- The systemd hardening directives are conservative — if we ever need to write to a path outside `~/.config/google-personal-mcp`, we'll hit `ProtectSystem=strict` and have to widen `ReadWritePaths`. Acceptable; the constraint is the point.
 - nginx reverse proxy adds an operator skill requirement. Mitigated by shipping a working template.
 - Log volume can grow; rotation is journald's job, not ours. Document `journalctl --vacuum-time=30d` for log retention if disk pressure becomes real.
 - We commit to `metrics` + `tracing` library APIs; future migrations to OpenTelemetry would be a real refactor.

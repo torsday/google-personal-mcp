@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "gmail_mcp=info".into()),
+                .unwrap_or_else(|_| "google_personal_mcp=info".into()),
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
@@ -23,13 +23,13 @@ async fn main() -> Result<()> {
 
     if command == "auth" {
         auth::run_auth_flow().await?;
-        eprintln!("✓ Authentication successful. Run `gmail-mcp` to start the server.");
+        eprintln!("✓ Authentication successful. Run `google-personal-mcp` to start the server.");
     } else {
         let token = auth::load_token().await?;
         let gmail_client = gmail::GmailClient::new(token);
         let server = tools::GmailServer::new(gmail_client);
 
-        tracing::info!("Gmail MCP server starting on stdio");
+        tracing::info!("google-personal-mcp starting on stdio");
         let service = server.serve(stdio()).await?;
         service.waiting().await?;
     }

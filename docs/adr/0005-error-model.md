@@ -39,7 +39,7 @@ pub enum Error {
     AuthRequired { account: String, reason: String },
 
     /// User specified an account alias that doesn't exist.
-    #[error("account `{account}` not found; run `google-mcp auth list` to see available accounts")]
+    #[error("account `{account}` not found; run `google-personal-mcp auth list` to see available accounts")]
     AccountNotFound { account: String },
 
     /// Resource not found (thread, message, label, event, etc.).
@@ -96,7 +96,7 @@ fn to_mcp_error(e: Error) -> rmcp::ErrorData {
         }
 
         // Re-auth is a model-actionable instruction (surface the account in the message
-        // so Claude can tell the user "run google-mcp auth refresh work").
+        // so Claude can tell the user "run google-personal-mcp auth refresh work").
         Error::AuthRequired { .. } => {
             rmcp::ErrorData::invalid_params(e.to_string(), None)
         }

@@ -24,7 +24,7 @@ If no decision were made, post-incident reconstruction depends on Gmail's own ac
 
 ## Decision
 
-The daemon writes an **append-only JSON Lines audit log** of every tool invocation, at `~/.config/google-mcp/audit/<YYYY-MM>.log`. One line per call. Sensitive fields are redacted by default; the operator can opt into verbose mode for personal-use single-user installs.
+The daemon writes an **append-only JSON Lines audit log** of every tool invocation, at `~/.config/google-personal-mcp/audit/<YYYY-MM>.log`. One line per call. Sensitive fields are redacted by default; the operator can opt into verbose mode for personal-use single-user installs.
 
 ### Record shape
 
@@ -73,7 +73,7 @@ The verbose mode exists because for a single-operator personal install, the oper
 ```toml
 [audit]
 enabled = true                                         # default on; can disable for testing
-dir = "~/.config/google-mcp/audit"
+dir = "~/.config/google-personal-mcp/audit"
 rotate = "monthly"                                     # "monthly" | "weekly" | "daily" | "size:<bytes>"
 verbose = false                                        # default redacted; true for full content
 fsync = "per_record"                                   # "per_record" | "batched" | "off"
@@ -130,7 +130,7 @@ The audit log is the only data on the daemon's disk that **cannot be reconstruct
 
 Recommended operator practice (documented in `deploy/INSTALL.md` and `mcp_status` audit field):
 
-1. Back up `~/.config/google-mcp/audit/` to a separate disk / cloud / git-crypt repo with cadence matching the operator's compliance needs (most personal-use cases: weekly).
+1. Back up `~/.config/google-personal-mcp/audit/` to a separate disk / cloud / git-crypt repo with cadence matching the operator's compliance needs (most personal-use cases: weekly).
 2. Encrypt at rest if the host disk isn't already encrypted (`age` or `gpg` over the rotated log files works fine; current month's open file is harder — do not encrypt the live log).
 3. The audit log is sensitive in two distinct ways: **operational pattern** (frequency / timing of agent activity is itself information) and, in `verbose = true` mode, **content** (subjects, recipients, query text). Verbose-mode logs warrant the same protection as the cache DB.
 
@@ -229,7 +229,7 @@ We choose (h). The verbose toggle is a one-line config change for the personal-u
 
 ## References
 
-- [ADR-0001](0001-monolithic-google-mcp-architecture.md) — single-binary, single-operator scope where this audit model fits
+- [ADR-0001](0001-monolithic-google-personal-mcp-architecture.md) — single-binary, single-operator scope where this audit model fits
 - [ADR-0005](0005-error-model.md) — `Error::Internal` raised on audit write failures
 - [ADR-0006](0006-config.md) — `[audit]` config section
 - [ADR-0008](0008-observability-and-deployment.md) — distinguishes audit (this) from tracing (debug logs); audit log is NOT subject to `RUST_LOG`

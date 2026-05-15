@@ -237,7 +237,7 @@ We choose (j). The `fanout: true` flag makes the difference obvious; consumers h
 - *Risk:* Fan-out total payload exceeds some MCP-protocol or transport limit.
   *Mitigation:* Per-account `max_results` limits scale linearly; total bounded. Streamable HTTP transport supports SSE chunks if responses get truly large (out of scope for v1; the typical fan-out fits in a normal response).
 - *Risk:* Account in `AuthRequired` state stays in fan-out responses indefinitely, creating noise.
-  *Mitigation:* Operator runs `google-mcp auth refresh <alias>` to fix; meanwhile the per-account error in fan-out responses is the diagnostic signal that something needs attention. `mcp_status` (per [ADR-0014](0014-status-introspection-tool.md)) surfaces stuck accounts proactively.
+  *Mitigation:* Operator runs `google-personal-mcp auth refresh <alias>` to fix; meanwhile the per-account error in fan-out responses is the diagnostic signal that something needs attention. `mcp_status` (per [ADR-0014](0014-status-introspection-tool.md)) surfaces stuck accounts proactively.
 - *Risk:* `[fanout] max_concurrent_accounts` is too low — slow fan-out for 10+ accounts.
   *Mitigation:* Tunable in config; documented; default is a reasonable starting point for a personal VPS.
 - *Risk:* Fan-out hides per-account quota status — heavy fan-out usage burns quotas across the board, the operator doesn't notice until everything fails.
@@ -247,7 +247,7 @@ We choose (j). The `fanout: true` flag makes the difference obvious; consumers h
 
 ## References
 
-- [ADR-0001](0001-monolithic-google-mcp-architecture.md) — single-binary architecture that makes in-process fan-out trivial
+- [ADR-0001](0001-monolithic-google-personal-mcp-architecture.md) — single-binary architecture that makes in-process fan-out trivial
 - [ADR-0002](0002-multi-account-architecture.md) — `account` parameter that this ADR extends; `send_email` requires explicit account (no default)
 - [ADR-0005](0005-error-model.md) — `Error::InvalidArgument` for destructive-tool fan-out rejection; per-account `Error::AuthRequired` etc. in fan-out responses
 - [ADR-0006](0006-config.md) — `[fanout]` config section
