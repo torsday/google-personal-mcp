@@ -22,7 +22,7 @@ The ADR process — numbering, statuses, the "v1 scope" convention, how to propo
 
 ## How to contribute (design phase)
 
-1. **Read the ADRs.** Start with [ADR-0000](docs/adr/0000-adr-process.md) for the corpus and the open-questions queue. Then [ADR-0001](docs/adr/0001-monolithic-google-personal-mcp-architecture.md), [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md), [ADR-0017](docs/adr/0017-secrets-at-rest.md), [ADR-0018](docs/adr/0018-email-content-trust.md) — the load-bearing decisions.
+1. **Read the SPEC and the ADRs.** Start with [SPEC.md](SPEC.md) for what the project is *for* (use cases, search-excellence criteria, non-goals). Then [ADR-0000](docs/adr/0000-adr-process.md) for the ADR corpus and open-questions queue. Then [ADR-0001](docs/adr/0001-monolithic-google-personal-mcp-architecture.md), [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md), [ADR-0017](docs/adr/0017-secrets-at-rest.md), [ADR-0018](docs/adr/0018-email-content-trust.md) — the load-bearing decisions.
 2. **Open an issue or a PR.** Disagreement with a specific decision is welcome; cite the ADR and the paragraph.
 3. **Propose a new ADR.** Open a PR adding `docs/adr/NNNN-<slug>.md` with `Status: Proposed`. Discussion happens in PR review.
 

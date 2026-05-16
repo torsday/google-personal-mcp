@@ -9,7 +9,7 @@
 
 ## Context
 
-The existing prototype is a single-purpose Gmail MCP server (originally crate `gmail-mcp`, renamed to `google-personal-mcp` on 2026-05-15 to match the broader scope) — working code at `src/auth.rs`, `src/gmail/`, `src/tools/mod.rs`, `src/main.rs`. The maintainer has confirmed willingness to discard it and rewrite cleanly. Two architectural questions need to be settled before any rewrite begins, because they shape every other decision (auth, error model, config, testing):
+A single-purpose Gmail MCP prototype existed at the time this ADR was written — originally crate `gmail-mcp`, renamed to `google-personal-mcp` on 2026-05-15 to match the broader scope. The prototype lived in `src/auth.rs`, `src/gmail/`, `src/tools/mod.rs`, `src/main.rs`; it was subsequently discarded on 2026-05-16 (commit `70d2f9f`) to free the design conversation from its shape. The full prototype is recoverable from git history at commit `377b558` if anything needs to come back. Two architectural questions had to be settled before the rewrite began, because they shape every other decision (auth, error model, config, testing):
 
 1. **Topology** — single monolithic binary spanning multiple services, modular per-service binaries, or hybrid workspace-with-shared-library?
 2. **Scope** — what data sources does this MCP cover?
@@ -152,8 +152,8 @@ We choose (b). Per the maintainer's framing: this MCP is a *data source* used by
 
 ## References
 
-- Existing prototype (to be discarded but referenced for `rmcp` macro shape and `oauth2` v5 + `reqwest` 0.13 token-exchange workaround): [src/auth.rs](../../src/auth.rs), [src/gmail/mod.rs](../../src/gmail/mod.rs), [src/gmail/types.rs](../../src/gmail/types.rs), [src/tools/mod.rs](../../src/tools/mod.rs)
-- [README.md](../../README.md) — needs updating to reflect Google-only scope (action item, not part of this ADR)
+- Discarded prototype (preserved in git history at commit `377b558`, referenced for `rmcp` macro shape and `oauth2` v5 + `reqwest` 0.13 token-exchange workaround). Files at the time: `src/auth.rs`, `src/gmail/mod.rs`, `src/gmail/types.rs`, `src/tools/mod.rs`.
+- [README.md](../../README.md), [SPEC.md](../../SPEC.md) — operator-facing description of scope and use cases
 - rmcp 1.5 documentation:
   - [`tool_router` attribute macro](https://docs.rs/rmcp-macros/1.5.0/rmcp_macros/attr.tool_router.html) — `router` and `vis` parameters; multiple impl block composition
   - [`ToolRouter<S>` struct](https://docs.rs/rmcp/1.5.0/rmcp/handler/server/router/tool/struct.ToolRouter.html) — `Add` impl requiring identical `S`

@@ -18,7 +18,7 @@ For a long-running daemon serving multiple accounts, error categorization is loa
 - **Bugs** (parse failures, panics caught at the tool boundary, internal invariant violations) are real ERRORs — they want loud logs with full context for ops.
 - **Security violations** (header injection in `send_email` — flagged in earlier design discussion) need their own variant so they can be detected, blocked, and audited separately.
 
-The prototype already pulls in `thiserror` 2 in `Cargo.toml` but doesn't use it. The cost of typed errors is approximately one Rust file (~150 lines).
+The discarded prototype evaluated `thiserror` 2 but never integrated it; the v0.2 rewrite will pin it from the start. The cost of typed errors is approximately one Rust file (~150 lines).
 
 ## Decision
 
@@ -231,5 +231,5 @@ We choose (c). The per-service granularity argument for (b) is real but doesn't 
 - [ADR-0003](0003-transport-stdio-and-streamable-http.md) — both transports map errors at the tool boundary identically (one mapping function, two transports)
 - [ADR-0004](0004-oauth-token-refresh.md) — refresh failure paths (`invalid_grant` → `AuthRequired`; transient → retry)
 - [ADR-0008](0008-observability-and-deployment.md) — structured tracing fields per error variant
-- `thiserror` 2 — the error-derive crate already in `Cargo.toml`
+- `thiserror` 2 — the error-derive crate the design assumes (added to `Cargo.toml` when v0.2 ships)
 - Google API [error response format](https://developers.google.com/workspace/gmail/api/guides/handle-errors) — body shape that the `Upstream` variant captures

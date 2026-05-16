@@ -22,7 +22,7 @@ This decision is load-bearing because it shapes:
 - Per-account rate limiting (Gmail's quota is per-user-per-second)
 - Whether the daemon supports adding/removing accounts without restart (hot-reload)
 
-If no decision were made, the prototype's single-token model would persist — usable for one account, broken for the maintainer's actual use case.
+If no decision were made, the natural starting point — the discarded prototype's single-token model — would be re-introduced in v0.2: usable for one account, broken for the maintainer's actual use case.
 
 ## Decision
 
@@ -123,7 +123,7 @@ Concretely:
 
 | Option | Pros | Cons |
 | --- | --- | --- |
-| (a) Single account only | Simplest implementation; matches the prototype | Rejected — explicit user requirement is 10+ accounts |
+| (a) Single account only | Simplest implementation; the shape the discarded prototype had | Rejected — explicit user requirement is 10+ accounts |
 | (b) Account-per-tool naming (`gmail_work_search_threads`, `gmail_personal_search_threads`, ...) | No tool param needed; static dispatch by tool name | Combinatorial explosion: 8 gmail tools × 10 accounts = 80 tools; breaks DRY catastrophically; tool list becomes unreadable for the model; adding an account means re-registering all tools |
 | **(c) Account as parameter on every tool** (chosen) | One tool per logical operation regardless of account count; model can dynamically select; supports default for single-account UX; tool list stays small and stable | Every tool description carries account-parameter documentation overhead; the "default account" concept is soft global state and needs care |
 | (d) Separate MCP server processes per account | Strong process-level isolation; per-account systemd units; per-account failure isolation | Operational nightmare for 10+ accounts; cross-account composition (e.g., "forward this work email to my personal account") becomes inter-process; massive resource waste; defeats the monolithic-daemon decision in ADR-0001 |

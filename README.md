@@ -6,6 +6,51 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server, to be writte
 
 This MCP is a **data source** consumed by other knowledge tools. It is not a knowledge layer itself — no summarization, no classification, no "smart" composition. Tools are low-level primitives that mirror Google's APIs.
 
+See [SPEC.md](SPEC.md) for concrete use cases and the search-excellence checklist.
+
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    subgraph Host["Host LLM"]
+        Claude["Claude Desktop /<br/>Claude Code /<br/>any MCP client"]
+    end
+
+    subgraph Daemon["google-personal-mcp daemon"]
+        Tools["Tool router<br/>(search, get, send, ...)"]
+        Auth["TokenManager<br/>(per-account refresh)"]
+        Audit["Audit log<br/>(v1.0)"]
+        Cache[("SQLite cache<br/>(v1.0)")]
+    end
+
+    subgraph Google["Google APIs"]
+        Gmail["Gmail<br/>v0.2"]
+        Cal["Calendar<br/>v0.3+"]
+        Other["Contacts, Tasks,<br/>Drive, Keep, ...<br/>future"]
+    end
+
+    subgraph Disk["~/.config/google-personal-mcp/ (0700)"]
+        TokensF[("tokens/&lt;alias&gt;.json<br/>0600")]
+        AccountsF["accounts.toml"]
+        ConfigF["config.toml"]
+        CredsF["credentials/google.json"]
+    end
+
+    Claude <-->|MCP protocol<br/>stdio · v0.2<br/>HTTP · v1.0| Tools
+    Tools --> Auth
+    Tools -.-> Audit
+    Tools -.-> Cache
+    Auth <-->|OAuth2 +<br/>REST| Gmail
+    Auth <-.->|OAuth2 +<br/>REST| Cal
+    Auth <-.->|OAuth2 +<br/>REST| Other
+    Auth <--> TokensF
+    Daemon -.reads.-> AccountsF
+    Daemon -.reads.-> ConfigF
+    Daemon -.reads.-> CredsF
+```
+
+Solid lines are v0.2; dotted lines are v0.3+ or v1.0. The daemon is one process per operator. Tokens live in `0600` files on disk; the daemon refuses to start if permissions are wider ([ADR-0017](docs/adr/0017-secrets-at-rest.md)).
+
 ## Why Rust
 
 The daemon is designed to run forever. Rust's lack of a GC means memory stays flat over days and weeks — no GC pauses, no heap drift, no periodic restarts. The resulting binary is small, self-contained, and deploys without a runtime.

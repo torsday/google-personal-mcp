@@ -149,7 +149,7 @@ Notable choices:
 - **`#[serde(deny_unknown_fields)]`**: typos in config keys produce a loud parse error rather than silently being ignored. Excellence is failing fast on operator mistakes.
 - **Tilde expansion (`~`) is honored** for path values. Implement via `shellexpand` crate (~50 lines, no system shell invocation).
 - **Validation runs at load time**, not lazily on first use. The daemon either starts with a known-good config or refuses to start.
-- **Defaults match prototype behavior** where the prototype has reasonable defaults; new defaults are conservative.
+- **Defaults follow the discarded prototype's behavior** where it had reasonable defaults; new defaults are conservative.
 
 ### Env var precedence (limited and documented)
 
