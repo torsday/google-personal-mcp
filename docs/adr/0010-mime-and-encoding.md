@@ -21,7 +21,7 @@ For the MCP's role as a Gmail data source consumed by knowledge tools, returning
 
 `mailparse` is the Rust ecosystem's standard for this. It handles every MIME pattern above plus charset conversion via `encoding_rs` underneath. `html2text` (or equivalent like `nanohtml2text`) handles HTML → plain-text rendering with reasonable conventions (links become `[text](url)`, lists indent, etc.).
 
-If no decision were made, the rewrite would inherit the prototype's broken body extraction — and "summarize my last 50 emails" returns 50 snippets-only when half the inbox is HTML.
+If no decision were made, the rewrite would re-introduce the discarded prototype's broken body extraction — and "summarize my last 50 emails" returns 50 snippets-only when half the inbox is HTML.
 
 ## Decision
 
@@ -172,7 +172,7 @@ This handles: ISO-8859-1, ISO-8859-15, Windows-1252, Shift_JIS, GB18030, EUC-KR,
 
 **Positive:**
 
-- HTML-only emails now produce useful `body_text`. The single biggest correctness bug in the prototype is fixed.
+- HTML-only emails produce useful `body_text` — avoiding the single biggest correctness bug the discarded prototype had.
 - Multipart traversal handles mixed/alternative/related/signed structures.
 - Charset conversion handles non-UTF-8 mail correctly (no mojibake, no UTF-8 errors crashing the parse).
 - Quoted-Printable and base64 transfer encodings both decoded.
