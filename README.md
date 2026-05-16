@@ -1,156 +1,69 @@
 # google-personal-mcp
 
-> **Status: design phase — code in this repo is a working prototype that is being rewritten from scratch.**
->
-> The architecture for the rewrite is captured in [`docs/adr/`](docs/adr/) — read those before sending PRs against the source tree. Highlights:
->
-> - Crate, binary, and repo are all **`google-personal-mcp`** (renamed from `gmail-mcp` on 2026-05-15, see [ADR-0001](docs/adr/0001-monolithic-google-personal-mcp-architecture.md)).
-> - **Scope: personal-data Google services only** — Gmail (Phase 1), Calendar, Contacts, Tasks, Drive, Keep, Photos, Docs/Sheets/Slides, Chat, YouTube *personal slice* (subscriptions / playlists / history / your channel). Out of scope: Maps, Translate, Cloud APIs, public-corpus YouTube — those belong in separate MCPs. This MCP is a *data source* consumed by other knowledge tools, not a knowledge layer itself.
-> - **Multi-account from day one** with hot-reload of the account registry ([ADR-0002](docs/adr/0002-multi-account-architecture.md)) and `account = "*"` fan-out for read tools ([ADR-0013](docs/adr/0013-cross-account-fan-out.md)).
-> - **Dual transport**: stdio (Claude Desktop integration) + Streamable HTTP (VPS daemon), selectable at runtime ([ADR-0003](docs/adr/0003-transport-stdio-and-streamable-http.md)).
-> - **Persistent SQLite cache + Gmail History API** for incremental sync ([ADR-0009](docs/adr/0009-caching-with-sqlite-and-history-api.md)) — 10-50× quota reduction in steady state.
-> - **Real MIME / charset handling** ([ADR-0010](docs/adr/0010-mime-and-encoding.md)) — HTML email, multipart, non-UTF-8.
-> - **Append-only audit log** of every operation ([ADR-0011](docs/adr/0011-audit-log.md)) — verifiable trail of agent activity.
-> - **Dry-run + automatic send-deduplication** for destructive ops ([ADR-0012](docs/adr/0012-idempotency-and-dry-run.md)) — safety nets against agent failure modes.
-> - **Self-introspection** via `mcp_status` tool ([ADR-0014](docs/adr/0014-status-introspection-tool.md)) — daemon health from inside the MCP session.
-> - Typed error model, configurable retry policy, structured logging, per-account rate limiting, Prometheus metrics, systemd + nginx deployment template — see [ADR-0004](docs/adr/0004-oauth-token-refresh.md) through [ADR-0008](docs/adr/0008-observability-and-deployment.md).
-> - **Tool surface and parameter conventions** locked in [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md). **Secrets at rest** (token-file permissions, redacted Debug, deferred keyring) in [ADR-0017](docs/adr/0017-secrets-at-rest.md). **Prompt-injection defense** (untrusted-content wrapping) in [ADR-0018](docs/adr/0018-email-content-trust.md).
->
-> The text below this banner describes the current prototype, not the rewrite target.
+> **Status: design phase.** The current `src/` is a Gmail-only prototype that is being rewritten from scratch. The rewrite target is described in [`docs/adr/`](docs/adr/) — start there.
 
----
+A [Model Context Protocol](https://modelcontextprotocol.io) server written in Rust that exposes personal Google services (Gmail first; Calendar, Contacts, Tasks, etc. to follow) to AI assistants. Designed as a single, always-on daemon: low memory footprint, multi-account from day one, suitable for a personal VPS or local machine.
 
-A Gmail [Model Context Protocol](https://modelcontextprotocol.io) server written in Rust. Gives Claude (or any MCP client) first-class access to your Gmail — search, read, archive, label, send, and trash — via a long-running stdio daemon with a minimal memory footprint.
-
-Built as the first module of a planned **unified personal data MCP**: a single, always-on Rust daemon that exposes your email, calendar, notes, and contacts to AI assistants.
-
----
+This MCP is a **data source** consumed by other knowledge tools. It is not a knowledge layer itself — no summarization, no classification, no "smart" composition. Tools are low-level primitives that mirror Google's APIs.
 
 ## Why Rust
 
-This server is designed to run **forever** on a small personal VPS or homelab node. Rust's lack of a garbage collector means memory stays flat over days and weeks — no GC pauses, no heap drift, no periodic restarts. The resulting binary is small, self-contained, and deploys without a runtime.
+The daemon is designed to run forever. Rust's lack of a GC means memory stays flat over days and weeks — no GC pauses, no heap drift, no periodic restarts. The resulting binary is small, self-contained, and deploys without a runtime.
 
----
+## Status and roadmap
 
-## Tools
+| Phase | What ships | Target |
+| --- | --- | --- |
+| **Prototype** (current `src/`) | Gmail-only, single-account, stdio | shipped (will be discarded) |
+| **v0.2** (in progress) | Rewrite per [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md): Gmail tools, single-account auth with refresh, stdio, enforced 0600 perms on token files | next milestone |
+| **v0.3–v0.x** | Multi-account, hot-reload, Calendar tools | |
+| **v1.0** | First public release. Caching, HTTP transport, audit log, observability, fan-out, `mcp_status`, additive-only tool-versioning policy | when v0.x is stable |
 
-| Tool | Description |
-|---|---|
-| `search_threads` | Search using Gmail query syntax (`from:`, `is:unread`, `has:attachment`, etc.) |
-| `get_thread` | Full thread content — headers, body text, labels |
-| `archive_thread` | Remove a thread from inbox (preserves it, fully searchable) |
-| `batch_archive` | Archive multiple threads in one call |
-| `modify_thread_labels` | Add or remove any label (`STARRED`, `UNREAD`, custom labels) |
-| `list_labels` | List all system and user-created labels with their IDs |
-| `send_email` | Send a new email or reply into an existing thread |
-| `trash_thread` | Move a thread to trash (recoverable for 30 days) |
-
----
-
-## Setup
-
-### 1. Google Cloud credentials
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create or select a project
-3. Enable the **Gmail API**
-4. Create **OAuth 2.0 credentials** → Desktop application
-5. Download `credentials.json`
-6. Place it at `~/.config/google-personal-mcp/credentials.json`
-
-### 2. Build
-
-```bash
-cargo build --release
-```
-
-### 3. Authenticate
-
-```bash
-./target/release/google-personal-mcp auth
-```
-
-This opens your browser, runs the OAuth2 PKCE flow, and saves a token to `~/.config/google-personal-mcp/token.json`. You only need to do this once.
-
-### 4. Wire into Claude
-
-Add to your MCP client config (e.g. `~/.claude/mcp.json` or Claude Desktop's `claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "gmail": {
-      "command": "/path/to/google-personal-mcp",
-      "args": []
-    }
-  }
-}
-```
-
----
+The cut between v0.x and v1.0 is deliberate: features only earn their keep when there's a second user or an external operator. v1-scope notes in each affected ADR record what is deferred.
 
 ## Architecture
 
-```
-src/
-├── main.rs          Entry point — `auth` subcommand or MCP stdio server
-├── auth.rs          OAuth2 PKCE flow, token persistence (~/.config/google-personal-mcp/)
-├── gmail/
-│   ├── mod.rs       GmailClient — typed wrappers around Gmail REST API
-│   └── types.rs     Thread, Message, Label, and related types
-└── tools/mod.rs     MCP ServerHandler — tool definitions and dispatch
-```
+The design is captured in 18 ADRs. The load-bearing ones:
 
-**Transport:** stdio (standard MCP pattern for local servers — stdout is the MCP wire, stderr is logs)
+- [ADR-0001](docs/adr/0001-monolithic-google-personal-mcp-architecture.md) — monolithic single-binary architecture, Google personal-data scope only
+- [ADR-0002](docs/adr/0002-multi-account-architecture.md) — multi-account registry, `account` parameter on every tool
+- [ADR-0004](docs/adr/0004-oauth-token-refresh.md) — proactive expiry refresh + 401 fallback, per-account
+- [ADR-0007](docs/adr/0007-testing-strategy.md) — three-layer testing (units, wiremock, ignored e2e)
+- [ADR-0012](docs/adr/0012-idempotency-and-dry-run.md) — `dry_run` and send-deduplication on destructive tools
+- [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md) — locked v1 tool inventory + parameter conventions
+- [ADR-0017](docs/adr/0017-secrets-at-rest.md) — token-file permissions, redacted Debug, deployment guidance
+- [ADR-0018](docs/adr/0018-email-content-trust.md) — untrusted-content wrapping; prompt-injection defense
 
-**Auth:** OAuth2 with PKCE. The `oauth2` crate handles auth URL generation and PKCE challenge/verifier; the token exchange POST is done directly with `reqwest` to avoid crate version conflicts. Tokens are persisted as JSON and loaded at startup.
+See [ADR-0000](docs/adr/0000-adr-process.md) for the full corpus and ADR process.
 
-**Gmail API:** All calls go through `GmailClient` using `reqwest` + `serde_json`. Query parameters are built with `url::Url::query_pairs_mut()`.
+## Setup (prototype)
 
----
+The prototype builds and runs as-is. The instructions below describe the prototype, not the rewrite — they will change.
 
-## Planned: Unified Personal Data MCP
+1. **GCP project.** Each user creates their own. Go to [Google Cloud Console](https://console.cloud.google.com/), create a project, enable the Gmail API, create OAuth 2.0 credentials of type "Desktop application," and download the JSON.
+2. **Place credentials.** `~/.config/google-personal-mcp/credentials.json` (will move to `credentials/google.json` in the rewrite per [ADR-0006](docs/adr/0006-config.md)).
+3. **Build.** `cargo build --release`
+4. **Authenticate.** `./target/release/google-personal-mcp auth` — browser-based PKCE flow, one-time.
+5. **Wire into your MCP client.** Example for Claude Desktop:
+   ```json
+   {
+     "mcpServers": {
+       "gmail": {
+         "command": "/absolute/path/to/google-personal-mcp",
+         "args": []
+       }
+     }
+   }
+   ```
 
-This Gmail module is intended as the first piece of a broader personal data server. The roadmap:
+## Contributing
 
-- **Phase 1 — Gmail** ← you are here
-- **Phase 2 — Google Calendar** — events, availability, scheduling
-- **Phase 3 — Notes / Tasks** — personal knowledge base integration
-- **Phase 4 — Contacts** — cross-module entity resolution (email ↔ calendar ↔ contacts)
-- **Phase 5 — Token refresh** — automatic OAuth2 token refresh before expiry
+See [CONTRIBUTING.md](CONTRIBUTING.md). The repo is design-first: non-trivial changes need an ADR. The ADR process is documented in [ADR-0000](docs/adr/0000-adr-process.md).
 
-The long-term goal is a single `personal-mcp` binary: one always-on daemon, one auth flow, one config file, exposing a unified personal information graph to any MCP client.
+## Security
 
----
-
-## Development
-
-```bash
-# Build
-cargo build
-
-# Run with debug logging
-RUST_LOG=gmail_mcp=debug ./target/debug/google-personal-mcp
-
-# Check for issues
-cargo clippy
-cargo fmt
-```
-
-### Key dependencies
-
-| Crate | Purpose |
-|---|---|
-| `rmcp` | MCP server SDK (official, from modelcontextprotocol org) |
-| `tokio` | Async runtime |
-| `reqwest` | HTTP client for Gmail API calls |
-| `oauth2` | OAuth2 PKCE flow (auth URL + code verifier) |
-| `serde` / `serde_json` | Serialization |
-| `url` | URL + query string construction |
-| `tracing` | Structured logging to stderr |
-
----
+See [SECURITY.md](SECURITY.md). The daemon holds long-lived OAuth refresh tokens for personal Google accounts; treat the config directory accordingly. To report a vulnerability, use [GitHub Security Advisories](https://github.com/torsday/google-personal-mcp/security/advisories/new).
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
