@@ -17,6 +17,8 @@ If no decision were made: we'd have a daemon that "works" but provides no signal
 
 ## Decision
 
+**v1 scope.** The full design below is the target for **v1.0** (first public release). For **v0.x** — the single-user phase before public release — implement only structured `tracing` logging to stderr, the systemd unit (with the [ADR-0017](0017-secrets-at-rest.md) dedicated-user / `StateDirectory=` update), and a liveness `/healthz` that returns 200 if the daemon is running. **Defer to v1.0:** the Prometheus exporter and `/metrics` endpoint, the 12-metric inventory, the alertmanager rules, and the SLO table. These earn their keep when an external operator runs the daemon with their own monitoring stack; for the maintainer-as-sole-user, `journalctl -u google-personal-mcp` is the dashboard. The metric crate seams can be added when the exporter ships — premature instrumentation is wasted code.
+
 ### Observability — three pillars (logging, metrics, health), implemented per the constraints below
 
 #### Logging

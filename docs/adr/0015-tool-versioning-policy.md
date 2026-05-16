@@ -21,6 +21,8 @@ If no decision were made: every refactor risks silent breakage; downstream consu
 
 ## Decision
 
+**v1 scope.** The additive-only policy and deprecation cycle apply from **v1.0** onward — the day the repo is published as the first public release and external consumers can pin to it. For **v0.x**, the tool surface may change however the maintainer needs; pre-1.0 the version bump *is* the breakage signal. The snapshot-test infrastructure ([ADR-0007](0007-testing-strategy.md) Layer 4) is fine to land in v0.x as a "what does the tool surface look like right now?" diff aid; the *policy* it enforces — additive-only, `_v2`-suffix renames, six-month sunset windows, deprecation banners — does not apply until v1.0 ships. Tag v1.0 the day you advertise the repo publicly; until then, break things as needed.
+
 We will adopt an **additive-only versioning policy** for the tool surface, with **snapshot-test enforcement** in CI.
 
 ### What "additive-only" means
