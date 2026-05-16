@@ -79,15 +79,15 @@ The load-bearing capability. Gmail's query syntax is the input; `search_threads`
 #### What makes search excellent
 
 - **Pass-through to Gmail's native query language.** Operators get the full expressive power of `from:`, `to:`, `subject:`, `has:attachment`, `filename:`, `label:`, `category:`, `after:`, `before:`, `older_than:`, `newer_than:`, `larger:`, `smaller:`, `is:starred/unread/important`, `in:inbox/sent/trash/spam`, `list:`, `deliveredto:`, `rfc822msgid:`, free-text — without re-implementing any of it.
-- **Rich result metadata.** `search_threads` returns enough per-thread data (snippet, latest sender, subject, internal date, label list, message count, attachment indicator) that the host LLM can decide whether to drill in with `get_thread` *without a follow-up call per result*. **(Open question for v0.2:** the response shape in [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md) doesn't yet pin this metadata down; file an ADR or clarify in the implementation.)
+- **Rich result metadata.** `search_threads` returns enough per-thread data (`subject_untrusted`, `from_untrusted`, `snippet_untrusted`, `internal_date`, `label_ids`, `message_count`, `has_attachments`, `size_estimate`) that the host LLM can decide whether to drill in with `get_thread` *without a follow-up call per result*. Schema pinned in [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md) per-tool schemas.
 - **Predictable ordering.** Results come back newest-first by Gmail's `internalDate`, matching Gmail's own UI behavior. Operators can re-sort client-side.
 - **Cursor-based pagination.** `page_token` round-trips work for large result sets without losing place.
 - **Combinable with `get_thread` for drill-down.** Search finds threads; `get_thread` returns full content. The two together are the read path.
 
 ### Triage and bulk operations
 
-22. *"Bulk-label every email from `vendor@example` with my custom `archive-candidate` label so I can review and decide later."* — `search_threads` for the sender, then `modify_thread_labels` per thread to add the label. **(Gap:** there is no `batch_modify_thread_labels` in v0.2 ([ADR-0016](docs/adr/0016-tool-surface-and-conventions.md)). Either add it or accept N tool calls.)
-23. *"Trash every Promotions email from the last week, but keep the ones from `team@my-favorite-blog.example`."* — `search_threads` `"category:promotions newer_than:7d"`, host filters out the keep-list, then `trash_thread` per remaining thread. **(Gap:** no `batch_trash` in v0.2. Same call-out as above.)
+22. *"Bulk-label every email from `vendor@example` with my custom `archive-candidate` label so I can review and decide later."* — `search_threads` for the sender, then `batch_modify_thread_labels` with `add_label_ids: ["Label_archive-candidate"]`.
+23. *"Trash every Promotions email from the last week, but keep the ones from `team@my-favorite-blog.example`."* — `search_threads` `"category:promotions newer_than:7d"`, host filters out the keep-list, then `batch_trash` over the remaining thread IDs.
 24. *"Archive every unread email older than 90 days from notification-style senders."* — `search_threads` + `batch_archive` (already in v0.2).
 25. *"Find every starred thread I've forgotten about and unstar the ones older than 6 months."* — `search_threads` `"is:starred older_than:6m"` + `modify_thread_labels` removing `STARRED`.
 
@@ -106,7 +106,7 @@ The load-bearing capability. Gmail's query syntax is the input; `search_threads`
 ### Cross-account workflows (mostly v1.0)
 
 32. *"What's unread across all my accounts right now?"* — v0.2: iterate `search_threads` per account. v1.0: `account: "*"` per [ADR-0013](docs/adr/0013-cross-account-fan-out.md).
-33. *"Send from my personal account but blind-copy my work account."* — `send_email` from `personal`, host sends a second `send_email` to the work address (or includes it as BCC if the schema supports it — currently no in [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md); host has to work around).
+33. *"Send from my personal account but blind-copy my work account."* — `send_email` from `personal` with `bcc: ["work@example.com"]`.
 34. *"Search this domain across every account I have to see all the touchpoints."* — same shape as #32.
 
 ### Account introspection
