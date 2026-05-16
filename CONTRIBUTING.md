@@ -1,6 +1,8 @@
 # Contributing
 
-Welcome. This repo is in the **design phase** — the current `src/` is a prototype scheduled for replacement, and the architecture is captured in 18 ADRs under [`docs/adr/`](docs/adr/). Read those before opening a non-trivial PR.
+This repo is in the **design phase**. There is no code yet — the prior Gmail-only prototype was discarded so its shape wouldn't constrain the rewrite. The current contributable surface is the design itself: 19 ADRs under [`docs/adr/`](docs/adr/).
+
+When v0.2 implementation begins, this document will gain sections on local development, testing, and code style. For now, read on for how the design conversation works.
 
 ## Design-first culture
 
@@ -12,88 +14,38 @@ Non-trivial changes need an ADR before code. "Non-trivial" means anything that t
 - The config schema
 - Persistence (cache, audit log, tokens)
 - The threat model
+- The deployment model
 
-Bug fixes, refactors that preserve behavior, doc updates, and additive tests do not need an ADR. When in doubt, open an issue or a draft PR and ask.
+Bug fixes, behavior-preserving refactors, doc updates, additive tests, and lint-config tweaks do not need an ADR. When in doubt: write the ADR. The cost is one file; the cost of a load-bearing decision made implicitly is much higher six months later.
 
 The ADR process — numbering, statuses, the "v1 scope" convention, how to propose one — is documented in [ADR-0000](docs/adr/0000-adr-process.md).
 
-## Local development setup
+## How to contribute (design phase)
 
-### 1. Toolchain
+1. **Read the ADRs.** Start with [ADR-0000](docs/adr/0000-adr-process.md) for the corpus and the open-questions queue. Then [ADR-0001](docs/adr/0001-monolithic-google-personal-mcp-architecture.md), [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md), [ADR-0017](docs/adr/0017-secrets-at-rest.md), [ADR-0018](docs/adr/0018-email-content-trust.md) — the load-bearing decisions.
+2. **Open an issue or a PR.** Disagreement with a specific decision is welcome; cite the ADR and the paragraph.
+3. **Propose a new ADR.** Open a PR adding `docs/adr/NNNN-<slug>.md` with `Status: Proposed`. Discussion happens in PR review.
 
-`rust-toolchain.toml` pins the Rust version. `rustup` will install it on first build.
+The open-questions queue at the bottom of [ADR-0000](docs/adr/0000-adr-process.md) lists known gaps where new ADRs would be welcome — quota model, attachment composition, data retention, HTTP-transport auth, keyring backend.
 
-```bash
-cargo build
-cargo nextest run    # or `cargo test` if you don't have nextest
-cargo clippy --all-targets -- -D warnings
-cargo fmt --all
-```
+## What will change when v0.2 starts
 
-CI runs all of the above plus `cargo deny check` (see [.github/workflows/ci.yml](.github/workflows/ci.yml)). Match CI locally before opening a PR.
+When the first code commit lands, this file will grow sections on:
 
-Install once:
+- Toolchain installation and the `cargo` workflow
+- The three test layers from [ADR-0007](docs/adr/0007-testing-strategy.md)
+- How each contributor sets up their own GCP OAuth client and dedicated test Google account
+- Code style enforcement (`cargo fmt`, `cargo clippy`, `cargo deny`)
+- Commit conventions
 
-```bash
-cargo install cargo-nextest --locked
-cargo install cargo-deny --locked
-```
-
-### 2. Your own GCP project
-
-Each contributor needs their own Google Cloud project and OAuth client. The maintainer's credentials are not redistributed. One-time setup:
-
-1. [Google Cloud Console](https://console.cloud.google.com/) → create project.
-2. Enable **Gmail API** (and any other APIs the PR touches).
-3. **APIs & Services → OAuth consent screen** → choose **External**, fill in the required fields, add yourself as a test user.
-4. **Credentials → Create credentials → OAuth client ID → Desktop application**. Download the JSON.
-5. Place at `~/.config/google-personal-mcp/credentials.json` (rewrite will move to `~/.config/google-personal-mcp/credentials/google.json` per [ADR-0006](docs/adr/0006-config.md)).
-6. Run the auth flow: `./target/debug/google-personal-mcp auth` (prototype) — or whatever the rewrite renames it to.
-
-### 3. A separate test account
-
-[ADR-0007](docs/adr/0007-testing-strategy.md) Layer 3 — end-to-end smoke tests — runs against a real Gmail account. **Never use your primary account.** Create a dedicated test Google account, register it under a separate alias, and point the e2e harness at it via `GOOGLE_MCP_TEST_CONFIG_DIR`. See ADR-0007 for the exact layout.
-
-Destructive e2e tests are gated on a second env var, `GOOGLE_MCP_ALLOW_DESTRUCTIVE_E2E=1`. Do not set it unless you know what you are doing.
-
-## Testing expectations
-
-[ADR-0007](docs/adr/0007-testing-strategy.md) defines four layers:
-
-1. **Pure unit tests** (`mod tests` in each file): parsing, mapping, validation, math. Required for any non-trivial logic.
-2. **`wiremock` integration tests**: HTTP-touching code. One test per status-code path per endpoint (200, 401, 404, 429, 5xx, malformed JSON). Required for new Google API calls.
-3. **Ignored e2e smoke tests**: real Gmail behind `#[ignore]`. Run manually before release.
-4. **Snapshot tests** (`insta`): tool descriptors and JSON schemas. Required for any tool surface change.
-
-There is no enforced coverage percentage. Coverage as a number is a lying metric; coverage as a tool for finding gaps is welcome (`cargo llvm-cov`).
-
-## Code style
-
-- `cargo fmt` is canonical; CI enforces.
-- `cargo clippy` with `-D warnings`; CI enforces.
-- Naming follows [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md) for tool surface (e.g. `account` not `acct`, `max_results` not `limit`).
-- No comments that restate code. Comments explain *why* — a constraint, an invariant, a workaround.
-- No `unwrap()` / `expect()` in non-test code outside the startup path. Use the typed `Error` enum per [ADR-0005](docs/adr/0005-error-model.md).
-- Never log `access_token`, `refresh_token`, or `client_secret`. [ADR-0017](docs/adr/0017-secrets-at-rest.md) covers the redaction pattern; the format-output unit test enforces it.
+None of that infrastructure exists yet, on purpose.
 
 ## Commit and PR style
 
 - **Conventional Commits** (`type(scope): subject` — imperative, lowercase, no trailing period). Common types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `perf`, `ci`.
-- One logical change per commit. Atomic commits are easier to review and to revert.
-- PRs reference the ADR(s) they implement or that govern the change. PRs that violate an ADR need to update the ADR (with rationale) in the same PR.
+- One logical change per commit.
+- PRs that touch ADRs explain whether they propose a new decision, accept an existing proposal, or supersede an accepted ADR.
 
-## What lives where
+## Reporting issues
 
-- `src/` — current prototype. Will be discarded.
-- `docs/adr/` — architectural decisions. See [ADR-0000](docs/adr/0000-adr-process.md) for the corpus.
-- `tests/` — integration and e2e tests (when added).
-- `.github/workflows/ci.yml` — required checks. Run locally before pushing.
-- `clippy.toml`, `deny.toml` — lint configuration.
-
-## Reporting bugs
-
-Non-security bugs: open an issue with a minimal reproduction. Security issues: see [SECURITY.md](SECURITY.md).
-
-## Questions
-
-Open an issue with the `question` label or start a discussion. Pre-v1.0 the maintainer is the sole reviewer; expect best-effort response.
+Non-security issues: open a GitHub issue. Security issues: see [SECURITY.md](SECURITY.md).
