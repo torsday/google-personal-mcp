@@ -26,6 +26,8 @@ If no decision were made, multi-account becomes a feature the model can't actual
 
 ## Decision
 
+**v1 scope.** Fan-out is **deferred to v1.0**. For **v0.x**, every tool takes `account: String` (singular, required), per [ADR-0016](0016-tool-surface-and-conventions.md). The design below is the implementation target once fan-out is actually needed. The trigger for promotion to v1.0: the maintainer has manually issued the same read call against 3+ accounts in a single session enough times to identify the *specific* call shapes that warrant fan-out. Building generic fan-out before that signal produces an abstraction that may not fit the eventual specific need.
+
 We will support fan-out on **read tools only**, via two equivalent forms:
 
 1. `account = "*"` — fan out to all enabled accounts in the registry.

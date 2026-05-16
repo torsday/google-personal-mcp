@@ -23,6 +23,8 @@ If no decision were made, every "is this thing healthy" question requires shell 
 
 ## Decision
 
+**v1 scope.** `mcp_status` is **deferred to v1.0**. For **v0.x**, the maintainer-as-operator observes daemon health with `systemctl status google-personal-mcp`, `journalctl -u google-personal-mcp`, and direct inspection of the config and token directories. The case for `mcp_status` is "I'm inside an MCP session and need daemon state without dropping to a shell" — that's a value proposition for external consumers, not for the single-user phase. The tool also touches the audit log, cache, token manager, and metrics layer (all themselves deferred per [ADR-0008](0008-observability-and-deployment.md) v1 scope, [ADR-0009](0009-caching-with-sqlite-and-history-api.md), [ADR-0011](0011-audit-log.md)), so cutting it from v0.x is the single largest scope reduction available. The design below is the target for v1.0.
+
 We will add a single tool `mcp_status` that returns a structured snapshot of the daemon's state. Read-only, fast (in-memory state mostly), no PII beyond what the operator already sees in `list_accounts`.
 
 ### Tool signature
