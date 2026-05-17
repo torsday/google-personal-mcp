@@ -8,6 +8,7 @@ mod http;
 mod observability;
 mod perm_check;
 mod server;
+mod tools;
 
 use std::collections::HashMap;
 use std::process::ExitCode;
