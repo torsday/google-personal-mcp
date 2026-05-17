@@ -26,11 +26,11 @@ lint:
 
 # Run tests via nextest (per ADR-0007)
 test:
-    cargo nextest run --all-features --locked
+    cargo nextest run --all-features --locked --no-tests=warn
 
 # Run a single test by name
 test-one name:
-    cargo nextest run --all-features --locked {{name}}
+    cargo nextest run --all-features --locked --no-tests=warn {{name}}
 
 # Run the ignored e2e smoke tests against GOOGLE_MCP_TEST_CONFIG_DIR
 test-e2e:
