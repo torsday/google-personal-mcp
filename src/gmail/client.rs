@@ -17,12 +17,14 @@ use serde::Serialize;
 use crate::auth::tokens::{RefreshTransport, ReqwestRefreshTransport, TokenManager};
 use crate::error::Error;
 use crate::http::{execute_with_retry, RetryPolicy};
+use crate::rate_limit::KeyedRateLimiter;
 
 pub(crate) struct GmailClient<T: RefreshTransport = ReqwestRefreshTransport> {
     base_url: String,
     tokens: Arc<TokenManager<T>>,
     http: reqwest::Client,
     retry: RetryPolicy,
+    rate_limiter: Arc<KeyedRateLimiter>,
 }
 
 impl<T: RefreshTransport> GmailClient<T> {
@@ -39,7 +41,17 @@ impl<T: RefreshTransport> GmailClient<T> {
             tokens,
             http,
             retry: RetryPolicy::default(),
+            rate_limiter: Arc::new(KeyedRateLimiter::default()),
         }
+    }
+
+    /// Inject a shared rate limiter — useful when multiple clients should
+    /// share the same per-account budget (e.g. Gmail + future Calendar
+    /// clients counted against the same Google project quota).
+    #[cfg(test)]
+    pub(crate) fn with_rate_limiter(mut self, rate_limiter: Arc<KeyedRateLimiter>) -> Self {
+        self.rate_limiter = rate_limiter;
+        self
     }
 
     #[cfg(test)]
@@ -48,13 +60,17 @@ impl<T: RefreshTransport> GmailClient<T> {
         self
     }
 
-    /// Authenticated GET. Path is appended to `base_url` verbatim — callers
-    /// build the full path (including `?key=value` query strings).
+    /// Authenticated GET. `cost` is the per-call quota cost from
+    /// [`crate::gmail::quota::GmailMethod::cost`]; the rate limiter is
+    /// consulted before any network I/O and returns `Error::RateLimited`
+    /// immediately on exhaustion.
     pub(crate) async fn authed_get<R: DeserializeOwned>(
         &self,
         account: &str,
         path: &str,
+        cost: u32,
     ) -> Result<R, Error> {
+        self.rate_limiter.try_acquire(account, cost)?;
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .send_with_401_fallback(account, |token| self.http.get(&url).bearer_auth(token))
@@ -62,13 +78,15 @@ impl<T: RefreshTransport> GmailClient<T> {
         parse_json(resp).await
     }
 
-    /// Authenticated POST. Body is sent as JSON.
+    /// Authenticated POST. See [`Self::authed_get`] for the `cost` contract.
     pub(crate) async fn authed_post<B: Serialize + Sync, R: DeserializeOwned>(
         &self,
         account: &str,
         path: &str,
+        cost: u32,
         body: &B,
     ) -> Result<R, Error> {
+        self.rate_limiter.try_acquire(account, cost)?;
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .send_with_401_fallback(account, |token| {
@@ -243,7 +261,7 @@ mod tests {
             .await;
 
         let client = make_client(&server.uri(), "ACCESS-1", None);
-        let body: EchoBody = client.authed_get("work", "/v1/me").await.expect("ok");
+        let body: EchoBody = client.authed_get("work", "/v1/me", 1).await.expect("ok");
         assert_eq!(body, EchoBody { ok: true });
     }
 
@@ -297,7 +315,7 @@ mod tests {
         let client = make_client(&server.uri(), "STALE", Some(refresh));
 
         let body: EchoBody = client
-            .authed_get("work", "/v1/me")
+            .authed_get("work", "/v1/me", 1)
             .await
             .expect("should recover from 401");
         assert_eq!(body, EchoBody { ok: true });
@@ -318,7 +336,7 @@ mod tests {
         let client = make_client(&server.uri(), "STALE", Some(refresh));
 
         let err = client
-            .authed_get::<EchoBody>("work", "/v1/me")
+            .authed_get::<EchoBody>("work", "/v1/me", 1)
             .await
             .expect_err("must fail");
         assert!(
@@ -347,7 +365,7 @@ mod tests {
 
         let client = make_client(&server.uri(), "ACCESS", None);
         let started = std::time::Instant::now();
-        let body: EchoBody = client.authed_get("work", "/v1/me").await.expect("ok");
+        let body: EchoBody = client.authed_get("work", "/v1/me", 1).await.expect("ok");
         assert_eq!(body, EchoBody { ok: true });
         // Retry-After: 0 → effectively no wait.
         assert!(
@@ -369,7 +387,7 @@ mod tests {
 
         let client = make_client(&server.uri(), "ACCESS", None);
         let err = client
-            .authed_get::<EchoBody>("work", "/v1/me")
+            .authed_get::<EchoBody>("work", "/v1/me", 1)
             .await
             .expect_err("must fail");
         match err {
@@ -395,7 +413,7 @@ mod tests {
 
         let client = make_client(&server.uri(), "ACCESS", None);
         let err = client
-            .authed_get::<EchoBody>("work", "/v1/me")
+            .authed_get::<EchoBody>("work", "/v1/me", 1)
             .await
             .expect_err("must fail");
         assert!(
@@ -411,5 +429,92 @@ mod tests {
         assert!(is_unauthorized(StatusCode::UNAUTHORIZED));
         assert!(!is_unauthorized(StatusCode::OK));
         assert!(!is_unauthorized(StatusCode::FORBIDDEN));
+    }
+
+    // ── Rate limiter wired in (AC) ──────────────────────────────────────────
+
+    /// Builds a client with an injected limiter — separate helper because
+    /// the limiter has to be wired through `with_rate_limiter` before the
+    /// client is wrapped in an `Arc`.
+    fn client_with_limiter(
+        base_url: &str,
+        initial_token: &str,
+        limiter: Arc<KeyedRateLimiter>,
+    ) -> Arc<GmailClient<MockRefreshTransport>> {
+        let tokens = Arc::new(TokenManager::new(
+            HashMap::from([("work".to_owned(), fresh_state(initial_token))]),
+            MockRefreshTransport::new(vec![]),
+            "https://example/token",
+            std::env::temp_dir().join(format!("gpm-gc-rl-{}", std::process::id())),
+        ));
+        std::fs::create_dir_all(
+            std::env::temp_dir().join(format!("gpm-gc-rl-{}", std::process::id())),
+        )
+        .expect("mkdir");
+        Arc::new(
+            GmailClient::new(base_url, tokens, reqwest::Client::new())
+                .with_retry(RetryPolicy::for_tests())
+                .with_rate_limiter(limiter),
+        )
+    }
+
+    #[tokio::test]
+    async fn rate_limit_short_circuits_before_network() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"ok":true}"#))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = client_with_limiter(
+            &server.uri(),
+            "ACCESS",
+            Arc::new(KeyedRateLimiter::new(0, 1)),
+        );
+        let err = client
+            .authed_get::<EchoBody>("work", "/v1/me", 1)
+            .await
+            .expect_err("must rate-limit");
+        assert!(
+            matches!(err, Error::RateLimited { ref account, .. } if account == "work"),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_requests_some_get_rate_limited() {
+        // Tight budget: 5 units, cost 1 → exactly 5 of 20 succeed.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"ok":true}"#))
+            .mount(&server)
+            .await;
+        let client = client_with_limiter(
+            &server.uri(),
+            "ACCESS",
+            Arc::new(KeyedRateLimiter::new(5, 1)),
+        );
+
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let c = client.clone();
+            handles.push(tokio::spawn(async move {
+                c.authed_get::<EchoBody>("work", "/v1/me", 1).await
+            }));
+        }
+        let mut ok = 0;
+        let mut rate_limited = 0;
+        for h in handles {
+            match h.await.expect("join") {
+                Ok(_) => ok += 1,
+                Err(Error::RateLimited { .. }) => rate_limited += 1,
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+        }
+        assert_eq!(ok, 5, "exactly 5 should succeed (budget 5, cost 1 each)");
+        assert_eq!(rate_limited, 15, "the rest should be rate-limited");
     }
 }

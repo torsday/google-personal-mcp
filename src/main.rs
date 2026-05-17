@@ -7,6 +7,7 @@ mod gmail;
 mod http;
 mod observability;
 mod perm_check;
+mod rate_limit;
 mod server;
 mod tools;
 
