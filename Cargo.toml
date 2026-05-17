@@ -74,3 +74,8 @@ toml = "0.8"
 mailparse = "0.16"
 html2text = { version = "0.15", default-features = false }
 encoding_rs = "0.8"
+
+shellexpand = "3"
+
+[dev-dependencies]
+tempfile = "3"

@@ -63,6 +63,16 @@ pub(crate) enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Configuration could not be loaded or validated.
+    #[error("config error in `{path}`: {message}")]
+    Config { path: String, message: String },
+
+    /// File or directory has wider-than-required permissions, or is a rejected
+    /// symlink. Refuses startup per ADR-0017. The `message` is a complete
+    /// remediation hint (mode, expected mode, and the `chmod` command).
+    #[error("insecure permissions on `{path}`: {message}")]
+    InsecurePermissions { path: String, message: String },
+
     /// Catch-all for anything not yet categorized. Treated as a bug to triage.
     #[error("internal error in {context}: {source}")]
     Internal {
@@ -122,7 +132,11 @@ pub(crate) fn to_mcp_error(e: &Error) -> rmcp::ErrorData {
         }
 
         // Bugs and unexpected failures — log full chain at ERROR.
-        Error::Parse { .. } | Error::Io(_) | Error::Internal { .. } => {
+        Error::Parse { .. }
+        | Error::Io(_)
+        | Error::Config { .. }
+        | Error::InsecurePermissions { .. }
+        | Error::Internal { .. } => {
             tracing::error!(error = ?e, "internal error in tool dispatch");
             rmcp::ErrorData::internal_error(msg, None)
         }
