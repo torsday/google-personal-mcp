@@ -343,6 +343,11 @@ pub(crate) struct RateLimitConfig {
 pub(crate) struct RateEntry {
     pub(crate) requests_per_second: u32,
     pub(crate) burst: u32,
+    /// Per-GCP-project daily quota cap in units. Gmail's documented limit
+    /// is 1,200,000 units/day per project. Set to `0` to disable the
+    /// per-project bucket (per-account bucket still applies). See #30.
+    #[serde(default = "default_per_project_daily_units")]
+    pub(crate) per_project_daily_units: u64,
 }
 
 impl Default for RateEntry {
@@ -350,8 +355,13 @@ impl Default for RateEntry {
         Self {
             requests_per_second: 5,
             burst: 20,
+            per_project_daily_units: default_per_project_daily_units(),
         }
     }
+}
+
+const fn default_per_project_daily_units() -> u64 {
+    crate::project_quota::GMAIL_DEFAULT_PROJECT_DAILY_UNITS
 }
 
 fn default_gmail_rate() -> RateEntry {

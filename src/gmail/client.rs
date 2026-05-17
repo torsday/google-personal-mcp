@@ -17,6 +17,7 @@ use serde::Serialize;
 use crate::auth::tokens::{RefreshTransport, ReqwestRefreshTransport, TokenManager};
 use crate::error::Error;
 use crate::http::{execute_with_retry, RetryPolicy};
+use crate::project_quota::{project_id_from_client_id, ProjectQuotaRegistry};
 use crate::rate_limit::KeyedRateLimiter;
 
 pub(crate) struct GmailClient<T: RefreshTransport = ReqwestRefreshTransport> {
@@ -25,6 +26,9 @@ pub(crate) struct GmailClient<T: RefreshTransport = ReqwestRefreshTransport> {
     http: reqwest::Client,
     retry: RetryPolicy,
     rate_limiter: Arc<KeyedRateLimiter>,
+    /// Per-GCP-project daily-quota tracker (issue #30). `None` skips the
+    /// project-level check entirely — useful for tests that don't care.
+    project_quota: Option<Arc<ProjectQuotaRegistry>>,
 }
 
 impl<T: RefreshTransport> GmailClient<T> {
@@ -42,6 +46,7 @@ impl<T: RefreshTransport> GmailClient<T> {
             http,
             retry: RetryPolicy::default(),
             rate_limiter: Arc::new(KeyedRateLimiter::default()),
+            project_quota: None,
         }
     }
 
@@ -52,6 +57,29 @@ impl<T: RefreshTransport> GmailClient<T> {
     pub(crate) fn with_rate_limiter(mut self, rate_limiter: Arc<KeyedRateLimiter>) -> Self {
         self.rate_limiter = rate_limiter;
         self
+    }
+
+    /// Inject a per-GCP-project daily-quota registry (issue #30). Without
+    /// this the `GmailClient` enforces only the per-account per-minute budget.
+    pub(crate) fn with_project_quota(mut self, registry: Arc<ProjectQuotaRegistry>) -> Self {
+        self.project_quota = Some(registry);
+        self
+    }
+
+    /// Run both quota checks (per-account, then per-project) in order. The
+    /// per-account bucket protects burst behavior; the per-project bucket
+    /// catches sustained behavior across the operator's account set. AND-gated
+    /// — whichever exhausts first returns `Error::RateLimited`.
+    fn quota_check(&self, account: &str, cost: u32) -> Result<(), Error> {
+        self.rate_limiter.try_acquire(account, cost)?;
+        if let Some(registry) = self.project_quota.as_ref() {
+            if let Some(client_id) = self.tokens.client_id(account) {
+                if let Some(project_id) = project_id_from_client_id(client_id) {
+                    registry.try_acquire(&project_id, account, cost)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -70,7 +98,7 @@ impl<T: RefreshTransport> GmailClient<T> {
         path: &str,
         cost: u32,
     ) -> Result<R, Error> {
-        self.rate_limiter.try_acquire(account, cost)?;
+        self.quota_check(account, cost)?;
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .send_with_401_fallback(account, |token| self.http.get(&url).bearer_auth(token))
@@ -86,7 +114,7 @@ impl<T: RefreshTransport> GmailClient<T> {
         cost: u32,
         body: &B,
     ) -> Result<R, Error> {
-        self.rate_limiter.try_acquire(account, cost)?;
+        self.quota_check(account, cost)?;
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .send_with_401_fallback(account, |token| {
@@ -516,5 +544,84 @@ mod tests {
         }
         assert_eq!(ok, 5, "exactly 5 should succeed (budget 5, cost 1 each)");
         assert_eq!(rate_limited, 15, "the rest should be rate-limited");
+    }
+
+    // ── Project-quota integration (issue #30) ────────────────────────────────
+
+    /// Build a client with TWO accounts under the same OAuth project number
+    /// (per `project_id_from_client_id` shape) plus a tight project-daily budget.
+    fn client_two_accounts_one_project(
+        base_url: &str,
+        project_daily_budget: u64,
+    ) -> Arc<GmailClient<MockRefreshTransport>> {
+        fn state(access: &str) -> TokenState {
+            TokenState {
+                access_token: access.into(),
+                refresh_token: "R".into(),
+                expires_at: Utc::now() + ChronoDuration::seconds(3600),
+                scopes: vec!["scope".into()],
+                client_id: "111-aaa.apps.googleusercontent.com".into(), // project 111
+                client_secret: "csec".into(),
+                failed_until: None,
+                consecutive_failures: 0,
+            }
+        }
+        let tokens = Arc::new(TokenManager::new(
+            HashMap::from([
+                ("work".to_owned(), state("ACCESS-W")),
+                ("personal".to_owned(), state("ACCESS-P")),
+            ]),
+            MockRefreshTransport::new(vec![]),
+            "https://example/token",
+            std::env::temp_dir().join(format!("gpm-proj-{}", std::process::id())),
+        ));
+        std::fs::create_dir_all(
+            std::env::temp_dir().join(format!("gpm-proj-{}", std::process::id())),
+        )
+        .expect("mkdir");
+        Arc::new(
+            GmailClient::new(base_url, tokens, reqwest::Client::new())
+                .with_retry(RetryPolicy::for_tests())
+                .with_rate_limiter(Arc::new(KeyedRateLimiter::new(1_000_000, 1_000_000)))
+                .with_project_quota(Arc::new(ProjectQuotaRegistry::new(project_daily_budget))),
+        )
+    }
+
+    #[tokio::test]
+    async fn two_accounts_under_one_project_share_daily_budget() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"ok":true}"#))
+            .mount(&server)
+            .await;
+        // Project daily budget = 3 units total; each call costs 1.
+        let client = client_two_accounts_one_project(&server.uri(), 3);
+
+        // Two calls from "work" + one call from "personal" → 3 units → all succeed.
+        for who in ["work", "work", "personal"] {
+            client
+                .authed_get::<EchoBody>(who, "/v1/me", 1)
+                .await
+                .expect("ok within shared budget");
+        }
+        // Fourth call exhausts the project bucket regardless of which account.
+        let err = client
+            .authed_get::<EchoBody>("personal", "/v1/me", 1)
+            .await
+            .expect_err("must be rate-limited at project level");
+        match err {
+            Error::RateLimited {
+                account,
+                retry_after,
+            } => {
+                assert_eq!(account, "personal");
+                // retry_after = seconds to next UTC midnight; positive,
+                // ≤ 86_400 (one day max).
+                assert!(retry_after.as_secs() > 0);
+                assert!(retry_after.as_secs() <= 86_400);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
     }
 }
