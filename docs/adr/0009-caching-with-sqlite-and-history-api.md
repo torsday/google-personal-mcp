@@ -11,7 +11,7 @@
 
 This is bad in three distinct ways:
 
-1. **Quota burn.** Gmail's per-user quota is 250 units/second by default. `messages.get` costs 5 units, `threads.list` costs 10. A "summarize last 50" call costs 10 + 50×5 = 260 units — over the per-second limit, and the user pays this cost every single time the question is asked, even for the same data.
+1. **Quota burn.** Gmail's per-user quota is **6,000 units/minute** (≈100/second average, burstable). `threads.list` costs 10 units; `threads.get` costs 40 units regardless of `format`. ADR-0016's rich-metadata `search_threads` therefore costs `10 + 40 × max_results` per call — `1,010` units at `max_results=25`, ~17% of the per-user-per-minute budget for a single search. Drilling into individual threads via `get_thread` is another 40 units each. Without a cache the operator pays this every time the same question is asked, even for the same data.
 2. **Latency.** 50 sequential HTTP round-trips at ~80ms each ≈ 4 seconds. Even with concurrency the latency tax is real.
 3. **Token waste in the consumer.** The LLM consumer re-receives the same thread bodies on each call when the question is iterated.
 
@@ -111,17 +111,17 @@ This avoids the catastrophic "sync 100K messages on first run" pattern that othe
 
 **Incremental sync (background task, every 60s while daemon runs, plus on-demand before each list operation):**
 
-1. Call `users.history.list(start_history_id=last_history_id, max_results=500)`.
-2. For each `historyId` event, apply:
-   - `messageAdded` → mark thread as known-stale (don't fetch body unless requested)
-   - `messageDeleted` → set `deleted_at` on the message
-   - `labelAdded` / `labelRemoved` → update `message_labels`
-3. Update `account_state.last_history_id` to the latest event ID.
+1. Call `users.history.list(start_history_id=last_history_id, max_results=500)`. Default `maxResults=100`; the docs state the maximum is 500. The `historyTypes[]` filter can narrow events to only those we apply below — a free optimization once we know which event classes we need.
+2. For each entry in the `history[]` response, apply the per-class arrays (Gmail's field names are plural):
+   - `messagesAdded[]` → mark thread as known-stale (don't fetch body unless requested)
+   - `messagesDeleted[]` → set `deleted_at` on the message
+   - `labelsAdded[]` / `labelsRemoved[]` → update `message_labels`
+3. Update `account_state.last_history_id` to the `historyId` returned at the top level of the response (Gmail's current mailbox history record).
 4. Invalidate any `query_cache` rows whose results contain affected thread IDs.
 
 **History gap (response is `404 historyNotFound` or `gone`):**
 
-When Gmail's History only retains events for ~7 days. If the daemon was offline longer, a full reseed is needed:
+Per Gmail's docs, a `historyId` is "typically valid for at least a week, but in some rare circumstances may be valid for only a few hours." A 404 can therefore appear even after a short outage — the reseed path below must be cheap enough to run unexpectedly:
 
 1. Drop `messages`, `threads`, `message_labels`, `query_cache` rows for this account (keep `labels`).
 2. Reset `account_state.last_history_id` to current `users.getProfile.historyId`.
@@ -285,7 +285,7 @@ We choose (c). The combination of immutable bodies + History API is exactly what
 
 **Positive:**
 
-- 10-50× steady-state quota reduction. The "summarize last N" pattern that LLM agents will hit constantly becomes ~free.
+- 10-50× steady-state quota reduction. Per the live quota table (validated 2026-05-16): `history.list = 2`, `getProfile = 1`, `messages.get = 20`, `threads.get = 40`. A cold rich-search costs ~1,010 units (see [ADR-0016](0016-tool-surface-and-conventions.md)); the same search served from cache after a background `history.list` poll costs 2 units. The "summarize last N" pattern that LLM agents hit constantly becomes effectively free.
 - Sub-second response time for cached queries (vs. multi-second for the API path).
 - Background sync keeps the cache fresh without operator action.
 - History API is the **right** invalidation primitive (Gmail itself uses it); we're not inventing semantics.
@@ -300,7 +300,7 @@ We choose (c). The combination of immutable bodies + History API is exactly what
 - Disk usage grows over time. LRU + size cap mitigates but doesn't eliminate.
 - Cache invalidation logic is tested code that has to be correct. Bugs here mean stale data served to the model — which can lead to confidently wrong answers.
 - First fetch of a thread is unchanged (one round trip to Gmail); only repeats are fast.
-- History API has a ~7-day retention window. Daemon offline >7 days requires full reseed.
+- History API retention is "typically at least a week, sometimes only hours" per Gmail's docs. Reseed-on-404 must be cheap enough to run unexpectedly, not just after long outages.
 - One more thing for the operator to understand — the `[cache]` config section, the cache directory, the `cache_status` tool.
 - Schema migrations (when we add columns or rename) need a migration story. v1 is `schema_version` column; future versions check + apply migrations on startup.
 
