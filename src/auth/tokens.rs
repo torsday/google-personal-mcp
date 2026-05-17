@@ -108,6 +108,12 @@ impl RefreshTransport for ReqwestRefreshTransport {
 /// pattern documented in [ADR-0002]; this struct owns only the inner state.
 pub(crate) struct TokenManager<T: RefreshTransport = ReqwestRefreshTransport> {
     states: HashMap<String, Arc<RwLock<TokenState>>>,
+    /// `account → client_id` snapshot captured at construction. The
+    /// `client_id` doesn't rotate across refreshes for the same OAuth
+    /// client, so this stays stable for the daemon's lifetime — letting
+    /// callers resolve per-account project context without holding any
+    /// async lock. See [`crate::project_quota`].
+    client_ids: HashMap<String, String>,
     transport: T,
     token_uri: String,
     tokens_dir: PathBuf,
@@ -130,16 +136,28 @@ impl<T: RefreshTransport> TokenManager<T> {
         token_uri: impl Into<String>,
         tokens_dir: impl Into<PathBuf>,
     ) -> Self {
+        let client_ids: HashMap<String, String> = states
+            .iter()
+            .map(|(k, v)| (k.clone(), v.client_id.clone()))
+            .collect();
         let states = states
             .into_iter()
             .map(|(k, v)| (k, Arc::new(RwLock::new(v))))
             .collect();
         Self {
             states,
+            client_ids,
             transport,
             token_uri: token_uri.into(),
             tokens_dir: tokens_dir.into(),
         }
+    }
+
+    /// Look up `account`'s OAuth `client_id` without taking any lock.
+    /// Returns the value captured at construction. Used by the per-GCP-project
+    /// quota tracker (issue #30) to map account → GCP project number.
+    pub(crate) fn client_id(&self, account: &str) -> Option<&str> {
+        self.client_ids.get(account).map(String::as_str)
     }
 
     fn state_for(&self, account: &str) -> Result<&Arc<RwLock<TokenState>>, Error> {
