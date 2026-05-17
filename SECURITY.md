@@ -27,6 +27,44 @@ Three concrete threats shape the design:
 - **Host LLM configuration.** If your host LLM supports content trust labels or system-prompt boundaries, configure them to recognize the `<<<UNTRUSTED:...>>>` delimiters as data, not as instructions.
 - **Audit-log review.** When the audit log is implemented, the operator is the one who reviews it.
 
+## Running on a company-managed Mac
+
+Running `google-personal-mcp` on a corporate device introduces threats that don't exist on a personal VPS. Read this section before connecting any work-issued Mac to personal Google accounts.
+
+### Threat model additions for company hardware
+
+| Threat | Origin | Mitigation |
+|--------|--------|------------|
+| EDR scanning `~/.config` | Corporate endpoint-detection agent reading token files | Enable Keychain backend (tracked in [#20](https://github.com/torsday/google-personal-mcp/issues/20)) to move tokens out of the filesystem; FileVault reduces exposure window |
+| IT-managed Keychain ACLs | MDM policy may reset or audit Keychain ACLs, exposing items to managed apps | Keep the Keychain item access-control locked to a single binary path; review MDM profile entitlements |
+| DLP outbound monitoring | Corporate data-loss-prevention proxy reading HTTPS responses | Tokens are OAuth refresh tokens, not email content; they won't trigger content-based DLP rules, but the proxy sees unencrypted HTTP/2 frames post-TLS-intercept if corporate root CA is installed |
+| Corporate root CA TLS interception | Corporate CA MITMs TLS; Google API traffic is inspected | Not directly exploitable by `google-personal-mcp`, but means your corporate proxy sees OAuth token-refresh payloads |
+| Shared user session | Running daemon as your interactive login user means any app in your user session can read `~/.config/google-personal-mcp/` | See dedicated-user guidance below |
+
+### Pre-flight checklist
+
+Before running on a company Mac, verify each item:
+
+- [ ] **FileVault enabled** — `diskutil apfs listVolumeGroups` should show encryption. Without FileVault, a stolen Mac exposes all of `~/.config` including token files.
+- [ ] **Daemon runs as your own user, not root** — stdio transport via Claude Desktop runs as your login user, which is acceptable. Never `sudo google-personal-mcp serve`.
+- [ ] **Scope minimized** — if you only need Gmail read access, do not grant `gmail.send` to your OAuth client. Fewer granted scopes = smaller blast radius if a token is exfiltrated.
+- [ ] **AUP compliance** — personal Gmail on a company device may violate your employer's Acceptable Use Policy. This is your call, not the daemon's. When in doubt, ask IT.
+- [ ] **No sensitive scopes on shared clients** — do not reuse a GCP OAuth client that has `gmail.send` scope across both personal and work accounts. Create a separate GCP project per account class.
+- [ ] **Audit log review** — when the audit log is implemented ([#21](https://github.com/torsday/google-personal-mcp/issues/21)), review it periodically for unexpected `send_email` or `batch_archive` calls.
+
+### Recommended configuration for company Mac
+
+1. **Use the Keychain backend** (once implemented, [#20](https://github.com/torsday/google-personal-mcp/issues/20)) — moves token files out of `~/.config` and into the macOS Keychain, which is encrypted independently of the filesystem and protected by ACLs.
+2. **Enable the read-only profile** (once implemented, [#22](https://github.com/torsday/google-personal-mcp/issues/22)) if you only need to read and search Gmail — removes `gmail.send` and all modify tools from the MCP surface entirely.
+3. **Enable the audit log** (once implemented, [#21](https://github.com/torsday/google-personal-mcp/issues/21)) to record destructive tool calls with timestamps and arguments.
+4. **Do not grant `gmail.send` on corporate accounts** unless your IT policy explicitly permits outbound email automation from personal tools.
+
+### What this codebase does NOT do on corporate Macs
+
+- It does not bypass or disable corporate EDR agents.
+- It does not suppress TLS certificate validation, even if a corporate CA is installed. Token-refresh calls use the system trust store.
+- It does not store credentials in plaintext outside of `~/.config/google-personal-mcp/` (filesystem mode) or the Keychain (Keychain mode). No `.env` files, no environment variables.
+
 ## Reporting a vulnerability
 
 Report security issues via **[GitHub Security Advisories](https://github.com/torsday/google-personal-mcp/security/advisories/new)**. The repo's "Report a vulnerability" button is the canonical channel.
