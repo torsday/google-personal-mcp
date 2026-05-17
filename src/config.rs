@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::auth::scopes::GmailProfile;
 use crate::error::Error;
 
 const APP_NAME: &str = "google-personal-mcp";
@@ -238,13 +239,39 @@ fn default_services() -> ServicesConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ServiceEntry {
     #[serde(default)]
     pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) scopes: Vec<String>,
+    /// Operator-selected Gmail capability level. Determines which OAuth scopes
+    /// are requested and enforced. Defaults to `"modify+send"`.
+    #[serde(default = "default_gmail_profile_str")]
+    pub(crate) profile: String,
+}
+
+impl Default for ServiceEntry {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scopes: vec![],
+            profile: default_gmail_profile_str(),
+        }
+    }
+}
+
+impl ServiceEntry {
+    /// Parse `profile` into a typed `GmailProfile`. Returns `Err(Error::Config)`
+    /// for unknown values.
+    pub(crate) fn gmail_profile(&self) -> Result<GmailProfile, Error> {
+        GmailProfile::from_str(&self.profile)
+    }
+}
+
+fn default_gmail_profile_str() -> String {
+    "modify+send".into()
 }
 
 fn default_gmail_service() -> ServiceEntry {
@@ -254,6 +281,7 @@ fn default_gmail_service() -> ServiceEntry {
             "https://www.googleapis.com/auth/gmail.modify".into(),
             "https://www.googleapis.com/auth/gmail.send".into(),
         ],
+        profile: default_gmail_profile_str(),
     }
 }
 
@@ -400,8 +428,47 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Emit a `WARN` log for each account whose granted token scopes don't cover
+    /// the configured Gmail profile's required scopes. Called at startup after
+    /// loading both `config.toml` and all token files.
+    ///
+    /// A mismatch is not fatal — the operator may have intentionally changed the
+    /// profile without re-authenticating. The warning surfaces the discrepancy so
+    /// they know to run `auth refresh` or `auth grant` for that account.
+    pub(crate) fn warn_scope_mismatch(&self, account: &str, granted: &[String]) {
+        if !self.services.gmail.enabled {
+            return;
+        }
+        let profile = match self.services.gmail.gmail_profile() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(account = %account, error = %e, "could not parse gmail profile for scope-mismatch check");
+                return;
+            }
+        };
+        if !profile.granted_scopes_match(granted) {
+            tracing::warn!(
+                account = %account,
+                profile = %self.services.gmail.profile,
+                ?granted,
+                required = ?profile.scopes(),
+                "token scopes do not match configured gmail profile — run `google-personal-mcp auth refresh {account}` to re-authorize"
+            );
+        }
+    }
+
     fn validate(&self, path: &Path) -> Result<(), Error> {
         let display = || path.display().to_string();
+        // Validate the gmail profile string so a typo surfaces at startup.
+        if self.services.gmail.enabled {
+            self.services
+                .gmail
+                .gmail_profile()
+                .map_err(|e| Error::Config {
+                    path: display(),
+                    message: format!("invalid [services.gmail].profile: {e}"),
+                })?;
+        }
         if self.http.bind.parse::<SocketAddr>().is_err() {
             return Err(Error::Config {
                 path: display(),
@@ -759,5 +826,104 @@ mod tests {
             }
             other => panic!("wrong error variant: {other:?}"),
         }
+    }
+
+    // ── profile field ────────────────────────────────────────────────────────
+
+    #[test]
+    fn config_default_profile_is_modify_send() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.services.gmail.profile, "modify+send");
+        assert_eq!(
+            cfg.services.gmail.gmail_profile().unwrap(),
+            GmailProfile::ModifyAndSend
+        );
+    }
+
+    #[test]
+    fn config_profile_readonly_parsed() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r#"
+            [services.gmail]
+            enabled = true
+            profile = "readonly"
+            "#,
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(
+            cfg.services.gmail.gmail_profile().unwrap(),
+            GmailProfile::Readonly
+        );
+    }
+
+    #[test]
+    fn config_profile_modify_parsed() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r#"
+            [services.gmail]
+            enabled = true
+            profile = "modify"
+            "#,
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(
+            cfg.services.gmail.gmail_profile().unwrap(),
+            GmailProfile::Modify
+        );
+    }
+
+    #[test]
+    fn config_invalid_profile_rejected_at_load() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r#"
+            [services.gmail]
+            enabled = true
+            profile = "superuser"
+            "#,
+        );
+        let err = Config::load(&path).expect_err("invalid profile should fail");
+        match err {
+            Error::Config { message, .. } => {
+                assert!(
+                    message.contains("superuser") || message.contains("profile"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    // ── warn_scope_mismatch ──────────────────────────────────────────────────
+
+    #[test]
+    fn scope_mismatch_check_readonly_profile_with_readonly_grant() {
+        let cfg = Config::default();
+        // readonly profile, token has readonly scope — no mismatch
+        let mut readonly_cfg = cfg;
+        readonly_cfg.services.gmail.profile = "readonly".into();
+        readonly_cfg.services.gmail.enabled = true;
+        let granted = vec![crate::auth::scopes::SCOPE_READONLY.to_owned()];
+        // Should not panic; just logs (can't assert on warn logs in unit tests)
+        readonly_cfg.warn_scope_mismatch("personal", &granted);
+    }
+
+    #[test]
+    fn scope_mismatch_skipped_when_gmail_disabled() {
+        let mut cfg = Config::default();
+        cfg.services.gmail.enabled = false;
+        // Even with mismatched scopes, disabled service → no warning emitted
+        // (Can only verify it doesn't panic here)
+        cfg.warn_scope_mismatch("personal", &[]);
     }
 }
