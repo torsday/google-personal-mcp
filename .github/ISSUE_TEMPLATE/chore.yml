@@ -1,0 +1,22 @@
+name: Chore
+description: Maintenance, tooling, deps, infra
+labels: ["type: chore"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What needs doing and why.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      value: "- [ ] \n- [ ] `just check` passes"
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes

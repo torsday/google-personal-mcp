@@ -1,0 +1,48 @@
+name: Feature
+description: New functionality
+labels: ["type: feature"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this work exists and what it enables. One short paragraph.
+    validations:
+      required: true
+  - type: textarea
+    id: adr-refs
+    attributes:
+      label: Governing ADR(s)
+      description: Which ADRs in docs/adr/ define the constraints for this work? Link them.
+      placeholder: "ADR-0016 (tool surface), ADR-0017 (secrets at rest)"
+    validations:
+      required: true
+  - type: textarea
+    id: files-affected
+    attributes:
+      label: Files affected
+      description: Best guess at the files/modules this work touches. Helps reviewers and AI assistants land in the right place.
+      placeholder: "src/auth/mod.rs, src/auth/tokens.rs"
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Observable, testable outcomes — not implementation steps. Include `just check` passes, relevant test layers from ADR-0007.
+      value: "- [ ] \n- [ ] `just check` passes (fmt, clippy, nextest, deny)\n- [ ] "
+    validations:
+      required: true
+  - type: textarea
+    id: technical-notes
+    attributes:
+      label: Technical Notes
+      description: Relevant patterns, constraints, prior art. Omit if genuinely empty.
+  - type: input
+    id: blocked-by
+    attributes:
+      label: Blocked by
+      placeholder: "#N"
+  - type: input
+    id: blocks
+    attributes:
+      label: Blocks
+      placeholder: "#N"
