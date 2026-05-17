@@ -730,3 +730,150 @@ mod tests {
         assert!(s.failed_until.is_none());
     }
 }
+
+// ── Layer 2 wiremock tests for ReqwestRefreshTransport ──────────────────────
+//
+// The Layer 1 tests above use `MockTransport` (a script of `(status, body)`
+// tuples) and bypass `reqwest` entirely. These tests exercise
+// `ReqwestRefreshTransport` against a real `wiremock` HTTP server so the
+// on-the-wire behavior — header construction, body encoding, status parsing —
+// is verified end-to-end. Closes the only L2-untested production code path
+// noted in #17.
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod wiremock_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    use chrono::Duration as ChronoDuration;
+    use wiremock::matchers::{body_string_contains, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn stale_state() -> TokenState {
+        TokenState {
+            access_token: "STALE".into(),
+            refresh_token: "REFRESH-OLD".into(),
+            // 5s out — within the 60s buffer, so access_token() will refresh.
+            expires_at: Utc::now() + ChronoDuration::seconds(5),
+            scopes: vec!["scope.test".into()],
+            client_id: "cid".into(),
+            client_secret: "csec".into(),
+            failed_until: None,
+            consecutive_failures: 0,
+        }
+    }
+
+    fn unique_tmp_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "gpm-tokens-wm-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    fn build_manager(token_uri: &str, label: &str) -> TokenManager<ReqwestRefreshTransport> {
+        TokenManager::new(
+            HashMap::from([("work".to_owned(), stale_state())]),
+            ReqwestRefreshTransport::new(reqwest::Client::new()),
+            token_uri.to_owned(),
+            unique_tmp_dir(label),
+        )
+    }
+
+    // ── Success refresh: real HTTP → updated access_token ───────────────────
+
+    #[tokio::test]
+    async fn refresh_success_via_reqwest_updates_state_and_persists() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .and(body_string_contains("refresh_token=REFRESH-OLD"))
+            .and(body_string_contains("client_id=cid"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"access_token":"FRESH","expires_in":3600}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mgr = build_manager(&format!("{}/token", server.uri()), "success");
+        let tok = mgr.access_token("work").await.expect("refresh ok");
+        assert_eq!(tok, "FRESH");
+        // Refresh token persists unchanged when not rotated.
+        let s = mgr.states["work"].read().await;
+        assert_eq!(s.refresh_token, "REFRESH-OLD");
+        assert!(s.expires_at > Utc::now() + ChronoDuration::seconds(60));
+    }
+
+    // ── invalid_grant maps to AuthRequired ──────────────────────────────────
+
+    #[tokio::test]
+    async fn invalid_grant_response_maps_to_auth_required() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":"invalid_grant","error_description":"Token revoked"}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let mgr = build_manager(&format!("{}/token", server.uri()), "invalid-grant");
+        let err = mgr.access_token("work").await.expect_err("must fail");
+        assert!(
+            matches!(err, Error::AuthRequired { ref account, .. } if account == "work"),
+            "got: {err:?}"
+        );
+    }
+
+    // ── Refresh-token rotation: new refresh_token replaces old ──────────────
+
+    #[tokio::test]
+    async fn refresh_token_rotation_replaces_prior_value() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"FRESH","refresh_token":"REFRESH-NEW","expires_in":3600}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let mgr = build_manager(&format!("{}/token", server.uri()), "rotate");
+        mgr.access_token("work").await.expect("refresh ok");
+        let s = mgr.states["work"].read().await;
+        assert_eq!(s.refresh_token, "REFRESH-NEW");
+    }
+
+    // ── 5xx upstream → Error::Upstream with body captured ───────────────────
+
+    #[tokio::test]
+    async fn upstream_5xx_returns_upstream_error_with_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream is down"))
+            .mount(&server)
+            .await;
+
+        let mgr = build_manager(&format!("{}/token", server.uri()), "5xx");
+        let err = mgr.access_token("work").await.expect_err("must fail");
+        match err {
+            Error::Upstream {
+                status: 503,
+                ref message,
+                ..
+            } => assert!(message.contains("upstream is down")),
+            other => panic!("expected Upstream(503), got {other:?}"),
+        }
+    }
+}
