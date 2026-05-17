@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::Error;
 
 const APP_NAME: &str = "google-personal-mcp";
 
@@ -24,13 +24,13 @@ impl Config {
             .join(APP_NAME)
     }
 
-    pub(crate) fn load() -> Result<Self> {
+    pub(crate) fn load() -> Result<Self, Error> {
         let path = Self::config_dir().join("config.toml");
         if !path.exists() {
             return Ok(Self { accounts: vec![] });
         }
         let text = std::fs::read_to_string(&path)?;
-        toml::from_str(&text).map_err(|e| crate::error::Error::Internal {
+        toml::from_str(&text).map_err(|e| Error::Internal {
             context: "config::load".into(),
             source: e.into(),
         })
