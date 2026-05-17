@@ -159,6 +159,32 @@ pub(crate) struct Config {
     pub(crate) http: HttpConfig,
     #[serde(default)]
     pub(crate) retry: RetryConfig,
+    #[serde(default)]
+    pub(crate) secrets: SecretsConfig,
+}
+
+/// `[secrets]` section — selects the storage backend per
+/// [ADR-0017](../docs/adr/0017-secrets-at-rest.md) extension for #20.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SecretsConfig {
+    /// `"file"` (default elsewhere) or `"keychain"` (default on macOS).
+    /// Selection logic lives in [`crate::auth::secrets::build`]; this is
+    /// just the operator-visible knob.
+    #[serde(default = "default_secrets_backend")]
+    pub(crate) backend: crate::auth::secrets::BackendChoice,
+}
+
+impl Default for SecretsConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_secrets_backend(),
+        }
+    }
+}
+
+const fn default_secrets_backend() -> crate::auth::secrets::BackendChoice {
+    crate::auth::secrets::BackendChoice::platform_default()
 }
 
 #[derive(Debug, Deserialize, Serialize)]

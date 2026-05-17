@@ -35,7 +35,7 @@ Running `google-personal-mcp` on a corporate device introduces threats that don'
 
 | Threat | Origin | Mitigation |
 |--------|--------|------------|
-| EDR scanning `~/.config` | Corporate endpoint-detection agent reading token files | Enable Keychain backend (tracked in [#20](https://github.com/torsday/google-personal-mcp/issues/20)) to move tokens out of the filesystem; FileVault reduces exposure window |
+| EDR scanning `~/.config` | Corporate endpoint-detection agent reading token files | Enable Keychain backend (`[secrets].backend = "keychain"`, build with `--features macos-keychain`) to move tokens out of the filesystem; FileVault reduces exposure window |
 | IT-managed Keychain ACLs | MDM policy may reset or audit Keychain ACLs, exposing items to managed apps | Keep the Keychain item access-control locked to a single binary path; review MDM profile entitlements |
 | DLP outbound monitoring | Corporate data-loss-prevention proxy reading HTTPS responses | Tokens are OAuth refresh tokens, not email content; they won't trigger content-based DLP rules, but the proxy sees unencrypted HTTP/2 frames post-TLS-intercept if corporate root CA is installed |
 | Corporate root CA TLS interception | Corporate CA MITMs TLS; Google API traffic is inspected | Not directly exploitable by `google-personal-mcp`, but means your corporate proxy sees OAuth token-refresh payloads |
@@ -54,7 +54,7 @@ Before running on a company Mac, verify each item:
 
 ### Recommended configuration for company Mac
 
-1. **Use the Keychain backend** (once implemented, [#20](https://github.com/torsday/google-personal-mcp/issues/20)) — moves token files out of `~/.config` and into the macOS Keychain, which is encrypted independently of the filesystem and protected by ACLs.
+1. **Use the Keychain backend** — moves token files out of `~/.config` and into the macOS Keychain, which is encrypted independently of the filesystem and protected by ACLs. Build with `cargo install --features macos-keychain` (or `--features macos-keychain` in the workspace) and set `[secrets].backend = "keychain"` in `config.toml`. On macOS, this is the **default**. Selection: macOS → `keychain`, all other platforms → `file`. If the binary is built without the `macos-keychain` feature but config requests `"keychain"`, the daemon falls back to the file backend with a WARN log.
 2. **Enable the read-only profile** (once implemented, [#22](https://github.com/torsday/google-personal-mcp/issues/22)) if you only need to read and search Gmail — removes `gmail.send` and all modify tools from the MCP surface entirely.
 3. **Enable the audit log** (once implemented, [#21](https://github.com/torsday/google-personal-mcp/issues/21)) to record destructive tool calls with timestamps and arguments.
 4. **Do not grant `gmail.send` on corporate accounts** unless your IT policy explicitly permits outbound email automation from personal tools.
