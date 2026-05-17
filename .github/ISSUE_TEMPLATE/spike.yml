@@ -1,0 +1,35 @@
+name: Spike
+description: Time-boxed research — output is a decision, not code
+labels: ["type: spike"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question to Answer
+      description: One specific decision this spike produces — not a general investigation.
+    validations:
+      required: true
+  - type: input
+    id: time-box
+    attributes:
+      label: Time Box
+      placeholder: "e.g. 2 days"
+    validations:
+      required: true
+  - type: input
+    id: output
+    attributes:
+      label: Output Artifact
+      description: What will be produced when this spike is done?
+      placeholder: "ADR amendment, design doc update, written recommendation"
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Options Under Consideration
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Known Constraints
+      description: Gmail API limits, ADR-0017 security posture, ADR-0018 content trust, etc.
