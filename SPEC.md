@@ -78,8 +78,8 @@ The load-bearing capability. Gmail's query syntax is the input; `search_threads`
 
 #### What makes search excellent
 
-- **Pass-through to Gmail's native query language.** Operators get the full expressive power of `from:`, `to:`, `subject:`, `has:attachment`, `filename:`, `label:`, `category:`, `after:`, `before:`, `older_than:`, `newer_than:`, `larger:`, `smaller:`, `is:starred/unread/important`, `in:inbox/sent/trash/spam`, `list:`, `deliveredto:`, `rfc822msgid:`, free-text — without re-implementing any of it.
-- **Rich result metadata.** `search_threads` returns enough per-thread data (`subject_untrusted`, `from_untrusted`, `snippet_untrusted`, `internal_date`, `label_ids`, `message_count`, `has_attachments`, `size_estimate`) that the host LLM can decide whether to drill in with `get_thread` *without a follow-up call per result*. Schema pinned in [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md) per-tool schemas.
+- **Pass-through to Gmail's native query language.** Operators get the full expressive power of Gmail search: `from:`, `to:`, `cc:`, `bcc:`, `subject:`, `has:attachment`, `has:drive`, `has:userlabels`, `has:nouserlabels`, `filename:`, `label:`, `category:`, `after:`, `before:`, `older_than:`, `newer_than:`, `larger:`, `smaller:`, `size:`, `is:starred/unread/important/muted/snoozed`, `in:inbox/sent/trash/spam/anywhere/archive`, `list:`, `deliveredto:`, `rfc822msgid:`, `AROUND` (proximity), `+exactword`, `OR` / `AND` / `-` negation, `()` grouping, quoted phrases, and free-text. The MCP re-implements none of this; `query` is forwarded verbatim to `users.threads.list`.
+- **Rich result metadata.** `search_threads` returns enough per-thread data (`subject_untrusted`, `from_untrusted`, `snippet_untrusted`, `internal_date`, `label_ids`, `message_count`, `size_estimate`) that the host LLM can decide whether to drill in with `get_thread` *without a follow-up call per result*. Schema pinned in [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md) per-tool schemas. The metadata is hydrated internally via parallel `threads.get(format=metadata)` calls — see ADR-0016 cost model. `has_attachments` is deliberately not in ThreadSummary; the host fetches via `get_thread` if needed.
 - **Predictable ordering.** Results come back newest-first by Gmail's `internalDate`, matching Gmail's own UI behavior. Operators can re-sort client-side.
 - **Cursor-based pagination.** `page_token` round-trips work for large result sets without losing place.
 - **Combinable with `get_thread` for drill-down.** Search finds threads; `get_thread` returns full content. The two together are the read path.
@@ -125,6 +125,7 @@ These are concrete claims the v0.2 implementation must be able to make on day on
 - [ ] A query that exercises a quota limit returns a typed `RateLimited` error per [ADR-0005](docs/adr/0005-error-model.md), with the `retry_after_secs` populated.
 - [ ] The same query against two different accounts gives results scoped to each, with no cross-talk.
 - [ ] An expired access token transparently refreshes ([ADR-0004](docs/adr/0004-oauth-token-refresh.md)) — no operator-visible failure.
+- [ ] A rich search at `max_results=25` costs ~1010 quota units (1× `threads.list` + 25× `threads.get(format=metadata)`); ~6 sustained searches/minute fit under the 6,000 quota-units/minute per-user ceiling. Honest about the cost.
 
 ## Non-goals
 

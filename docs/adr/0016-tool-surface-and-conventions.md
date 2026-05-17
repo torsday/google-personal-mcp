@@ -116,17 +116,26 @@ The schemas below are concrete commitments for v0.2. They override or extend the
 
 **Response:** listing envelope. Each `items[i]` is a `ThreadSummary`:
 
-- `thread_id: String`
-- `subject_untrusted: String`
-- `from_untrusted: String` — display string of the most recent sender
-- `snippet_untrusted: String` — Gmail's snippet field
-- `internal_date: String` — RFC 3339 UTC, from Gmail's `internalDate`
-- `label_ids: Vec<String>`
-- `message_count: u32`
-- `has_attachments: bool`
-- `size_estimate: u64` — bytes; Gmail's `sizeEstimate`
+- `thread_id: String` — Gmail's thread `id`
+- `snippet_untrusted: String` — Gmail's `snippet`
+- `history_id: String` — Gmail's `historyId`
+- `subject_untrusted: String` — derived from the latest message's `Subject` header
+- `from_untrusted: String` — derived from the latest message's `From` header
+- `internal_date: String` — RFC 3339 UTC, derived from the latest message's `internalDate`
+- `label_ids: Vec<String>` — derived: union of all `labelIds` across messages in the thread
+- `message_count: u32` — derived: count of messages in the thread
+- `size_estimate: u64` — derived: sum of message-level `sizeEstimate` in bytes
 
-The fields are sized so the host LLM can decide which threads to drill into via `get_thread` *without a per-result follow-up call*. This is the load-bearing search-excellence claim from [SPEC.md](../../SPEC.md).
+**Implementation: hydration via `threads.get`.** Gmail's `users.threads.list` returns only `{id, snippet, historyId}` per item — no subject, sender, date, labels, or message count. To deliver the rich `ThreadSummary` above, the implementation issues one `threads.list` call followed by `max_results` parallel `threads.get(format=metadata, metadataHeaders=From,Subject,Date)` calls. Format `metadata` returns message IDs, labels, headers, and top-level fields like `internalDate` and `sizeEstimate`, without bodies — the cheapest format that carries enough to populate ThreadSummary.
+
+**Cost model.** `threads.list` = 10 quota units; `threads.get` = 40 quota units regardless of format. A search with `max_results=25` costs `10 + 25 × 40 = 1010` quota units. Per-user-per-minute cap is 6,000 quota units, so the sustained ceiling is ~6 rich searches/minute per account. This trade favors host-LLM ergonomics over quota economy — the alternative (returning only `{thread_id, snippet, history_id}` from `threads.list` natively) would cost 10 units per search but force a per-result follow-up to learn anything useful, multiplying total cost whenever the host wants per-result detail anyway.
+
+If the cost becomes painful in practice, a future amendment may add `include_metadata: bool` (default `true`) so callers can opt out. The forthcoming cache layer ([ADR-0009](0009-caching-with-sqlite-and-history-api.md), v1.0) is the long-term fix: it amortizes the per-`threads.get` cost across repeated reads of the same thread.
+
+**Excluded fields and why.**
+
+- `has_attachments` is not in ThreadSummary. Determining it cleanly requires `format=full` (same 40-unit cost but returns bodies we don't otherwise need) or a fragile Content-Type heuristic from headers. Host LLMs that need attachment information call `get_thread`. May be promoted to ThreadSummary if a low-cost path is found.
+- `unread_count` (per-thread unread message count) is similarly derived from `INBOX`/`UNREAD` label state per message; folded into `label_ids` for v0.2.
 
 #### `get_thread`
 
@@ -220,6 +229,8 @@ Per-tool extras:
 
 **Response:** batch results envelope (per the convention above) with `{ thread_id, ok, error? }` per item. Never short-circuit on first error.
 
+**Implementation note: Gmail has no thread-level batch endpoint.** `users.threads` exposes only single-thread operations (`modify`, `trash`, `delete`, `untrash`); batch endpoints exist only on `users.messages` (`batchModify`, `batchDelete`). The MCP's batch tools are therefore implemented as `N` concurrent calls to the corresponding single-thread endpoint server-side. From the host LLM's perspective this is one tool call returning one batch envelope; from Gmail's perspective it is `N` independent operations subject to the per-user quota and rate limits. Cost: `10 × N` quota units for `batch_archive`/`batch_modify_thread_labels` (each uses `threads.modify` at 10 units) or `20 × N` for `batch_trash` (uses `threads.trash` at 20 units). With `N=100` (default cap) this is up to 2,000 quota units per call — roughly one-third of the per-user-per-minute budget — which is why the cap is conservatively below Gmail's 1,000-id limit on `messages.batchModify`. Concurrent execution honors the per-account rate limiter from [ADR-0006](0006-config.md). The `dry_run: true` path issues no Gmail calls and returns `{thread_id, ok: true}` per id with no side effects.
+
 #### `send_email`
 
 **Request:**
@@ -243,6 +254,8 @@ Per-tool extras:
 - `sent_message_id: String` — Gmail's returned `id` for the sent message
 - `thread_id: String` — the thread the message landed in (existing thread if `in_reply_to_thread_id` was set; new thread otherwise)
 - `dedup_action: "sent" | "deduped" | "would_send"` — per [ADR-0012](0012-idempotency-and-dry-run.md); `would_send` corresponds to `dry_run: true`
+
+**Implementation note: Gmail's `messages.send` takes raw RFC 2822.** The structured request above is serialized internally to a base64url-encoded RFC 2822 message, then submitted as the `raw` field of `users.messages.send`. When `in_reply_to_thread_id` is set, the implementation first issues a `threads.get(format=metadata)` against the target thread to extract the latest message's `Message-Id` for the `In-Reply-To` and `References` headers, then submits with both the proper headers and the API-level `threadId` field — Gmail requires both for correct threading. Cost: `messages.send` = 100 quota units (200 if reply, because of the prefetch).
 
 ## Options Considered
 
