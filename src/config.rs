@@ -95,6 +95,24 @@ impl Accounts {
         Ok(cfg)
     }
 
+    /// Serialize and atomically write the registry to `path` (tmpfile + rename).
+    /// Validates first so we never persist a broken file. Used by `auth add` /
+    /// `auth set-default`; not used at daemon startup (which is read-only).
+    pub(crate) fn save(&self, path: &Path) -> Result<(), Error> {
+        self.validate(path)?;
+        let body = toml::to_string_pretty(self).map_err(|e| Error::Config {
+            path: path.display().to_string(),
+            message: format!("toml serialize failed: {e}"),
+        })?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, body)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
     fn validate(&self, path: &Path) -> Result<(), Error> {
         let defaults: Vec<&str> = self
             .accounts
