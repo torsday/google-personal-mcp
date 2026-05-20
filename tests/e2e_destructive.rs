@@ -8,6 +8,6 @@
 // Run with: cargo nextest run -- --ignored
 
 mod e2e {
-    mod harness;
     mod destructive;
+    mod harness;
 }

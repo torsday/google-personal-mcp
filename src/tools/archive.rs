@@ -74,7 +74,10 @@ pub(crate) async fn archive_thread<T: RefreshTransport>(
             applied: false,
         }),
         Decision::Apply => {
-            let path = format!("/users/{}/threads/{}/modify", input.account, input.thread_id);
+            let path = format!(
+                "/users/{}/threads/{}/modify",
+                input.account, input.thread_id
+            );
             let body = serde_json::json!({ "removeLabelIds": ["INBOX"] });
             let _: serde_json::Value = client
                 .authed_post(
@@ -226,12 +229,11 @@ mod tests {
     struct NoRefresh;
 
     impl RefreshTransport for NoRefresh {
-        async fn post_form(
-            &self,
-            _token_uri: &str,
-            _body: String,
-        ) -> Result<(u16, String), Error> {
-            Ok((200, r#"{"access_token":"NEW","expires_in":3600}"#.to_owned()))
+        async fn post_form(&self, _token_uri: &str, _body: String) -> Result<(u16, String), Error> {
+            Ok((
+                200,
+                r#"{"access_token":"NEW","expires_in":3600}"#.to_owned(),
+            ))
         }
     }
 
@@ -283,7 +285,11 @@ mod tests {
         assert!(!out.applied, "dry_run should produce applied=false");
         // Verify no HTTP calls were made.
         assert!(
-            server.received_requests().await.unwrap_or_default().is_empty(),
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
             "dry_run must not make any HTTP calls"
         );
     }
@@ -335,7 +341,11 @@ mod tests {
         assert_eq!(out.results.len(), 2);
         assert!(out.results.iter().all(|r| r.ok && r.error.is_none()));
         assert!(
-            server.received_requests().await.unwrap_or_default().is_empty(),
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
             "dry_run must not make any HTTP calls"
         );
     }
@@ -347,8 +357,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/users/work/threads/t1/modify"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(r#"{"id":"t1","historyId":"1"}"#),
+                ResponseTemplate::new(200).set_body_string(r#"{"id":"t1","historyId":"1"}"#),
             )
             .expect(1)
             .mount(&server)

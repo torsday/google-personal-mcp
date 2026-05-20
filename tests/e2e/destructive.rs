@@ -17,7 +17,7 @@
 //!
 //! See `tests/README.md` for setup instructions.
 
-use super::harness::{McpProcess, require_destructive_gate, require_test_config_dir};
+use super::harness::{require_destructive_gate, require_test_config_dir, McpProcess};
 
 /// `archive_thread` removes INBOX label from a thread. Verifies that `dry_run`
 /// mode does not mutate, and that the real call reports `applied: true`.
@@ -93,9 +93,7 @@ fn destructive_send_email_self_mail_and_verify() {
     );
 
     // Must return a non-empty message_id.
-    let message_id = result["message_id"]
-        .as_str()
-        .unwrap_or_default();
+    let message_id = result["message_id"].as_str().unwrap_or_default();
     assert!(
         !message_id.is_empty(),
         "send_email should return a non-empty message_id: {result}"
@@ -146,8 +144,8 @@ fn destructive_modify_thread_labels_add_and_remove() {
     let dir = require_test_config_dir();
     require_destructive_gate();
 
-    let thread_id = std::env::var("GOOGLE_MCP_TEST_THREAD_ID")
-        .expect("set GOOGLE_MCP_TEST_THREAD_ID");
+    let thread_id =
+        std::env::var("GOOGLE_MCP_TEST_THREAD_ID").expect("set GOOGLE_MCP_TEST_THREAD_ID");
     let label_id = std::env::var("GOOGLE_MCP_TEST_LABEL_ID")
         .expect("set GOOGLE_MCP_TEST_LABEL_ID to a user label in the test account");
 
@@ -177,5 +175,9 @@ fn destructive_modify_thread_labels_add_and_remove() {
             "dry_run": false
         }),
     );
-    assert_eq!(remove["applied"].as_bool(), Some(true), "remove label: {remove}");
+    assert_eq!(
+        remove["applied"].as_bool(),
+        Some(true),
+        "remove label: {remove}"
+    );
 }

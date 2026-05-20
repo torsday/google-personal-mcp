@@ -206,7 +206,10 @@ mod tests {
 
     impl RefreshTransport for NoRefresh {
         async fn post_form(&self, _uri: &str, _body: String) -> Result<(u16, String), Error> {
-            Ok((200, r#"{"access_token":"TOK","expires_in":3600}"#.to_owned()))
+            Ok((
+                200,
+                r#"{"access_token":"TOK","expires_in":3600}"#.to_owned(),
+            ))
         }
     }
 
@@ -310,9 +313,11 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/users/personal/threads/tid-err/trash"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(
-                serde_json::json!({"error": {"code": 404, "message": "not found"}}),
-            ))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(
+                    serde_json::json!({"error": {"code": 404, "message": "not found"}}),
+                ),
+            )
             .expect(1)
             .mount(&mock)
             .await;

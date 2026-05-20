@@ -78,8 +78,8 @@ impl AuditWriter {
 
         // Serialize to a single JSON line (no embedded newlines in values since
         // serde_json compact serialization never emits them).
-        let line = serde_json::to_string(entry)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let line =
+            serde_json::to_string(entry).map_err(|e| std::io::Error::other(e.to_string()))?;
 
         // Open with append + create; set 0600 on first creation.
         let mut file = open_append(&path)?;
@@ -125,7 +125,12 @@ pub(crate) fn summarize_thread_op(
     } else {
         m.insert(
             "thread_ids".into(),
-            Value::Array(thread_ids.iter().map(|t| Value::String(t.clone())).collect()),
+            Value::Array(
+                thread_ids
+                    .iter()
+                    .map(|t| Value::String(t.clone()))
+                    .collect(),
+            ),
         );
     }
     m.insert("dry_run".into(), Value::Bool(dry_run));
@@ -255,8 +260,8 @@ mod tests {
     fn send_email_params_summary_redacts_body() {
         let summary = summarize_send(
             &["alice@example.com".to_owned()],
-            14,      // subject_len
-            1024,    // body_len
+            14,   // subject_len
+            1024, // body_len
             "abc123",
             false,
         );

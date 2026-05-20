@@ -10,7 +10,7 @@
 //!
 //! See `tests/README.md` for setup instructions.
 
-use super::harness::{McpProcess, require_test_config_dir};
+use super::harness::{require_test_config_dir, McpProcess};
 
 /// `list_accounts` returns at least the "test" alias with a non-empty email.
 #[test]
@@ -48,10 +48,7 @@ fn smoke_list_labels_returns_labels() {
     let dir = require_test_config_dir();
     let mut proc = McpProcess::start(&dir);
 
-    let result = proc.call_tool(
-        "list_labels",
-        serde_json::json!({ "account": "test" }),
-    );
+    let result = proc.call_tool("list_labels", serde_json::json!({ "account": "test" }));
     let labels = result["labels"]
         .as_array()
         .expect("list_labels.labels should be an array");
