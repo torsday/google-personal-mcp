@@ -23,7 +23,7 @@ pub(crate) struct RawThread {
     pub messages: Vec<RawMessage>,
 }
 
-/// A single Gmail message (format=FULL).
+/// A single Gmail message (format=FULL or format=METADATA).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RawMessage {
@@ -33,6 +33,10 @@ pub(crate) struct RawMessage {
     pub internal_date: String,
     #[serde(default)]
     pub label_ids: Vec<String>,
+    /// Per-message byte estimate from Gmail. Populated by both FULL and
+    /// METADATA formats. Default `0` when absent (older test fixtures).
+    #[serde(default)]
+    pub size_estimate: u64,
     pub payload: Option<MessagePart>,
 }
 
@@ -96,6 +100,50 @@ pub(crate) struct ParsedThread {
     pub messages: Vec<ParsedMessage>,
 }
 
+// ── Listing + metadata-only types (used by `search_threads`) ─────────────────
+
+/// One entry in the raw `threads.list` response — the only three fields Gmail
+/// returns at list time.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RawListedThread {
+    pub id: String,
+    #[serde(default)]
+    pub snippet: String,
+    #[serde(default)]
+    pub history_id: String,
+}
+
+/// Raw `threads.list` response. `next_page_token` is `None` on the final page.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RawThreadsList {
+    #[serde(default)]
+    pub threads: Vec<RawListedThread>,
+    pub next_page_token: Option<String>,
+}
+
+/// Per-message slice of a metadata-format `threads.get` response — only the
+/// fields `search_threads` needs to hydrate a `ThreadSummary`. No body text;
+/// no attachments.
+#[derive(Debug)]
+pub(crate) struct ThreadMetadataMessage {
+    pub internal_date_ms: String,
+    pub label_ids: Vec<String>,
+    pub size_estimate: u64,
+    pub subject: String,
+    pub from: String,
+}
+
+/// Metadata-format thread used by `search_threads` hydration. Contains only
+/// the fields needed for the `ThreadSummary` schema in ADR-0016 §`search_threads`
+/// — message bodies are deliberately excluded.
+#[derive(Debug)]
+pub(crate) struct ThreadMetadata {
+    pub thread_id: String,
+    pub messages: Vec<ThreadMetadataMessage>,
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Fetch a thread by ID using `threads.get(format=FULL)`.
@@ -123,6 +171,130 @@ pub(crate) async fn get_thread<T: RefreshTransport>(
         .await?;
 
     Ok(parse_thread(raw))
+}
+
+/// Issue `users.threads.list` with optional `q` (Gmail search syntax),
+/// `max_results`, and `page_token`. Returns Gmail's raw envelope so the
+/// caller can hydrate per-thread metadata separately.
+///
+/// Cost: 10 quota units (one call). Hydration in `search_threads` adds
+/// `max_results × 40` for the parallel `threads.get(format=metadata)` fan-out.
+pub(crate) async fn list_threads<T: RefreshTransport>(
+    client: &GmailClient<T>,
+    account: &str,
+    query: &str,
+    max_results: u32,
+    page_token: Option<&str>,
+) -> Result<RawThreadsList, Error> {
+    if account.is_empty() {
+        return Err(Error::InvalidArgument {
+            field: "account".into(),
+            detail: "account alias must not be empty".into(),
+        });
+    }
+
+    // Build query string. `q` and `pageToken` only included when non-empty so
+    // an empty search just lists the inbox.
+    let mut qs = format!("maxResults={max_results}");
+    if !query.is_empty() {
+        qs.push_str("&q=");
+        qs.push_str(&urlencode(query));
+    }
+    if let Some(tok) = page_token.filter(|t| !t.is_empty()) {
+        qs.push_str("&pageToken=");
+        qs.push_str(&urlencode(tok));
+    }
+
+    let path = format!("/users/{account}/threads?{qs}");
+    client
+        .authed_get(account, &path, GmailMethod::ThreadsList.cost())
+        .await
+}
+
+/// Fetch a thread in `format=metadata` with `metadataHeaders=From,Subject,Date`.
+/// Returns only the headers + per-message envelope needed to build a
+/// `ThreadSummary` — bodies are not requested.
+///
+/// Cost: 40 quota units regardless of format per Google's documented pricing.
+pub(crate) async fn get_thread_metadata<T: RefreshTransport>(
+    client: &GmailClient<T>,
+    account: &str,
+    thread_id: &str,
+) -> Result<ThreadMetadata, Error> {
+    if account.is_empty() {
+        return Err(Error::InvalidArgument {
+            field: "account".into(),
+            detail: "account alias must not be empty".into(),
+        });
+    }
+    if thread_id.is_empty() {
+        return Err(Error::InvalidArgument {
+            field: "thread_id".into(),
+            detail: "thread_id must not be empty".into(),
+        });
+    }
+
+    let path = format!(
+        "/users/{account}/threads/{thread_id}?format=metadata\
+         &metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date"
+    );
+    let raw: RawThread = client
+        .authed_get(account, &path, GmailMethod::ThreadsGet.cost())
+        .await?;
+
+    Ok(metadata_from_raw(raw))
+}
+
+fn metadata_from_raw(raw: RawThread) -> ThreadMetadata {
+    let messages = raw
+        .messages
+        .into_iter()
+        .map(|m| {
+            let mut subject = String::new();
+            let mut from = String::new();
+            if let Some(payload) = &m.payload {
+                for h in &payload.headers {
+                    match h.name.to_ascii_lowercase().as_str() {
+                        "subject" => subject.clone_from(&h.value),
+                        "from" => from.clone_from(&h.value),
+                        _ => {}
+                    }
+                }
+            }
+            ThreadMetadataMessage {
+                internal_date_ms: m.internal_date,
+                label_ids: m.label_ids,
+                size_estimate: m.size_estimate,
+                subject,
+                from,
+            }
+        })
+        .collect();
+    ThreadMetadata {
+        thread_id: raw.id,
+        messages,
+    }
+}
+
+/// Minimal URL-form-encoding for query-string values. Gmail accepts standard
+/// `application/x-www-form-urlencoded` for both `q` and `pageToken`.
+/// Implemented inline (~10 lines) to avoid pulling in a percent-encoding crate.
+fn urlencode(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0xF) as usize] as char);
+            }
+        }
+    }
+    out
 }
 
 // ── Parsing logic ─────────────────────────────────────────────────────────────
@@ -202,11 +374,7 @@ fn walk_part(
     text_html: &mut Option<String>,
     attachments: &mut Vec<ParsedAttachment>,
 ) {
-    let mime = part
-        .mime_type
-        .as_deref()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let mime = part.mime_type.as_deref().unwrap_or("").to_ascii_lowercase();
 
     // Check if this is an attachment (has a filename header and non-zero body size)
     let filename = part
@@ -323,12 +491,11 @@ mod tests {
 
     struct NoRefresh;
     impl RefreshTransport for NoRefresh {
-        async fn post_form(
-            &self,
-            _token_uri: &str,
-            _body: String,
-        ) -> Result<(u16, String), Error> {
-            Ok((200, r#"{"access_token":"NEW","expires_in":3600}"#.to_owned()))
+        async fn post_form(&self, _token_uri: &str, _body: String) -> Result<(u16, String), Error> {
+            Ok((
+                200,
+                r#"{"access_token":"NEW","expires_in":3600}"#.to_owned(),
+            ))
         }
     }
 
@@ -394,7 +561,12 @@ mod tests {
     #[tokio::test]
     async fn single_text_plain_message() {
         let server = MockServer::start().await;
-        let msgs = vec![simple_message("msg1", "Hello", "alice@example.com", "body text")];
+        let msgs = vec![simple_message(
+            "msg1",
+            "Hello",
+            "alice@example.com",
+            "body text",
+        )];
         let body = thread_response("tid1", &msgs);
         Mock::given(method("GET"))
             .and(path_regex("/users/work/threads/tid1"))
@@ -443,20 +615,20 @@ mod tests {
         let server = MockServer::start().await;
         let html = "<html><body><p>Hello World</p></body></html>";
         let msgs3 = vec![serde_json::json!({
-                "id": "msg3",
-                "threadId": "tid3",
-                "labelIds": ["INBOX"],
-                "internalDate": "1717200000000",
-                "payload": {
-                    "mimeType": "text/html",
-                    "headers": [
-                        {"name": "Subject", "value": "HTML test"},
-                        {"name": "From", "value": "sender@example.com"}
-                    ],
-                    "body": {"data": b64(html), "size": html.len()},
-                    "parts": []
-                }
-            })];
+            "id": "msg3",
+            "threadId": "tid3",
+            "labelIds": ["INBOX"],
+            "internalDate": "1717200000000",
+            "payload": {
+                "mimeType": "text/html",
+                "headers": [
+                    {"name": "Subject", "value": "HTML test"},
+                    {"name": "From", "value": "sender@example.com"}
+                ],
+                "body": {"data": b64(html), "size": html.len()},
+                "parts": []
+            }
+        })];
         let body = thread_response("tid3", &msgs3);
         Mock::given(method("GET"))
             .and(path_regex("/users/work/threads/tid3"))
@@ -548,7 +720,9 @@ mod tests {
     #[tokio::test]
     async fn empty_account_returns_invalid_argument() {
         let client = make_client("http://localhost:1");
-        let err = get_thread(&client, "", "tid1").await.expect_err("must fail");
+        let err = get_thread(&client, "", "tid1")
+            .await
+            .expect_err("must fail");
         assert!(
             matches!(err, Error::InvalidArgument { ref field, .. } if field == "account"),
             "got: {err:?}"
