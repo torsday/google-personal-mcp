@@ -1,6 +1,6 @@
 ---
 source: src/server.rs
-assertion_line: 547
+assertion_line: 641
 expression: json
 ---
 [
@@ -106,5 +106,62 @@ expression: json
       "type": "object"
     },
     "name": "batch_archive"
+  },
+  {
+    "description": "Move a single Gmail thread to trash (recoverable for 30 days). Calls threads.trash (20 quota units). dry_run: true returns the outcome without making any Gmail API call.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml (e.g. \"personal\", \"work\").",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "If true, returns the outcome without making any Gmail API call.",
+          "type": "boolean"
+        },
+        "thread_id": {
+          "description": "Gmail thread ID to move to trash.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "thread_id"
+      ],
+      "type": "object"
+    },
+    "name": "trash_thread"
+  },
+  {
+    "description": "Move multiple threads to trash in parallel (recoverable for 30 days). Implemented as N concurrent threads.trash calls (20 quota units each). Accepts 1–100 thread IDs. Never short-circuits: returns per-item ok/error for every id. dry_run: true returns ok: true for all ids without making any Gmail calls.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "If true, returns ok: true for all ids without making any Gmail calls.",
+          "type": "boolean"
+        },
+        "thread_ids": {
+          "description": "List of Gmail thread IDs to trash (1–100).",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "account",
+        "thread_ids"
+      ],
+      "type": "object"
+    },
+    "name": "batch_trash"
   }
 ]
