@@ -1,18 +1,18 @@
 //! `auth` subcommand surface — adds an account, lists known accounts, switches
-//! the default. The v0.2 CLI shape from [ADR-0002].
+//! the default, and performs incremental scope grant / force-refresh / removal.
+//! CLI shape from [ADR-0002] and [ADR-0004].
 
 use std::path::Path;
 
 use clap::Subcommand;
 
 use crate::auth::credentials::Credentials;
-use crate::auth::pkce_flow::{run_auth_add, AuthFlowInputs};
+use crate::auth::pkce_flow::{run_auth_add, run_auth_grant, AuthFlowInputs};
 use crate::auth::tokens::TokenState;
 use crate::config::{accounts_path, AccountEntry, Accounts, Config};
 use crate::error::Error;
 
-/// Subcommands under `google-personal-mcp auth`. `auth grant`, `auth refresh`,
-/// and `auth remove` are tracked separately in issue #27.
+/// Subcommands under `google-personal-mcp auth`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum AuthCommand {
     /// Run the OAuth PKCE flow and store the resulting token under `<alias>`.
@@ -28,6 +28,43 @@ pub(crate) enum AuthCommand {
         /// Alias to make default.
         alias: String,
     },
+    /// Incrementally grant additional OAuth scopes to an existing account.
+    ///
+    /// Runs the PKCE flow with `include_granted_scopes=true` so the consent
+    /// screen shows only the *delta* between what is already granted and what
+    /// is now requested. The union of existing + configured + `--scope` args
+    /// becomes the new scope set.
+    Grant {
+        /// Alias of the account to upgrade.
+        alias: String,
+        /// Additional scope URIs to request (may be given multiple times).
+        #[arg(long = "scope", value_name = "URL")]
+        extra_scopes: Vec<String>,
+    },
+    /// Force-refresh the access token for an account.
+    ///
+    /// Calls Google's token endpoint with the stored `refresh_token` and
+    /// writes the new access token atomically. Use this as a manual recovery
+    /// path after a password change or token revocation (`invalid_grant`).
+    Refresh {
+        /// Alias of the account to refresh.
+        alias: String,
+    },
+    /// Remove an account from the registry and delete its token file.
+    ///
+    /// Prompts for confirmation unless `--yes` is given. Pass `--revoke` to
+    /// also POST to Google's `oauth2/revoke` endpoint so the token is
+    /// invalidated server-side.
+    Remove {
+        /// Alias of the account to remove.
+        alias: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Also revoke the token at Google's OAuth endpoint.
+        #[arg(long)]
+        revoke: bool,
+    },
 }
 
 impl AuthCommand {
@@ -36,6 +73,9 @@ impl AuthCommand {
             Self::Add { alias } => run_add(&alias, config_dir),
             Self::List => run_list(config_dir),
             Self::SetDefault { alias } => run_set_default(&alias, config_dir),
+            Self::Grant { alias, extra_scopes } => run_grant(&alias, &extra_scopes, config_dir),
+            Self::Refresh { alias } => run_refresh(&alias, config_dir),
+            Self::Remove { alias, yes, revoke } => run_remove(&alias, yes, revoke, config_dir),
         }
     }
 }
@@ -188,7 +228,235 @@ fn run_set_default(alias: &str, config_dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-// Re-export for tests below — internal helpers are module-private.
+// ── auth grant ──────────────────────────────────────────────────────────────
+
+fn run_grant(alias: &str, extra_scopes: &[String], config_dir: &Path) -> Result<(), Error> {
+    validate_alias(alias)?;
+
+    // Load existing token to learn what scopes were already granted.
+    let tokens_dir = config_dir.join("tokens");
+    let token_path = tokens_dir.join(format!("{alias}.json"));
+    let existing: TokenState = {
+        let body = std::fs::read_to_string(&token_path).map_err(|_| Error::AccountNotFound {
+            account: alias.to_owned(),
+        })?;
+        serde_json::from_str(&body).map_err(|e| Error::Parse {
+            context: "read existing token".into(),
+            source: e,
+        })?
+    };
+
+    let config = Config::load(&crate::config::config_path(config_dir))?;
+    let creds = Credentials::load(&config.google.credentials_path)?;
+    let gmail = &config.services.gmail;
+
+    // Scope union: existing granted ∪ configured ∪ explicit --scope args.
+    let mut scopes: Vec<String> = existing.scopes;
+    for s in &gmail.scopes {
+        if !scopes.contains(s) {
+            scopes.push(s.clone());
+        }
+    }
+    for s in extra_scopes {
+        if !scopes.contains(s) {
+            scopes.push(s.clone());
+        }
+    }
+
+    let inputs = AuthFlowInputs {
+        credentials: &creds,
+        scopes: &scopes,
+        redirect_port: config.google.oauth.redirect_port,
+    };
+    let out = run_auth_grant(&inputs)?;
+
+    write_token_file(&tokens_dir, alias, &out.token)?;
+
+    // Update email in accounts.toml in case it changed (alias-swap scenario).
+    let accounts_file = accounts_path(config_dir);
+    let mut accounts = Accounts::load(&accounts_file)?;
+    upsert_account(&mut accounts, alias, &out.email);
+    accounts.save(&accounts_file)?;
+
+    eprintln!("\nScopes for `{alias}` upgraded. Granted: {}", scopes.join(", "));
+    Ok(())
+}
+
+// ── auth refresh ─────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct RefreshResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: i64,
+}
+
+fn run_refresh(alias: &str, config_dir: &Path) -> Result<(), Error> {
+    validate_alias(alias)?;
+
+    let tokens_dir = config_dir.join("tokens");
+    let token_path = tokens_dir.join(format!("{alias}.json"));
+    let existing: TokenState = {
+        let body = std::fs::read_to_string(&token_path).map_err(|_| Error::AccountNotFound {
+            account: alias.to_owned(),
+        })?;
+        serde_json::from_str(&body).map_err(|e| Error::Parse {
+            context: "read existing token".into(),
+            source: e,
+        })?
+    };
+
+    // Build and POST the refresh request using reqwest blocking.
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "refresh_token")
+        .append_pair("refresh_token", &existing.refresh_token)
+        .append_pair("client_id", &existing.client_id)
+        .append_pair("client_secret", &existing.client_secret)
+        .finish();
+
+    let client = blocking_reqwest_client()?;
+    let resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .map_err(Error::Network)?;
+    let status = resp.status().as_u16();
+    let text = resp.text().map_err(Error::Network)?;
+
+    if !(200..300).contains(&status) {
+        if text.contains("invalid_grant") {
+            return Err(Error::AuthRequired {
+                account: alias.to_owned(),
+                reason: format!(
+                    "refresh_token rejected (invalid_grant) — run \
+                     `auth add --alias {alias}` to re-authorize, or \
+                     `auth remove --alias {alias} --revoke` then re-add.\nServer: {text}"
+                ),
+            });
+        }
+        return Err(Error::upstream("google-oauth", status, text));
+    }
+
+    let parsed: RefreshResponse = serde_json::from_str(&text).map_err(|e| Error::Parse {
+        context: "OAuth refresh response".into(),
+        source: e,
+    })?;
+
+    let new_state = TokenState {
+        access_token: parsed.access_token,
+        refresh_token: parsed.refresh_token.unwrap_or(existing.refresh_token),
+        expires_at: chrono::Utc::now() + chrono::Duration::seconds(parsed.expires_in),
+        scopes: existing.scopes,
+        client_id: existing.client_id,
+        client_secret: existing.client_secret,
+        failed_until: None,
+        consecutive_failures: 0,
+    };
+    write_token_file(&tokens_dir, alias, &new_state)?;
+    eprintln!("Access token for `{alias}` refreshed successfully.");
+    Ok(())
+}
+
+// ── auth remove ──────────────────────────────────────────────────────────────
+
+fn run_remove(alias: &str, yes: bool, revoke: bool, config_dir: &Path) -> Result<(), Error> {
+    validate_alias(alias)?;
+
+    let accounts_file = accounts_path(config_dir);
+    let mut accounts = Accounts::load(&accounts_file)?;
+    if !accounts.accounts.iter().any(|a| a.alias == alias) {
+        return Err(Error::AccountNotFound {
+            account: alias.to_owned(),
+        });
+    }
+
+    if !yes {
+        eprint!("Remove account `{alias}` and delete its token? [y/N] ");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).map_err(Error::Io)?;
+        if !line.trim().eq_ignore_ascii_case("y") {
+            eprintln!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Optionally revoke the token at Google before deleting it.
+    let token_path = config_dir.join("tokens").join(format!("{alias}.json"));
+    if revoke {
+        if let Ok(body) = std::fs::read_to_string(&token_path) {
+            if let Ok(state) = serde_json::from_str::<TokenState>(&body) {
+                // Try revoke with refresh_token; ignore errors (best-effort).
+                let _ = revoke_token_at_google(&state.refresh_token);
+            }
+        }
+    }
+
+    // Delete the token file (ignore missing-file errors; it might never have
+    // been written if `auth add` was aborted).
+    if let Err(e) = std::fs::remove_file(&token_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(Error::Io(e));
+        }
+    }
+
+    // Remove from accounts.toml.  If removed entry was default, promote the
+    // first remaining entry to default so the file stays in a valid state.
+    let was_default = accounts
+        .accounts
+        .iter()
+        .find(|a| a.alias == alias)
+        .is_some_and(|a| a.default);
+    accounts.accounts.retain(|a| a.alias != alias);
+    if was_default {
+        if let Some(first) = accounts.accounts.first_mut() {
+            first.default = true;
+        }
+    }
+    accounts.save(&accounts_file)?;
+
+    eprintln!("Account `{alias}` removed.");
+    Ok(())
+}
+
+/// POST to Google's revoke endpoint with `token=<refresh_token>`.
+/// Best-effort: errors are ignored by the caller.
+fn revoke_token_at_google(refresh_token: &str) -> Result<(), Error> {
+    let client = blocking_reqwest_client()?;
+    let revoke_url = format!(
+        "https://oauth2.googleapis.com/revoke?token={}",
+        url::form_urlencoded::byte_serialize(refresh_token.as_bytes()).collect::<String>()
+    );
+    client
+        .post(&revoke_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .map_err(Error::Network)?;
+    Ok(())
+}
+
+fn blocking_reqwest_client() -> Result<reqwest::blocking::Client, Error> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(Error::Network)
+}
+
+// ── scope union helper ────────────────────────────────────────────────────────
+
+/// Compute the union of two scope lists. Order-preserving; duplicates removed.
+/// Exported for unit tests.
+pub(crate) fn scope_union(base: &[String], extra: &[String]) -> Vec<String> {
+    let mut result = base.to_vec();
+    for s in extra {
+        if !result.contains(s) {
+            result.push(s.clone());
+        }
+    }
+    result
+}
+
+// ── Re-export for tests below — internal helpers are module-private. ─────────
 #[cfg(test)]
 fn upsert_account_test_only(accounts: &mut Accounts, alias: &str, email: &str) {
     upsert_account(accounts, alias, email);
@@ -288,5 +556,112 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gpm-cli-test-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         dir
+    }
+
+    // ── scope_union ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn scope_union_merges_without_duplicates() {
+        let base = vec!["https://a".to_owned(), "https://b".to_owned()];
+        let extra = vec!["https://b".to_owned(), "https://c".to_owned()];
+        let result = scope_union(&base, &extra);
+        assert_eq!(result, vec!["https://a", "https://b", "https://c"]);
+    }
+
+    #[test]
+    fn scope_union_empty_extra_returns_base() {
+        let base = vec!["https://a".to_owned()];
+        let result = scope_union(&base, &[]);
+        assert_eq!(result, base);
+    }
+
+    #[test]
+    fn scope_union_empty_base_returns_extra() {
+        let extra = vec!["https://a".to_owned()];
+        let result = scope_union(&[], &extra);
+        assert_eq!(result, extra);
+    }
+
+    #[test]
+    fn scope_union_preserves_order() {
+        let base = vec!["https://z".to_owned(), "https://a".to_owned()];
+        let extra = vec!["https://m".to_owned()];
+        let result = scope_union(&base, &extra);
+        assert_eq!(result, vec!["https://z", "https://a", "https://m"]);
+    }
+
+    // ── run_remove (unit — no network) ───────────────────────────────────────
+
+    #[test]
+    fn remove_unknown_alias_returns_account_not_found() {
+        let dir = unique_tmp_dir();
+        // Write a minimal accounts.toml with one account.
+        let accts_path = dir.join("accounts.toml");
+        let accts = Accounts {
+            accounts: vec![AccountEntry {
+                alias: "work".into(),
+                email: "w@example.com".into(),
+                default: true,
+            }],
+        };
+        accts.save(&accts_path).expect("save");
+        let err = run_remove("ghost", true, false, &dir).unwrap_err();
+        assert!(
+            matches!(err, Error::AccountNotFound { .. }),
+            "expected AccountNotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn remove_known_alias_deletes_from_accounts_and_promotes_next_default() {
+        let dir = unique_tmp_dir();
+        let accts_path = dir.join("accounts.toml");
+        let accts = Accounts {
+            accounts: vec![
+                AccountEntry {
+                    alias: "personal".into(),
+                    email: "p@example.com".into(),
+                    default: true,
+                },
+                AccountEntry {
+                    alias: "work".into(),
+                    email: "w@example.com".into(),
+                    default: false,
+                },
+            ],
+        };
+        accts.save(&accts_path).expect("save");
+
+        // No token file — should not error.
+        run_remove("personal", true, false, &dir).expect("remove ok");
+
+        let after = Accounts::load(&accts_path).expect("reload");
+        assert_eq!(after.accounts.len(), 1);
+        assert_eq!(after.accounts[0].alias, "work");
+        assert!(after.accounts[0].default, "remaining account promoted to default");
+    }
+
+    #[test]
+    fn remove_deletes_token_file_when_present() {
+        let dir = unique_tmp_dir();
+        let accts_path = dir.join("accounts.toml");
+        let accts = Accounts {
+            accounts: vec![AccountEntry {
+                alias: "work".into(),
+                email: "w@example.com".into(),
+                default: true,
+            }],
+        };
+        accts.save(&accts_path).expect("save");
+
+        // Create a fake token file.
+        let tokens_dir = dir.join("tokens");
+        std::fs::create_dir_all(&tokens_dir).expect("mkdir");
+        let token_path = tokens_dir.join("work.json");
+        std::fs::write(&token_path, b"{}").expect("write token");
+
+        run_remove("work", true, false, &dir).expect("remove ok");
+
+        assert!(!token_path.exists(), "token file should have been deleted");
     }
 }
