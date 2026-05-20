@@ -1,8 +1,8 @@
 # google-personal-mcp
 
-> **Status: design phase.** No code lives in this tree yet — the prior Gmail-only prototype was discarded so its shape wouldn't constrain the design. The rewrite target is described in [`docs/adr/`](docs/adr/). Start there.
+> **Status: v0.2 released.** Gmail tools, multi-account OAuth, `dry_run` safety net, JSONL audit log, and the three-layer test harness are all shipped. See [CONTRIBUTING.md](CONTRIBUTING.md) to set up a local dev environment.
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server, to be written in Rust, that will expose personal Google services (Gmail first; Calendar, Contacts, Tasks, etc. to follow) to AI assistants. Designed as a single, always-on daemon: low memory footprint, multi-account from day one, suitable for a personal VPS or local machine.
+A [Model Context Protocol](https://modelcontextprotocol.io) server written in Rust that exposes personal Google services (Gmail first; Calendar, Contacts, Tasks, etc. to follow) to AI assistants. Designed as a single, always-on daemon: low memory footprint, multi-account from day one, suitable for a personal VPS or local machine.
 
 This MCP is a **data source** consumed by other knowledge tools. It is not a knowledge layer itself — no summarization, no classification, no "smart" composition. Tools are low-level primitives that mirror Google's APIs.
 
@@ -57,12 +57,12 @@ The daemon is designed to run forever. Rust's lack of a GC means memory stays fl
 
 ## Status and roadmap
 
-| Phase | What it covers |
-| --- | --- |
-| **Design** (current) | 19 ADRs in [`docs/adr/`](docs/adr/). No implementation. |
-| **v0.2** (not started) | First implementation: Gmail tools per [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md), single-account auth with refresh, stdio transport, enforced 0600 perms on token files. |
-| **v0.3 – v0.x** | Multi-account, hot-reload, Calendar tools. |
-| **v1.0** | First public release. Caching, HTTP transport, audit log, observability, fan-out, `mcp_status`, additive-only tool-versioning policy. |
+| Phase | What it covers | State |
+| --- | --- | --- |
+| **Design** | 19 ADRs in [`docs/adr/`](docs/adr/). Architecture, tool surface, auth, error model, security, testing strategy. | ✅ Complete |
+| **v0.2** | Gmail tools (`list_accounts`, `list_labels`, `get_thread`, `archive_thread`, `batch_archive`, `trash_thread`, `batch_trash`, `modify_thread_labels`, `batch_modify_thread_labels`), multi-account OAuth, `dry_run`, dedup, JSONL audit log, Layer 1–3 tests. | ✅ Released |
+| **v0.3 – v0.x** | `search_threads` with parallel hydration, Calendar tools, hot-reload, `send_email`. | 🔜 Planned |
+| **v1.0** | First public release. SQLite cache, HTTP transport, observability, fan-out, `mcp_status`, additive-only tool-versioning policy. | 🔮 Future |
 
 The cut between v0.x and v1.0 is deliberate: features only earn their keep when there's a second user or an external operator. v1-scope notes in each affected ADR record what is deferred.
 
@@ -81,13 +81,31 @@ The design lives in 19 ADRs. The load-bearing ones:
 
 See [ADR-0000](docs/adr/0000-adr-process.md) for the full corpus, the ADR process, and the open-questions queue.
 
+## Quick start
+
+```sh
+# 1. Build
+cargo build --release
+
+# 2. Create GCP credentials and config (see CONTRIBUTING.md)
+
+# 3. Add a Google account
+google-personal-mcp auth add --alias personal
+
+# 4. Wire into your MCP client (Claude Desktop, Claude Code, etc.)
+#    Command: /path/to/google-personal-mcp serve
+#    Transport: stdio
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full setup walkthrough.
+
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Pre-v0.2 the work is design, not code: read the ADRs, file issues against specific decisions, propose new ADRs per [ADR-0000](docs/adr/0000-adr-process.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local dev setup, the three test layers, and the GCP project / OAuth client configuration each contributor needs.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md). The daemon (once implemented) will hold long-lived OAuth refresh tokens for personal Google accounts; the threat model is in [ADR-0017](docs/adr/0017-secrets-at-rest.md) and [ADR-0018](docs/adr/0018-email-content-trust.md). Report vulnerabilities via [GitHub Security Advisories](https://github.com/torsday/google-personal-mcp/security/advisories/new).
+See [SECURITY.md](SECURITY.md). The daemon holds long-lived OAuth refresh tokens for personal Google accounts; the threat model is in [ADR-0017](docs/adr/0017-secrets-at-rest.md) and [ADR-0018](docs/adr/0018-email-content-trust.md). Report vulnerabilities via [GitHub Security Advisories](https://github.com/torsday/google-personal-mcp/security/advisories/new).
 
 ## License
 
