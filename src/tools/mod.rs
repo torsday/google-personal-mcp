@@ -2,6 +2,7 @@
 //! starting with `dry_run` + send-deduplication (ADR-0012). Tool modules
 //! themselves live under `gmail::tools` / `calendar::tools` per service.
 
+pub(crate) mod archive;
 pub(crate) mod destructive;
 pub(crate) mod get_thread;
 pub(crate) mod list_accounts;

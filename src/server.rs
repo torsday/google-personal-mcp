@@ -24,6 +24,7 @@ use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager};
 use crate::config::AccountEntry;
 use crate::error::{self, Error};
 use crate::gmail::client::GmailClient;
+use crate::tools::archive;
 use crate::tools::get_thread;
 use crate::tools::list_accounts;
 use crate::tools::list_labels;
@@ -73,6 +74,73 @@ fn list_labels_descriptor() -> Tool {
     t
 }
 
+fn archive_thread_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "archive_thread".into();
+    t.description = Some(
+        "Remove the INBOX label from a single thread (archive it). Does not delete. \
+         Applies threads.modify (10 quota units). \
+         dry_run: true returns the outcome without making any Gmail API call."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {
+                "type": "string",
+                "description": "The account alias from accounts.toml (e.g. \"personal\", \"work\")."
+            },
+            "thread_id": {
+                "type": "string",
+                "description": "Gmail thread ID to archive."
+            },
+            "dry_run": {
+                "type": "boolean",
+                "default": false,
+                "description": "If true, returns the outcome without making any Gmail API call."
+            }
+        },
+        "required": ["account", "thread_id"]
+    }));
+    t
+}
+
+fn batch_archive_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "batch_archive".into();
+    t.description = Some(
+        "Archive multiple threads in parallel (remove INBOX label from each). \
+         Implemented as N concurrent threads.modify calls (10 quota units each). \
+         Accepts 1–100 thread IDs. Never short-circuits: returns per-item ok/error \
+         for every id. dry_run: true returns ok: true for all ids without making any \
+         Gmail calls."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {
+                "type": "string",
+                "description": "The account alias from accounts.toml."
+            },
+            "thread_ids": {
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1,
+                "maxItems": 100,
+                "description": "List of Gmail thread IDs to archive (1–100)."
+            },
+            "dry_run": {
+                "type": "boolean",
+                "default": false,
+                "description": "If true, returns ok: true for all ids without making any Gmail calls."
+            }
+        },
+        "required": ["account", "thread_ids"]
+    }));
+    t
+}
+
 fn get_thread_descriptor() -> Tool {
     let mut t = Tool::default();
     t.name = "get_thread".into();
@@ -113,6 +181,8 @@ pub(crate) fn registered_tools() -> Vec<Tool> {
         list_accounts_descriptor(),
         list_labels_descriptor(),
         get_thread_descriptor(),
+        archive_thread_descriptor(),
+        batch_archive_descriptor(),
     ]
 }
 
@@ -179,51 +249,46 @@ impl ServerHandler for GoogleServer {
         match request.name.as_ref() {
                 "list_accounts" => {
                     let out = list_accounts::list_accounts(&self.accounts);
-                    let value = serde_json::to_value(&out).map_err(|e| Error::Internal {
-                        context: "list_accounts serialize".into(),
-                        source: anyhow::Error::new(e),
-                    });
-                    match value {
-                        Ok(v) => Ok(CallToolResult::structured(v)),
-                        Err(e) => Err(error::to_mcp_error(&e)),
-                    }
+                    ok_result("list_accounts serialize", &out)
                 }
 
                 "list_labels" => {
                     let account = extract_string_arg(&request, "account")?;
-                    let result = list_labels::list_labels(&self.gmail, &account).await;
-                    match result {
-                        Ok(out) => {
-                            let v = serde_json::to_value(&out).map_err(|e| Error::Internal {
-                                context: "list_labels serialize".into(),
-                                source: anyhow::Error::new(e),
-                            });
-                            match v {
-                                Ok(val) => Ok(CallToolResult::structured(val)),
-                                Err(e) => Err(error::to_mcp_error(&e)),
-                            }
-                        }
-                        Err(e) => Err(error::to_mcp_error(&e)),
-                    }
+                    list_labels::list_labels(&self.gmail, &account).await
+                        .map_err(|e| error::to_mcp_error(&e))
+                        .and_then(|out| ok_result("list_labels serialize", &out))
                 }
 
                 "get_thread" => {
                     let account = extract_string_arg(&request, "account")?;
                     let thread_id = extract_string_arg(&request, "thread_id")?;
-                    let result = get_thread::get_thread(&self.gmail, &account, &thread_id).await;
-                    match result {
-                        Ok(out) => {
-                            let v = serde_json::to_value(&out).map_err(|e| Error::Internal {
-                                context: "get_thread serialize".into(),
-                                source: anyhow::Error::new(e),
-                            });
-                            match v {
-                                Ok(val) => Ok(CallToolResult::structured(val)),
-                                Err(e) => Err(error::to_mcp_error(&e)),
-                            }
-                        }
-                        Err(e) => Err(error::to_mcp_error(&e)),
-                    }
+                    get_thread::get_thread(&self.gmail, &account, &thread_id).await
+                        .map_err(|e| error::to_mcp_error(&e))
+                        .and_then(|out| ok_result("get_thread serialize", &out))
+                }
+
+                "archive_thread" => {
+                    let account = extract_string_arg(&request, "account")?;
+                    let thread_id = extract_string_arg(&request, "thread_id")?;
+                    let dry_run = extract_bool_arg(&request, "dry_run");
+                    archive::archive_thread(
+                        &self.gmail,
+                        archive::ArchiveThreadInput { account, thread_id, dry_run },
+                    ).await
+                        .map_err(|e| error::to_mcp_error(&e))
+                        .and_then(|out| ok_result("archive_thread serialize", &out))
+                }
+
+                "batch_archive" => {
+                    let account = extract_string_arg(&request, "account")?;
+                    let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
+                    let dry_run = extract_bool_arg(&request, "dry_run");
+                    archive::batch_archive(
+                        Arc::clone(&self.gmail),
+                        archive::BatchArchiveInput { account, thread_ids, dry_run },
+                    ).await
+                        .map_err(|e| error::to_mcp_error(&e))
+                        .and_then(|out| ok_result("batch_archive serialize", &out))
                 }
 
                 other => Err(rmcp::ErrorData::invalid_params(
@@ -232,6 +297,43 @@ impl ServerHandler for GoogleServer {
                 )),
         }
     }
+}
+
+/// Serialize a successful tool output into a `CallToolResult`.
+fn ok_result(context: &'static str, v: &impl serde::Serialize) -> Result<CallToolResult, rmcp::ErrorData> {
+    serde_json::to_value(v)
+        .map(CallToolResult::structured)
+        .map_err(|e| error::to_mcp_error(&Error::Internal {
+            context: context.into(),
+            source: anyhow::Error::new(e),
+        }))
+}
+
+/// Extract an optional boolean parameter; returns `false` when absent or not a bool.
+fn extract_bool_arg(request: &CallToolRequestParams, field: &str) -> bool {
+    request.arguments.as_ref()
+        .and_then(|a| a.get(field))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Extract a required `Vec<String>` parameter from a `CallToolRequestParams`.
+fn extract_string_array_arg(
+    request: &CallToolRequestParams,
+    field: &str,
+) -> Result<Vec<String>, rmcp::ErrorData> {
+    let items: Vec<String> = request.arguments.as_ref()
+        .and_then(|a| a.get(field))
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if items.is_empty() {
+        return Err(rmcp::ErrorData::invalid_params(
+            format!("missing required argument `{field}`"),
+            None,
+        ));
+    }
+    Ok(items)
 }
 
 /// Extract a required `String` parameter from a `CallToolRequestParams`.
