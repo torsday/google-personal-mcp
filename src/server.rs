@@ -5,44 +5,99 @@
 //! the per-service clients (token manager, Gmail HTTP wrapper) and will hold
 //! the audit log and dedup cache once those land (#21, #11).
 //!
-//! v0.2 exposes no tools yet — the `#[tool_router]`-decorated implementations
-//! from `gmail::tools` will compose into [`GoogleServer::new`] as they ship.
-//! The default `ServerHandler::list_tools` returns an empty list, which is
-//! the correct behavior for a freshly-deployed daemon that hasn't been
-//! granted any accounts yet.
+//! Tool routing is manual `list_tools` / `call_tool` dispatch — the
+//! `#[tool_router]` macro path is reserved for future services. Tools added
+//! in issue #8: `list_accounts`, `list_labels`.
 
 use std::sync::Arc;
 
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    Implementation, InitializeResult, ProtocolVersion, ServerCapabilities, ServerInfo,
+    CallToolRequestParams, CallToolResult, Implementation, InitializeResult, JsonObject,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
 };
+use rmcp::service::RequestContext;
+use rmcp::RoleServer;
+use serde_json::{json, Value};
 
 use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager};
-use crate::error::Error;
+use crate::config::AccountEntry;
+use crate::error::{self, Error};
 use crate::gmail::client::GmailClient;
+use crate::tools::list_accounts;
+use crate::tools::list_labels;
+
+// ── Tool descriptor constants ─────────────────────────────────────────────────
+
+fn schema_object(value: &Value) -> Arc<JsonObject> {
+    Arc::new(value.as_object().cloned().unwrap_or_default())
+}
+
+fn list_accounts_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "list_accounts".into();
+    t.description = Some(
+        "List all Google accounts registered in accounts.toml. \
+         Returns alias, email address, and enabled status for each account. \
+         No `account` parameter — this tool reads local config only."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {},
+        "required": []
+    }));
+    t
+}
+
+fn list_labels_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "list_labels".into();
+    t.description = Some(
+        "List all Gmail labels visible to the given account, including system labels \
+         (INBOX, STARRED, SENT, etc.) and user-created labels. \
+         Returns label_id, name, kind (system|user), messages_total, messages_unread."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {
+                "type": "string",
+                "description": "The account alias from accounts.toml (e.g. \"personal\", \"work\")."
+            }
+        },
+        "required": ["account"]
+    }));
+    t
+}
+
+// ── GoogleServer ──────────────────────────────────────────────────────────────
 
 /// The root rmcp service. Holds shared state passed to tool implementations.
 ///
 /// Built once at `serve` startup; cloned-as-Arc handles are handed to each
-/// `#[tool_router]` module. Hot-reload of the underlying `TokenManager` is
-/// handled via the `Arc<ArcSwap<_>>` pattern documented in [ADR-0002] (out of
-/// scope for this issue).
+/// tool dispatch path.
 #[derive(Clone)]
 pub(crate) struct GoogleServer {
-    #[allow(dead_code)] // wired up by future tool tickets (#8–#15)
+    /// Registered Google accounts from `accounts.toml`. Used by `list_accounts`.
+    accounts: Arc<Vec<AccountEntry>>,
     tokens: Arc<TokenManager<ReqwestRefreshTransport>>,
-    #[allow(dead_code)]
     gmail: Arc<GmailClient<ReqwestRefreshTransport>>,
 }
 
 impl GoogleServer {
     /// Construct the server with its component clients pre-wired.
     pub(crate) const fn new(
+        accounts: Arc<Vec<AccountEntry>>,
         tokens: Arc<TokenManager<ReqwestRefreshTransport>>,
         gmail: Arc<GmailClient<ReqwestRefreshTransport>>,
     ) -> Self {
-        Self { tokens, gmail }
+        Self {
+            accounts,
+            tokens,
+            gmail,
+        }
     }
 }
 
@@ -58,6 +113,82 @@ impl ServerHandler for GoogleServer {
                 .to_owned(),
         );
         info
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        Ok(ListToolsResult {
+            tools: vec![list_accounts_descriptor(), list_labels_descriptor()],
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        match request.name.as_ref() {
+                "list_accounts" => {
+                    let out = list_accounts::list_accounts(&self.accounts);
+                    let value = serde_json::to_value(&out).map_err(|e| Error::Internal {
+                        context: "list_accounts serialize".into(),
+                        source: anyhow::Error::new(e),
+                    });
+                    match value {
+                        Ok(v) => Ok(CallToolResult::structured(v)),
+                        Err(e) => Err(error::to_mcp_error(&e)),
+                    }
+                }
+
+                "list_labels" => {
+                    let account = extract_string_arg(&request, "account")?;
+                    let result = list_labels::list_labels(&self.gmail, &account).await;
+                    match result {
+                        Ok(out) => {
+                            let v = serde_json::to_value(&out).map_err(|e| Error::Internal {
+                                context: "list_labels serialize".into(),
+                                source: anyhow::Error::new(e),
+                            });
+                            match v {
+                                Ok(val) => Ok(CallToolResult::structured(val)),
+                                Err(e) => Err(error::to_mcp_error(&e)),
+                            }
+                        }
+                        Err(e) => Err(error::to_mcp_error(&e)),
+                    }
+                }
+
+                other => Err(rmcp::ErrorData::invalid_params(
+                    format!("unknown tool `{other}`"),
+                    None,
+                )),
+        }
+    }
+}
+
+/// Extract a required `String` parameter from a `CallToolRequestParams`.
+fn extract_string_arg(
+    request: &CallToolRequestParams,
+    field: &str,
+) -> Result<String, rmcp::ErrorData> {
+    let args = request.arguments.as_ref().ok_or_else(|| {
+        rmcp::ErrorData::invalid_params(format!("missing required argument `{field}`"), None)
+    })?;
+    match args.get(field) {
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(_) => Err(rmcp::ErrorData::invalid_params(
+            format!("argument `{field}` must be a string"),
+            None,
+        )),
+        None => Err(rmcp::ErrorData::invalid_params(
+            format!("missing required argument `{field}`"),
+            None,
+        )),
     }
 }
 
@@ -98,7 +229,22 @@ mod tests {
             tokens.clone(),
             reqwest::Client::new(),
         ));
-        GoogleServer::new(tokens, gmail)
+        GoogleServer::new(Arc::new(vec![]), tokens, gmail)
+    }
+
+    fn fake_server_with_accounts(accounts: Vec<AccountEntry>) -> GoogleServer {
+        let tokens = Arc::new(TokenManager::new(
+            HashMap::new(),
+            ReqwestRefreshTransport::new(reqwest::Client::new()),
+            "https://example/token",
+            std::env::temp_dir().join(format!("gpm-srv-test-{}", std::process::id())),
+        ));
+        let gmail = Arc::new(GmailClient::new(
+            "https://gmail.googleapis.com/gmail/v1",
+            tokens.clone(),
+            reqwest::Client::new(),
+        ));
+        GoogleServer::new(Arc::new(accounts), tokens, gmail)
     }
 
     #[test]
@@ -107,8 +253,6 @@ mod tests {
         let info = server.get_info();
         assert_eq!(info.server_info.name, env!("CARGO_PKG_NAME"));
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
-        // Capabilities advertise tools support — even though the tool list
-        // is empty in v0.2, this is what tells clients we'll have tools.
         assert!(
             info.capabilities.tools.is_some(),
             "tools capability not advertised"
@@ -122,15 +266,11 @@ mod tests {
         );
     }
 
-    // Helpers used by the Send+Sync test, hoisted to module scope so clippy
-    // doesn't complain about items-after-statements inside a function body.
     fn assert_bounds<T: Send + Sync + 'static>() {}
     fn assert_handler<H: ServerHandler>(_: &H) {}
 
     #[test]
     fn google_server_is_send_sync_static() {
-        // ServerHandler requires Send + Sync + 'static. Asserting at the
-        // type level catches a regression at compile time, not runtime.
         assert_bounds::<GoogleServer>();
         assert_handler(&fake_server());
     }
@@ -145,14 +285,79 @@ mod tests {
 
     #[test]
     fn server_can_be_cloned() {
-        // GoogleServer is `Clone` so cloneable handles can be passed to
-        // future per-tool dispatch code. Use both copies so clippy can see
-        // the clone isn't redundant.
         let server = fake_server();
         let cloned = server.clone();
         assert_eq!(
             server.get_info().server_info.name,
             cloned.get_info().server_info.name
         );
+    }
+
+    // ── Descriptor snapshot tests (Layer 4) ──────────────────────────────────
+
+    #[test]
+    fn list_accounts_descriptor_shape() {
+        let t = list_accounts_descriptor();
+        assert_eq!(t.name, "list_accounts");
+        assert!(t.description.is_some());
+        // No required fields — list_accounts takes no parameters
+        let schema = serde_json::to_value(t.input_schema.as_ref()).expect("schema");
+        assert_eq!(schema["type"], "object");
+        let required = schema.get("required").and_then(|r| r.as_array());
+        assert!(
+            required.is_none_or(Vec::is_empty),
+            "list_accounts should have no required params"
+        );
+    }
+
+    #[test]
+    fn list_labels_descriptor_shape() {
+        let t = list_labels_descriptor();
+        assert_eq!(t.name, "list_labels");
+        assert!(t.description.is_some());
+        let schema = serde_json::to_value(t.input_schema.as_ref()).expect("schema");
+        let required = schema["required"].as_array().expect("required array");
+        assert!(
+            required.iter().any(|v| v == "account"),
+            "account must be required"
+        );
+    }
+
+    // ── extract_string_arg helper ─────────────────────────────────────────────
+
+    #[test]
+    fn extract_string_arg_present() {
+        let mut params = CallToolRequestParams::new("list_labels");
+        let mut args = serde_json::Map::new();
+        args.insert("account".into(), Value::String("personal".into()));
+        params.arguments = Some(args);
+        let result = extract_string_arg(&params, "account").unwrap();
+        assert_eq!(result, "personal");
+    }
+
+    #[test]
+    fn extract_string_arg_missing_args_returns_error() {
+        let params = CallToolRequestParams::new("list_labels");
+        let err = extract_string_arg(&params, "account").unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn extract_string_arg_wrong_type_returns_error() {
+        let mut params = CallToolRequestParams::new("list_labels");
+        let mut args = serde_json::Map::new();
+        args.insert("account".into(), Value::Number(42.into()));
+        params.arguments = Some(args);
+        let err = extract_string_arg(&params, "account").unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn extract_string_arg_absent_key_returns_error() {
+        let mut params = CallToolRequestParams::new("list_labels");
+        let args = serde_json::Map::new();
+        params.arguments = Some(args);
+        let err = extract_string_arg(&params, "account").unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 }
