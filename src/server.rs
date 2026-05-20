@@ -28,6 +28,7 @@ use crate::tools::archive;
 use crate::tools::get_thread;
 use crate::tools::list_accounts;
 use crate::tools::list_labels;
+use crate::tools::trash;
 
 // ── Tool descriptor constants ─────────────────────────────────────────────────
 
@@ -172,6 +173,73 @@ fn get_thread_descriptor() -> Tool {
     t
 }
 
+fn trash_thread_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "trash_thread".into();
+    t.description = Some(
+        "Move a single Gmail thread to trash (recoverable for 30 days). \
+         Calls threads.trash (20 quota units). \
+         dry_run: true returns the outcome without making any Gmail API call."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {
+                "type": "string",
+                "description": "The account alias from accounts.toml (e.g. \"personal\", \"work\")."
+            },
+            "thread_id": {
+                "type": "string",
+                "description": "Gmail thread ID to move to trash."
+            },
+            "dry_run": {
+                "type": "boolean",
+                "default": false,
+                "description": "If true, returns the outcome without making any Gmail API call."
+            }
+        },
+        "required": ["account", "thread_id"]
+    }));
+    t
+}
+
+fn batch_trash_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "batch_trash".into();
+    t.description = Some(
+        "Move multiple threads to trash in parallel (recoverable for 30 days). \
+         Implemented as N concurrent threads.trash calls (20 quota units each). \
+         Accepts 1–100 thread IDs. Never short-circuits: returns per-item ok/error \
+         for every id. dry_run: true returns ok: true for all ids without making any \
+         Gmail calls."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {
+                "type": "string",
+                "description": "The account alias from accounts.toml."
+            },
+            "thread_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 100,
+                "description": "List of Gmail thread IDs to trash (1–100)."
+            },
+            "dry_run": {
+                "type": "boolean",
+                "default": false,
+                "description": "If true, returns ok: true for all ids without making any Gmail calls."
+            }
+        },
+        "required": ["account", "thread_ids"]
+    }));
+    t
+}
+
 /// Return the canonical list of every registered v0.2 tool descriptor.
 ///
 /// This is the single source of truth consumed by `list_tools` and by the
@@ -183,6 +251,8 @@ pub(crate) fn registered_tools() -> Vec<Tool> {
         get_thread_descriptor(),
         archive_thread_descriptor(),
         batch_archive_descriptor(),
+        trash_thread_descriptor(),
+        batch_trash_descriptor(),
     ]
 }
 
@@ -289,6 +359,30 @@ impl ServerHandler for GoogleServer {
                     ).await
                         .map_err(|e| error::to_mcp_error(&e))
                         .and_then(|out| ok_result("batch_archive serialize", &out))
+                }
+
+                "trash_thread" => {
+                    let account = extract_string_arg(&request, "account")?;
+                    let thread_id = extract_string_arg(&request, "thread_id")?;
+                    let dry_run = extract_bool_arg(&request, "dry_run");
+                    trash::trash_thread(
+                        &self.gmail,
+                        trash::TrashThreadInput { account, thread_id, dry_run },
+                    ).await
+                        .map_err(|e| error::to_mcp_error(&e))
+                        .and_then(|out| ok_result("trash_thread serialize", &out))
+                }
+
+                "batch_trash" => {
+                    let account = extract_string_arg(&request, "account")?;
+                    let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
+                    let dry_run = extract_bool_arg(&request, "dry_run");
+                    trash::batch_trash(
+                        Arc::clone(&self.gmail),
+                        trash::BatchTrashInput { account, thread_ids, dry_run },
+                    ).await
+                        .map_err(|e| error::to_mcp_error(&e))
+                        .and_then(|out| ok_result("batch_trash serialize", &out))
                 }
 
                 other => Err(rmcp::ErrorData::invalid_params(
