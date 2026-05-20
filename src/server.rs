@@ -28,6 +28,7 @@ use crate::tools::archive;
 use crate::tools::get_thread;
 use crate::tools::list_accounts;
 use crate::tools::list_labels;
+use crate::tools::modify_labels;
 use crate::tools::trash;
 
 // ── Tool descriptor constants ─────────────────────────────────────────────────
@@ -243,6 +244,95 @@ fn batch_trash_descriptor() -> Tool {
 /// Return the canonical list of every registered v0.2 tool descriptor.
 ///
 /// This is the single source of truth consumed by `list_tools` and by the
+fn modify_thread_labels_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "modify_thread_labels".into();
+    t.description = Some(
+        "Add and/or remove arbitrary labels on a single Gmail thread. \
+         Calls threads.modify (10 quota units). At least one of add_label_ids or \
+         remove_label_ids must be non-empty. Returns the thread's label_ids after \
+         the change, as reported by Gmail. dry_run: true returns applied: false \
+         without making any Gmail API call."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {
+                "type": "string",
+                "description": "The account alias from accounts.toml."
+            },
+            "thread_id": {
+                "type": "string",
+                "description": "Gmail thread ID to modify."
+            },
+            "add_label_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Label IDs to add (e.g. [\"STARRED\", \"Label_123\"])."
+            },
+            "remove_label_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Label IDs to remove (e.g. [\"INBOX\", \"UNREAD\"])."
+            },
+            "dry_run": {
+                "type": "boolean",
+                "default": false,
+                "description": "If true, returns the outcome without making any Gmail API call."
+            }
+        },
+        "required": ["account", "thread_id"]
+    }));
+    t
+}
+
+fn batch_modify_thread_labels_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "batch_modify_thread_labels".into();
+    t.description = Some(
+        "Apply the same label add/remove operation to multiple threads in parallel. \
+         Implemented as N concurrent threads.modify calls (10 quota units each). \
+         Accepts 1–100 thread IDs. At least one of add_label_ids or remove_label_ids \
+         must be non-empty. Never short-circuits: returns per-item ok/error for every id. \
+         dry_run: true returns ok: true for all ids without making any Gmail calls."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {
+                "type": "string",
+                "description": "The account alias from accounts.toml."
+            },
+            "thread_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 100,
+                "description": "List of Gmail thread IDs to modify (1–100)."
+            },
+            "add_label_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Label IDs to add to every thread."
+            },
+            "remove_label_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Label IDs to remove from every thread."
+            },
+            "dry_run": {
+                "type": "boolean",
+                "default": false,
+                "description": "If true, returns ok: true for all ids without making any Gmail calls."
+            }
+        },
+        "required": ["account", "thread_ids"]
+    }));
+    t
+}
+
 /// Layer 4 snapshot tests (`tests/snapshot_tool_registry.rs`).
 pub(crate) fn registered_tools() -> Vec<Tool> {
     vec![
@@ -253,6 +343,8 @@ pub(crate) fn registered_tools() -> Vec<Tool> {
         batch_archive_descriptor(),
         trash_thread_descriptor(),
         batch_trash_descriptor(),
+        modify_thread_labels_descriptor(),
+        batch_modify_thread_labels_descriptor(),
     ]
 }
 
@@ -311,6 +403,7 @@ impl ServerHandler for GoogleServer {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -383,6 +476,50 @@ impl ServerHandler for GoogleServer {
                     ).await
                         .map_err(|e| error::to_mcp_error(&e))
                         .and_then(|out| ok_result("batch_trash serialize", &out))
+                }
+
+                "modify_thread_labels" => {
+                    let account = extract_string_arg(&request, "account")?;
+                    let thread_id = extract_string_arg(&request, "thread_id")?;
+                    let add_label_ids = extract_string_array_arg(&request, "add_label_ids")
+                        .unwrap_or_default();
+                    let remove_label_ids = extract_string_array_arg(&request, "remove_label_ids")
+                        .unwrap_or_default();
+                    let dry_run = extract_bool_arg(&request, "dry_run");
+                    modify_labels::modify_thread_labels(
+                        &self.gmail,
+                        modify_labels::ModifyThreadLabelsInput {
+                            account,
+                            thread_id,
+                            add_label_ids,
+                            remove_label_ids,
+                            dry_run,
+                        },
+                    ).await
+                        .map_err(|e| error::to_mcp_error(&e))
+                        .and_then(|out| ok_result("modify_thread_labels serialize", &out))
+                }
+
+                "batch_modify_thread_labels" => {
+                    let account = extract_string_arg(&request, "account")?;
+                    let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
+                    let add_label_ids = extract_string_array_arg(&request, "add_label_ids")
+                        .unwrap_or_default();
+                    let remove_label_ids = extract_string_array_arg(&request, "remove_label_ids")
+                        .unwrap_or_default();
+                    let dry_run = extract_bool_arg(&request, "dry_run");
+                    modify_labels::batch_modify_thread_labels(
+                        Arc::clone(&self.gmail),
+                        modify_labels::BatchModifyThreadLabelsInput {
+                            account,
+                            thread_ids,
+                            add_label_ids,
+                            remove_label_ids,
+                            dry_run,
+                        },
+                    ).await
+                        .map_err(|e| error::to_mcp_error(&e))
+                        .and_then(|out| ok_result("batch_modify_thread_labels serialize", &out))
                 }
 
                 other => Err(rmcp::ErrorData::invalid_params(
