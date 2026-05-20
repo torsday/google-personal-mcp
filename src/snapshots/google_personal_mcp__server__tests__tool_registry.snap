@@ -1,6 +1,6 @@
 ---
 source: src/server.rs
-assertion_line: 391
+assertion_line: 547
 expression: json
 ---
 [
@@ -49,5 +49,62 @@ expression: json
       "type": "object"
     },
     "name": "get_thread"
+  },
+  {
+    "description": "Remove the INBOX label from a single thread (archive it). Does not delete. Applies threads.modify (10 quota units). dry_run: true returns the outcome without making any Gmail API call.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml (e.g. \"personal\", \"work\").",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "If true, returns the outcome without making any Gmail API call.",
+          "type": "boolean"
+        },
+        "thread_id": {
+          "description": "Gmail thread ID to archive.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "thread_id"
+      ],
+      "type": "object"
+    },
+    "name": "archive_thread"
+  },
+  {
+    "description": "Archive multiple threads in parallel (remove INBOX label from each). Implemented as N concurrent threads.modify calls (10 quota units each). Accepts 1–100 thread IDs. Never short-circuits: returns per-item ok/error for every id. dry_run: true returns ok: true for all ids without making any Gmail calls.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "If true, returns ok: true for all ids without making any Gmail calls.",
+          "type": "boolean"
+        },
+        "thread_ids": {
+          "description": "List of Gmail thread IDs to archive (1–100).",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "account",
+        "thread_ids"
+      ],
+      "type": "object"
+    },
+    "name": "batch_archive"
   }
 ]
