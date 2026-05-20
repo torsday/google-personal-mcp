@@ -72,6 +72,14 @@ fn list_labels_descriptor() -> Tool {
     t
 }
 
+/// Return the canonical list of every registered v0.2 tool descriptor.
+///
+/// This is the single source of truth consumed by `list_tools` and by the
+/// Layer 4 snapshot tests (`tests/snapshot_tool_registry.rs`).
+pub(crate) fn registered_tools() -> Vec<Tool> {
+    vec![list_accounts_descriptor(), list_labels_descriptor()]
+}
+
 // ── GoogleServer ──────────────────────────────────────────────────────────────
 
 /// The root rmcp service. Holds shared state passed to tool implementations.
@@ -121,7 +129,7 @@ impl ServerHandler for GoogleServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
         Ok(ListToolsResult {
-            tools: vec![list_accounts_descriptor(), list_labels_descriptor()],
+            tools: registered_tools(),
             next_cursor: None,
             meta: None,
         })
@@ -359,5 +367,26 @@ mod tests {
         params.arguments = Some(args);
         let err = extract_string_arg(&params, "account").unwrap_err();
         assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    // ── Layer 4: tool-registry snapshot tests ────────────────────────────────
+
+    /// Snapshot the full tool registry so that any accidental rename, schema
+    /// change, or removal is caught by CI.  Update with `cargo insta review`.
+    #[test]
+    fn tool_registry_snapshot() {
+        let tools = registered_tools();
+        // Serialise to a stable JSON shape for the snapshot.
+        let json: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": *t.input_schema,
+                })
+            })
+            .collect();
+        insta::assert_json_snapshot!("tool_registry", json);
     }
 }

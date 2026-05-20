@@ -1,0 +1,32 @@
+---
+source: src/server.rs
+assertion_line: 391
+expression: json
+---
+[
+  {
+    "description": "List all Google accounts registered in accounts.toml. Returns alias, email address, and enabled status for each account. No `account` parameter — this tool reads local config only.",
+    "input_schema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_accounts"
+  },
+  {
+    "description": "List all Gmail labels visible to the given account, including system labels (INBOX, STARRED, SENT, etc.) and user-created labels. Returns label_id, name, kind (system|user), messages_total, messages_unread.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml (e.g. \"personal\", \"work\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account"
+      ],
+      "type": "object"
+    },
+    "name": "list_labels"
+  }
+]
