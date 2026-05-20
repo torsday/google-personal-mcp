@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod audit;
 mod auth;
 mod config;
 mod error;
@@ -18,6 +19,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
+use crate::audit::AuditWriter;
 use crate::auth::cli::AuthCommand;
 use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager};
 use crate::error::Error;
@@ -100,7 +102,8 @@ fn run_serve_blocking() -> Result<(), Error> {
     let _ = &cfg;
 
     let accounts = Arc::new(loaded_accounts.accounts);
-    let server = GoogleServer::new(accounts, tokens, gmail);
+    let audit = AuditWriter::new(&dir);
+    let server = GoogleServer::new(accounts, tokens, gmail, audit);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

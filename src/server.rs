@@ -24,6 +24,7 @@ use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager};
 use crate::config::AccountEntry;
 use crate::error::{self, Error};
 use crate::gmail::client::GmailClient;
+use crate::audit::{AuditEntry, AuditWriter};
 use crate::tools::archive;
 use crate::tools::get_thread;
 use crate::tools::list_accounts;
@@ -360,6 +361,8 @@ pub(crate) struct GoogleServer {
     accounts: Arc<Vec<AccountEntry>>,
     tokens: Arc<TokenManager<ReqwestRefreshTransport>>,
     gmail: Arc<GmailClient<ReqwestRefreshTransport>>,
+    /// Best-effort JSONL audit writer per ADR-0011 v0.2 subset.
+    audit: AuditWriter,
 }
 
 impl GoogleServer {
@@ -368,11 +371,13 @@ impl GoogleServer {
         accounts: Arc<Vec<AccountEntry>>,
         tokens: Arc<TokenManager<ReqwestRefreshTransport>>,
         gmail: Arc<GmailClient<ReqwestRefreshTransport>>,
+        audit: AuditWriter,
     ) -> Self {
         Self {
             accounts,
             tokens,
             gmail,
+            audit,
         }
     }
 }
@@ -434,10 +439,28 @@ impl ServerHandler for GoogleServer {
                     let account = extract_string_arg(&request, "account")?;
                     let thread_id = extract_string_arg(&request, "thread_id")?;
                     let dry_run = extract_bool_arg(&request, "dry_run");
-                    archive::archive_thread(
+                    let result = archive::archive_thread(
                         &self.gmail,
-                        archive::ArchiveThreadInput { account, thread_id, dry_run },
-                    ).await
+                        archive::ArchiveThreadInput {
+                            account: account.clone(),
+                            thread_id: thread_id.clone(),
+                            dry_run,
+                        },
+                    ).await;
+                    self.audit.write(&AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        account,
+                        tool: "archive_thread".into(),
+                        params_summary: crate::audit::summarize_thread_op(
+                            &[thread_id], dry_run, None,
+                        ),
+                        action: if dry_run { "dry_run".into() } else { "applied".into() },
+                        result: match &result {
+                            Ok(_) => "ok".into(),
+                            Err(e) => format!("error: {e}"),
+                        },
+                    });
+                    result
                         .map_err(|e| error::to_mcp_error(&e))
                         .and_then(|out| ok_result("archive_thread serialize", &out))
                 }
@@ -446,10 +469,28 @@ impl ServerHandler for GoogleServer {
                     let account = extract_string_arg(&request, "account")?;
                     let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
                     let dry_run = extract_bool_arg(&request, "dry_run");
-                    archive::batch_archive(
+                    let result = archive::batch_archive(
                         Arc::clone(&self.gmail),
-                        archive::BatchArchiveInput { account, thread_ids, dry_run },
-                    ).await
+                        archive::BatchArchiveInput {
+                            account: account.clone(),
+                            thread_ids: thread_ids.clone(),
+                            dry_run,
+                        },
+                    ).await;
+                    self.audit.write(&AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        account,
+                        tool: "batch_archive".into(),
+                        params_summary: crate::audit::summarize_thread_op(
+                            &thread_ids, dry_run, None,
+                        ),
+                        action: if dry_run { "dry_run".into() } else { "applied".into() },
+                        result: match &result {
+                            Ok(_) => "ok".into(),
+                            Err(e) => format!("error: {e}"),
+                        },
+                    });
+                    result
                         .map_err(|e| error::to_mcp_error(&e))
                         .and_then(|out| ok_result("batch_archive serialize", &out))
                 }
@@ -458,10 +499,28 @@ impl ServerHandler for GoogleServer {
                     let account = extract_string_arg(&request, "account")?;
                     let thread_id = extract_string_arg(&request, "thread_id")?;
                     let dry_run = extract_bool_arg(&request, "dry_run");
-                    trash::trash_thread(
+                    let result = trash::trash_thread(
                         &self.gmail,
-                        trash::TrashThreadInput { account, thread_id, dry_run },
-                    ).await
+                        trash::TrashThreadInput {
+                            account: account.clone(),
+                            thread_id: thread_id.clone(),
+                            dry_run,
+                        },
+                    ).await;
+                    self.audit.write(&AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        account,
+                        tool: "trash_thread".into(),
+                        params_summary: crate::audit::summarize_thread_op(
+                            &[thread_id], dry_run, None,
+                        ),
+                        action: if dry_run { "dry_run".into() } else { "applied".into() },
+                        result: match &result {
+                            Ok(_) => "ok".into(),
+                            Err(e) => format!("error: {e}"),
+                        },
+                    });
+                    result
                         .map_err(|e| error::to_mcp_error(&e))
                         .and_then(|out| ok_result("trash_thread serialize", &out))
                 }
@@ -470,10 +529,28 @@ impl ServerHandler for GoogleServer {
                     let account = extract_string_arg(&request, "account")?;
                     let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
                     let dry_run = extract_bool_arg(&request, "dry_run");
-                    trash::batch_trash(
+                    let result = trash::batch_trash(
                         Arc::clone(&self.gmail),
-                        trash::BatchTrashInput { account, thread_ids, dry_run },
-                    ).await
+                        trash::BatchTrashInput {
+                            account: account.clone(),
+                            thread_ids: thread_ids.clone(),
+                            dry_run,
+                        },
+                    ).await;
+                    self.audit.write(&AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        account,
+                        tool: "batch_trash".into(),
+                        params_summary: crate::audit::summarize_thread_op(
+                            &thread_ids, dry_run, None,
+                        ),
+                        action: if dry_run { "dry_run".into() } else { "applied".into() },
+                        result: match &result {
+                            Ok(_) => "ok".into(),
+                            Err(e) => format!("error: {e}"),
+                        },
+                    });
+                    result
                         .map_err(|e| error::to_mcp_error(&e))
                         .and_then(|out| ok_result("batch_trash serialize", &out))
                 }
@@ -486,16 +563,34 @@ impl ServerHandler for GoogleServer {
                     let remove_label_ids = extract_string_array_arg(&request, "remove_label_ids")
                         .unwrap_or_default();
                     let dry_run = extract_bool_arg(&request, "dry_run");
-                    modify_labels::modify_thread_labels(
+                    let result = modify_labels::modify_thread_labels(
                         &self.gmail,
                         modify_labels::ModifyThreadLabelsInput {
-                            account,
-                            thread_id,
-                            add_label_ids,
-                            remove_label_ids,
+                            account: account.clone(),
+                            thread_id: thread_id.clone(),
+                            add_label_ids: add_label_ids.clone(),
+                            remove_label_ids: remove_label_ids.clone(),
                             dry_run,
                         },
-                    ).await
+                    ).await;
+                    self.audit.write(&AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        account,
+                        tool: "modify_thread_labels".into(),
+                        params_summary: crate::audit::summarize_thread_op(
+                            &[thread_id], dry_run,
+                            Some(serde_json::json!({
+                                "add_label_ids": add_label_ids,
+                                "remove_label_ids": remove_label_ids,
+                            })),
+                        ),
+                        action: if dry_run { "dry_run".into() } else { "applied".into() },
+                        result: match &result {
+                            Ok(_) => "ok".into(),
+                            Err(e) => format!("error: {e}"),
+                        },
+                    });
+                    result
                         .map_err(|e| error::to_mcp_error(&e))
                         .and_then(|out| ok_result("modify_thread_labels serialize", &out))
                 }
@@ -508,16 +603,34 @@ impl ServerHandler for GoogleServer {
                     let remove_label_ids = extract_string_array_arg(&request, "remove_label_ids")
                         .unwrap_or_default();
                     let dry_run = extract_bool_arg(&request, "dry_run");
-                    modify_labels::batch_modify_thread_labels(
+                    let result = modify_labels::batch_modify_thread_labels(
                         Arc::clone(&self.gmail),
                         modify_labels::BatchModifyThreadLabelsInput {
-                            account,
-                            thread_ids,
-                            add_label_ids,
-                            remove_label_ids,
+                            account: account.clone(),
+                            thread_ids: thread_ids.clone(),
+                            add_label_ids: add_label_ids.clone(),
+                            remove_label_ids: remove_label_ids.clone(),
                             dry_run,
                         },
-                    ).await
+                    ).await;
+                    self.audit.write(&AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        account,
+                        tool: "batch_modify_thread_labels".into(),
+                        params_summary: crate::audit::summarize_thread_op(
+                            &thread_ids, dry_run,
+                            Some(serde_json::json!({
+                                "add_label_ids": add_label_ids,
+                                "remove_label_ids": remove_label_ids,
+                            })),
+                        ),
+                        action: if dry_run { "dry_run".into() } else { "applied".into() },
+                        result: match &result {
+                            Ok(_) => "ok".into(),
+                            Err(e) => format!("error: {e}"),
+                        },
+                    });
+                    result
                         .map_err(|e| error::to_mcp_error(&e))
                         .and_then(|out| ok_result("batch_modify_thread_labels serialize", &out))
                 }
@@ -625,7 +738,10 @@ mod tests {
             tokens.clone(),
             reqwest::Client::new(),
         ));
-        GoogleServer::new(Arc::new(vec![]), tokens, gmail)
+        let audit = AuditWriter::new(
+            std::env::temp_dir().join(format!("gpm-srv-test-{}", std::process::id())),
+        );
+        GoogleServer::new(Arc::new(vec![]), tokens, gmail, audit)
     }
 
     fn fake_server_with_accounts(accounts: Vec<AccountEntry>) -> GoogleServer {
@@ -640,7 +756,10 @@ mod tests {
             tokens.clone(),
             reqwest::Client::new(),
         ));
-        GoogleServer::new(Arc::new(accounts), tokens, gmail)
+        let audit = AuditWriter::new(
+            std::env::temp_dir().join(format!("gpm-srv-test-{}", std::process::id())),
+        );
+        GoogleServer::new(Arc::new(accounts), tokens, gmail, audit)
     }
 
     #[test]
