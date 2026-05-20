@@ -109,6 +109,49 @@ pub(crate) fn run_auth_add(inputs: &AuthFlowInputs<'_>) -> Result<AuthFlowOutput
     Ok(AuthFlowOutput { email, token })
 }
 
+/// Like [`run_auth_add`] but adds `include_granted_scopes=true` to the auth
+/// URL, so Google's consent screen only shows the *delta* scopes. Used by
+/// `auth grant` to incrementally extend an existing account's permission set.
+pub(crate) fn run_auth_grant(inputs: &AuthFlowInputs<'_>) -> Result<AuthFlowOutput, Error> {
+    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+    let csrf = CsrfToken::new_random();
+    let redirect_uri = format!("http://127.0.0.1:{}", inputs.redirect_port);
+
+    let listener = bind_listener(inputs.redirect_port)?;
+
+    let auth_url = build_auth_url_with_opts(
+        &inputs.credentials.auth_uri,
+        &inputs.credentials.client_id,
+        &redirect_uri,
+        inputs.scopes,
+        challenge.as_str(),
+        csrf.secret(),
+        true, // include_granted_scopes
+    )?;
+
+    print_or_open_browser(&auth_url);
+
+    let redirect = wait_for_redirect(&listener, LISTENER_TIMEOUT)?;
+
+    if redirect.state != *csrf.secret() {
+        return Err(Error::AuthRequired {
+            account: "(pre-auth)".into(),
+            reason: "CSRF state mismatch in OAuth redirect — possible replay or hijack".into(),
+        });
+    }
+
+    let token = exchange_code(
+        inputs.credentials,
+        &redirect.code,
+        &redirect_uri,
+        &verifier,
+        inputs.scopes,
+    )?;
+    let email = fetch_userinfo_email(&token.access_token)?;
+
+    Ok(AuthFlowOutput { email, token })
+}
+
 // ── Auth URL construction (pure) ─────────────────────────────────────────────
 
 fn build_auth_url(
@@ -118,6 +161,26 @@ fn build_auth_url(
     scopes: &[String],
     code_challenge: &str,
     state: &str,
+) -> Result<Url, Error> {
+    build_auth_url_with_opts(
+        auth_uri,
+        client_id,
+        redirect_uri,
+        scopes,
+        code_challenge,
+        state,
+        false,
+    )
+}
+
+fn build_auth_url_with_opts(
+    auth_uri: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    scopes: &[String],
+    code_challenge: &str,
+    state: &str,
+    include_granted_scopes: bool,
 ) -> Result<Url, Error> {
     let mut url = Url::parse(auth_uri).map_err(|e| Error::Config {
         path: auth_uri.to_owned(),
@@ -137,6 +200,11 @@ fn build_auth_url(
         // skips the refresh_token on re-auth of the same account.
         q.append_pair("access_type", "offline");
         q.append_pair("prompt", "consent");
+        if include_granted_scopes {
+            // Google-specific extension: consent screen shows only the *delta*
+            // between what is already granted and what is now requested.
+            q.append_pair("include_granted_scopes", "true");
+        }
     }
     Ok(url)
 }
