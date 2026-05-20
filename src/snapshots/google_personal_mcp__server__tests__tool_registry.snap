@@ -1,6 +1,6 @@
 ---
 source: src/server.rs
-assertion_line: 641
+assertion_line: 778
 expression: json
 ---
 [
@@ -163,5 +163,90 @@ expression: json
       "type": "object"
     },
     "name": "batch_trash"
+  },
+  {
+    "description": "Add and/or remove arbitrary labels on a single Gmail thread. Calls threads.modify (10 quota units). At least one of add_label_ids or remove_label_ids must be non-empty. Returns the thread's label_ids after the change, as reported by Gmail. dry_run: true returns applied: false without making any Gmail API call.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml.",
+          "type": "string"
+        },
+        "add_label_ids": {
+          "description": "Label IDs to add (e.g. [\"STARRED\", \"Label_123\"]).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "If true, returns the outcome without making any Gmail API call.",
+          "type": "boolean"
+        },
+        "remove_label_ids": {
+          "description": "Label IDs to remove (e.g. [\"INBOX\", \"UNREAD\"]).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "thread_id": {
+          "description": "Gmail thread ID to modify.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "thread_id"
+      ],
+      "type": "object"
+    },
+    "name": "modify_thread_labels"
+  },
+  {
+    "description": "Apply the same label add/remove operation to multiple threads in parallel. Implemented as N concurrent threads.modify calls (10 quota units each). Accepts 1–100 thread IDs. At least one of add_label_ids or remove_label_ids must be non-empty. Never short-circuits: returns per-item ok/error for every id. dry_run: true returns ok: true for all ids without making any Gmail calls.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml.",
+          "type": "string"
+        },
+        "add_label_ids": {
+          "description": "Label IDs to add to every thread.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "If true, returns ok: true for all ids without making any Gmail calls.",
+          "type": "boolean"
+        },
+        "remove_label_ids": {
+          "description": "Label IDs to remove from every thread.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "thread_ids": {
+          "description": "List of Gmail thread IDs to modify (1–100).",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "account",
+        "thread_ids"
+      ],
+      "type": "object"
+    },
+    "name": "batch_modify_thread_labels"
   }
 ]
