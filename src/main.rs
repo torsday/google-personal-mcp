@@ -76,7 +76,7 @@ fn main() -> ExitCode {
 fn run_serve_blocking() -> Result<(), Error> {
     let dir = config::config_dir();
     perm_check::check(&perm_check::default_subjects(&dir))?;
-    let _accounts = config::Accounts::load(&config::accounts_path(&dir))?;
+    let loaded_accounts = config::Accounts::load(&config::accounts_path(&dir))?;
     let cfg = config::Config::load(&config::config_path(&dir))?;
 
     // v0.2: token state is not yet hot-loaded from `tokens/<alias>.json`
@@ -99,7 +99,8 @@ fn run_serve_blocking() -> Result<(), Error> {
     // Suppress the unused-field warning until tool tickets wire it in.
     let _ = &cfg;
 
-    let server = GoogleServer::new(tokens, gmail);
+    let accounts = Arc::new(loaded_accounts.accounts);
+    let server = GoogleServer::new(accounts, tokens, gmail);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
