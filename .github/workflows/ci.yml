@@ -68,3 +68,19 @@ jobs:
         with:
           command: check
           arguments: --all-features
+
+  macos:
+    name: cargo test (macos-keychain)
+    runs-on: [self-hosted, macos]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: clippy (macos-keychain)
+        run: cargo clippy --all-targets --features macos-keychain --locked -- -D warnings
+      - name: test (macos-keychain)
+        run: cargo nextest run --features macos-keychain --locked --no-tests=warn
