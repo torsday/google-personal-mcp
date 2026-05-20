@@ -116,7 +116,10 @@ pub(crate) async fn modify_thread_labels<T: RefreshTransport>(
             applied: false,
         }),
         Decision::Apply => {
-            let path = format!("/users/{}/threads/{}/modify", input.account, input.thread_id);
+            let path = format!(
+                "/users/{}/threads/{}/modify",
+                input.account, input.thread_id
+            );
             let body = serde_json::json!({
                 "addLabelIds": input.add_label_ids,
                 "removeLabelIds": input.remove_label_ids,
@@ -257,7 +260,10 @@ mod tests {
 
     impl RefreshTransport for NoRefresh {
         async fn post_form(&self, _uri: &str, _body: String) -> Result<(u16, String), Error> {
-            Ok((200, r#"{"access_token":"TOK","expires_in":3600}"#.to_owned()))
+            Ok((
+                200,
+                r#"{"access_token":"TOK","expires_in":3600}"#.to_owned(),
+            ))
         }
     }
 
@@ -318,7 +324,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/users/personal/threads/tid1/modify"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(thread_resp("tid1", &["INBOX", "STARRED"])),
+                ResponseTemplate::new(200)
+                    .set_body_json(thread_resp("tid1", &["INBOX", "STARRED"])),
             )
             .expect(1)
             .mount(&mock)
@@ -346,9 +353,7 @@ mod tests {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/users/personal/threads/tid2/modify"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(thread_resp("tid2", &["SENT"])),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(thread_resp("tid2", &["SENT"])))
             .expect(1)
             .mount(&mock)
             .await;
@@ -411,17 +416,17 @@ mod tests {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/users/personal/threads/ok/modify"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(thread_resp("ok", &["STARRED"])),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(thread_resp("ok", &["STARRED"])))
             .expect(1)
             .mount(&mock)
             .await;
         Mock::given(method("POST"))
             .and(path("/users/personal/threads/err/modify"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(
-                serde_json::json!({"error": {"code": 403, "message": "forbidden"}}),
-            ))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(
+                    serde_json::json!({"error": {"code": 403, "message": "forbidden"}}),
+                ),
+            )
             .expect(1)
             .mount(&mock)
             .await;

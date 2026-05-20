@@ -86,10 +86,7 @@ mod tests {
 
     #[test]
     fn all_items_have_enabled_true() {
-        let entries = vec![
-            entry("a", "a@example.com"),
-            entry("b", "b@example.com"),
-        ];
+        let entries = vec![entry("a", "a@example.com"), entry("b", "b@example.com")];
         let out = list_accounts(&entries);
         assert!(out.items.iter().all(|i| i.enabled));
     }

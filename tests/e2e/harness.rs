@@ -85,8 +85,7 @@ impl McpProcess {
             }),
         );
         assert_eq!(
-            init_resp["result"]["protocolVersion"],
-            "2024-11-05",
+            init_resp["result"]["protocolVersion"], "2024-11-05",
             "unexpected protocolVersion in initialize response"
         );
 
@@ -129,10 +128,7 @@ impl McpProcess {
     /// Call a tool and return the parsed `result.content[0].text` as a
     /// `serde_json::Value`. Panics on RPC error.
     pub fn call_tool(&mut self, name: &str, args: Value) -> Value {
-        let resp = self.request(
-            "tools/call",
-            json!({ "name": name, "arguments": args }),
-        );
+        let resp = self.request("tools/call", json!({ "name": name, "arguments": args }));
         if let Some(err) = resp.get("error") {
             panic!("tool call `{name}` returned RPC error: {err}");
         }
@@ -153,12 +149,9 @@ impl McpProcess {
 
     fn read_line_json(&mut self) -> Value {
         let mut line = String::new();
-        self.reader
-            .read_line(&mut line)
-            .expect("read from stdout");
-        serde_json::from_str(line.trim()).unwrap_or_else(|e| {
-            panic!("could not parse server output as JSON: {e}\nLine: {line}")
-        })
+        self.reader.read_line(&mut line).expect("read from stdout");
+        serde_json::from_str(line.trim())
+            .unwrap_or_else(|e| panic!("could not parse server output as JSON: {e}\nLine: {line}"))
     }
 }
 

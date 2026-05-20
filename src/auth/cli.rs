@@ -73,7 +73,10 @@ impl AuthCommand {
             Self::Add { alias } => run_add(&alias, config_dir),
             Self::List => run_list(config_dir),
             Self::SetDefault { alias } => run_set_default(&alias, config_dir),
-            Self::Grant { alias, extra_scopes } => run_grant(&alias, &extra_scopes, config_dir),
+            Self::Grant {
+                alias,
+                extra_scopes,
+            } => run_grant(&alias, &extra_scopes, config_dir),
             Self::Refresh { alias } => run_refresh(&alias, config_dir),
             Self::Remove { alias, yes, revoke } => run_remove(&alias, yes, revoke, config_dir),
         }
@@ -278,7 +281,10 @@ fn run_grant(alias: &str, extra_scopes: &[String], config_dir: &Path) -> Result<
     upsert_account(&mut accounts, alias, &out.email);
     accounts.save(&accounts_file)?;
 
-    eprintln!("\nScopes for `{alias}` upgraded. Granted: {}", scopes.join(", "));
+    eprintln!(
+        "\nScopes for `{alias}` upgraded. Granted: {}",
+        scopes.join(", ")
+    );
     Ok(())
 }
 
@@ -638,7 +644,10 @@ mod tests {
         let after = Accounts::load(&accts_path).expect("reload");
         assert_eq!(after.accounts.len(), 1);
         assert_eq!(after.accounts[0].alias, "work");
-        assert!(after.accounts[0].default, "remaining account promoted to default");
+        assert!(
+            after.accounts[0].default,
+            "remaining account promoted to default"
+        );
     }
 
     #[test]

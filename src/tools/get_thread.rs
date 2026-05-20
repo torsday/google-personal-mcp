@@ -96,9 +96,7 @@ fn map_thread(parsed: ParsedThread) -> GetThreadOutput {
     }
 }
 
-fn map_message(
-    parsed: crate::gmail::threads::ParsedMessage,
-) -> MessageOutput {
+fn map_message(parsed: crate::gmail::threads::ParsedMessage) -> MessageOutput {
     let internal_date = parse_internal_date(&parsed.internal_date_ms);
 
     let to_untrusted = parsed
@@ -186,7 +184,10 @@ mod tests {
     fn parse_internal_date_converts_millis_to_rfc3339() {
         let result = parse_internal_date("1717200000000");
         assert!(result.starts_with("2024-"), "got: {result}");
-        assert!(result.contains('T'), "expected RFC3339 T separator: {result}");
+        assert!(
+            result.contains('T'),
+            "expected RFC3339 T separator: {result}"
+        );
     }
 
     #[test]
