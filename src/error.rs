@@ -84,10 +84,17 @@ pub(crate) enum Error {
 
 impl Error {
     /// Construct an `Upstream` error, truncating the body to 4 KiB.
+    ///
+    /// The truncation point is rounded *down* to the nearest UTF-8 character
+    /// boundary so multi-byte characters straddling the byte limit don't cause
+    /// a panic (#98). 4 KiB is per ADR-0005.
     pub(crate) fn upstream(service: impl Into<String>, status: u16, body: String) -> Self {
         const MAX_BODY: usize = 4 * 1024;
         let message = if body.len() > MAX_BODY {
-            format!("{}… (truncated)", &body[..MAX_BODY])
+            format!(
+                "{}… (truncated)",
+                truncate_at_char_boundary(&body, MAX_BODY)
+            )
         } else {
             body
         };
@@ -108,6 +115,23 @@ impl Error {
         }
         Ok(())
     }
+}
+
+/// Return the longest prefix of `s` that fits within `max_bytes` and ends on a
+/// UTF-8 character boundary. Walks at most 3 bytes (UTF-8's longest scalar is 4
+/// bytes, so the nearest boundary is at most 3 bytes back).
+///
+/// Used by `Error::upstream` to avoid the `&s[..max_bytes]` panic when
+/// `max_bytes` lands inside a multi-byte codepoint. See #98.
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Map an `Error` to an `rmcp::ErrorData` for return at the MCP tool boundary.
@@ -227,6 +251,82 @@ mod tests {
             "message too long: {} bytes",
             msg.len()
         );
+    }
+
+    // ── #98 regressions: multi-byte UTF-8 at the truncation boundary ─────────
+
+    #[test]
+    fn upstream_handles_3_byte_char_at_truncation_boundary() {
+        // '€' is 3 bytes (E2 82 AC). With 4095 ASCII chars before it, byte 4096
+        // lands inside the codepoint — the bug manifests as a panic in
+        // `&body[..4096]` before the fix.
+        let mut body = "x".repeat(4095);
+        body.push('€');
+        body.push_str(&"y".repeat(100));
+
+        // Must not panic.
+        let e = Error::upstream("gmail", 500, body);
+        let msg = e.to_string();
+        assert!(msg.contains("truncated"));
+        // The euro sign should be dropped; only the 4095 ASCII bytes survive.
+        assert!(msg.contains(&"x".repeat(100)));
+        assert!(
+            !msg.contains('€'),
+            "partial euro byte must not survive truncation"
+        );
+    }
+
+    #[test]
+    fn upstream_handles_4_byte_emoji_at_truncation_boundary() {
+        // 🎉 (U+1F389) is 4 bytes. Placed at 4093..4097, byte 4096 is its last
+        // byte — `&body[..4096]` would slice in the middle of the codepoint.
+        let mut body = "x".repeat(4093);
+        body.push('🎉');
+        body.push_str(&"y".repeat(100));
+
+        let e = Error::upstream("gmail", 500, body);
+        let msg = e.to_string();
+        assert!(msg.contains("truncated"));
+        assert!(
+            !msg.contains('🎉'),
+            "partial emoji must not survive truncation"
+        );
+    }
+
+    #[test]
+    fn upstream_handles_2_byte_char_at_truncation_boundary() {
+        // 'é' is 2 bytes (C3 A9). Placed at 4095..4097, byte 4096 is its last
+        // byte.
+        let mut body = "x".repeat(4095);
+        body.push('é');
+        body.push_str(&"y".repeat(100));
+
+        let e = Error::upstream("gmail", 500, body);
+        let msg = e.to_string();
+        assert!(msg.contains("truncated"));
+        assert!(!msg.contains('é'));
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_is_a_noop_on_short_input() {
+        // Path that never enters the boundary walk.
+        assert_eq!(truncate_at_char_boundary("hello", 100), "hello");
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_handles_all_multi_byte_widths() {
+        // ASCII (1) + Latin-1 (2) + BMP (3) + supplementary (4) — 10 bytes total
+        // by construction, then truncate at various positions to confirm we
+        // never panic and always return a valid str slice.
+        let s = "aébo€uo🎉"; // 1 + 2 + 1 + 1 + 3 + 1 + 1 + 4 = 14 bytes
+        for n in 0..=s.len() + 1 {
+            // The function must always return a valid &str; calling .len() / .chars()
+            // would panic on an invalid slice.
+            let out = truncate_at_char_boundary(s, n);
+            // Sanity: returned slice is at most `n` bytes (or full s if shorter).
+            assert!(out.len() <= n || s.len() <= n);
+            assert!(out.chars().count() <= s.chars().count());
+        }
     }
 
     #[test]
