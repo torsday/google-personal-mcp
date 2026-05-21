@@ -11,6 +11,7 @@ use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
 use crate::gmail::quota::GmailMethod;
+use crate::tools::batch::{self, BatchItem};
 use crate::tools::destructive::{Decision, DestructiveContext};
 
 // ── Input / output types ──────────────────────────────────────────────────────
@@ -35,15 +36,8 @@ pub(crate) struct BatchTrashInput {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct BatchTrashItem {
-    pub thread_id: String,
-    pub ok: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
 pub(crate) struct BatchTrashOutput {
-    pub results: Vec<BatchTrashItem>,
+    pub results: Vec<BatchItem>,
 }
 
 // ── Core logic ────────────────────────────────────────────────────────────────
@@ -92,95 +86,40 @@ pub(crate) async fn trash_thread<T: RefreshTransport>(
 
 /// Move multiple Gmail threads to trash concurrently.
 ///
-/// Dispatches N parallel `threads.trash` calls. Never short-circuits: all
-/// results are collected regardless of per-item failures.
+/// Dispatches N parallel `threads.trash` calls via [`batch::run_thread_batch`].
+/// Never short-circuits: all results are collected regardless of per-item
+/// failures. Input ordering is preserved (previously sorted alphabetically —
+/// see issue #105).
 pub(crate) async fn batch_trash<T: RefreshTransport + Send + Sync + 'static>(
     client: Arc<GmailClient<T>>,
     input: BatchTrashInput,
 ) -> Result<BatchTrashOutput, Error> {
-    if input.account.is_empty() {
-        return Err(Error::InvalidArgument {
-            field: "account".into(),
-            detail: "account alias must not be empty".into(),
-        });
-    }
-    if input.thread_ids.is_empty() {
-        return Err(Error::InvalidArgument {
-            field: "thread_ids".into(),
-            detail: "thread_ids must not be empty".into(),
-        });
-    }
-    if input.thread_ids.len() > 100 {
-        return Err(Error::InvalidArgument {
-            field: "thread_ids".into(),
-            detail: format!(
-                "thread_ids must have at most 100 entries, got {}",
-                input.thread_ids.len()
-            ),
-        });
-    }
+    batch::validate_batch_input(&input.account, &input.thread_ids)?;
 
-    // dry_run: return success for all without any API calls.
     if input.dry_run {
-        let results = input
-            .thread_ids
-            .into_iter()
-            .map(|tid| BatchTrashItem {
-                thread_id: tid,
-                ok: true,
-                error: None,
-            })
-            .collect();
-        return Ok(BatchTrashOutput { results });
+        return Ok(BatchTrashOutput {
+            results: batch::dry_run_results(input.thread_ids),
+        });
     }
 
     let account = Arc::new(input.account);
-    let mut set = tokio::task::JoinSet::new();
-
-    for thread_id in input.thread_ids {
-        let client = Arc::clone(&client);
-        let account = Arc::clone(&account);
-        set.spawn(async move {
-            let result = trash_thread(
-                &client,
+    let results = batch::run_thread_batch(input.thread_ids, |tid| {
+        let c = Arc::clone(&client);
+        let a = Arc::clone(&account);
+        async move {
+            trash_thread(
+                &c,
                 TrashThreadInput {
-                    account: (*account).clone(),
-                    thread_id: thread_id.clone(),
+                    account: (*a).clone(),
+                    thread_id: tid,
                     dry_run: false,
                 },
             )
-            .await;
-            (thread_id, result)
-        });
-    }
-
-    let mut results = Vec::new();
-    while let Some(join_result) = set.join_next().await {
-        match join_result {
-            Ok((tid, Ok(_out))) => results.push(BatchTrashItem {
-                thread_id: tid,
-                ok: true,
-                error: None,
-            }),
-            Ok((tid, Err(e))) => results.push(BatchTrashItem {
-                thread_id: tid,
-                ok: false,
-                error: Some(e.to_string()),
-            }),
-            Err(e) => {
-                // JoinError means the task panicked — treat as internal error.
-                results.push(BatchTrashItem {
-                    thread_id: String::new(),
-                    ok: false,
-                    error: Some(format!("task panic: {e}")),
-                });
-            }
+            .await
+            .map(|_| ())
         }
-    }
-
-    // JoinSet doesn't preserve insertion order; sort by thread_id for
-    // deterministic output.
-    results.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
+    })
+    .await;
 
     Ok(BatchTrashOutput { results })
 }

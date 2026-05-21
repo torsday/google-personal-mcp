@@ -13,6 +13,7 @@ use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
 use crate::gmail::quota::GmailMethod;
+use crate::tools::batch::{self, BatchItem};
 use crate::tools::destructive::{Decision, DestructiveContext};
 
 // ── Input / output types ──────────────────────────────────────────────────────
@@ -45,15 +46,8 @@ pub(crate) struct BatchModifyThreadLabelsInput {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct BatchModifyItem {
-    pub thread_id: String,
-    pub ok: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
 pub(crate) struct BatchModifyThreadLabelsOutput {
-    pub results: Vec<BatchModifyItem>,
+    pub results: Vec<BatchItem>,
 }
 
 // ── Gmail API response ────────────────────────────────────────────────────────
@@ -143,31 +137,18 @@ pub(crate) async fn modify_thread_labels<T: RefreshTransport>(
 }
 
 /// Apply the same label modification to multiple threads concurrently.
+///
+/// Dispatches N parallel `threads.modify` calls via
+/// [`batch::run_thread_batch`]. Never short-circuits: per-item failures are
+/// reported alongside successes. Input ordering is preserved (previously
+/// sorted alphabetically — see issue #105).
 pub(crate) async fn batch_modify_thread_labels<T: RefreshTransport + Send + Sync + 'static>(
     client: Arc<GmailClient<T>>,
     input: BatchModifyThreadLabelsInput,
 ) -> Result<BatchModifyThreadLabelsOutput, Error> {
-    if input.account.is_empty() {
-        return Err(Error::InvalidArgument {
-            field: "account".into(),
-            detail: "account alias must not be empty".into(),
-        });
-    }
-    if input.thread_ids.is_empty() {
-        return Err(Error::InvalidArgument {
-            field: "thread_ids".into(),
-            detail: "thread_ids must not be empty".into(),
-        });
-    }
-    if input.thread_ids.len() > 100 {
-        return Err(Error::InvalidArgument {
-            field: "thread_ids".into(),
-            detail: format!(
-                "thread_ids must have at most 100 entries, got {}",
-                input.thread_ids.len()
-            ),
-        });
-    }
+    batch::validate_batch_input(&input.account, &input.thread_ids)?;
+
+    // modify-specific: at least one of add/remove must be non-empty.
     if input.add_label_ids.is_empty() && input.remove_label_ids.is_empty() {
         return Err(Error::InvalidArgument {
             field: "add_label_ids/remove_label_ids".into(),
@@ -176,66 +157,36 @@ pub(crate) async fn batch_modify_thread_labels<T: RefreshTransport + Send + Sync
     }
 
     if input.dry_run {
-        let results = input
-            .thread_ids
-            .into_iter()
-            .map(|tid| BatchModifyItem {
-                thread_id: tid,
-                ok: true,
-                error: None,
-            })
-            .collect();
-        return Ok(BatchModifyThreadLabelsOutput { results });
+        return Ok(BatchModifyThreadLabelsOutput {
+            results: batch::dry_run_results(input.thread_ids),
+        });
     }
 
     let account = Arc::new(input.account);
     let add = Arc::new(input.add_label_ids);
     let remove = Arc::new(input.remove_label_ids);
-    let mut set = tokio::task::JoinSet::new();
-
-    for thread_id in input.thread_ids {
-        let client = Arc::clone(&client);
-        let account = Arc::clone(&account);
+    let results = batch::run_thread_batch(input.thread_ids, |tid| {
+        let c = Arc::clone(&client);
+        let a = Arc::clone(&account);
         let add = Arc::clone(&add);
         let remove = Arc::clone(&remove);
-        set.spawn(async move {
-            let result = modify_thread_labels(
-                &client,
+        async move {
+            modify_thread_labels(
+                &c,
                 ModifyThreadLabelsInput {
-                    account: (*account).clone(),
-                    thread_id: thread_id.clone(),
+                    account: (*a).clone(),
+                    thread_id: tid,
                     add_label_ids: (*add).clone(),
                     remove_label_ids: (*remove).clone(),
                     dry_run: false,
                 },
             )
-            .await;
-            (thread_id, result)
-        });
-    }
-
-    let mut results = Vec::new();
-    while let Some(join_result) = set.join_next().await {
-        match join_result {
-            Ok((tid, Ok(_out))) => results.push(BatchModifyItem {
-                thread_id: tid,
-                ok: true,
-                error: None,
-            }),
-            Ok((tid, Err(e))) => results.push(BatchModifyItem {
-                thread_id: tid,
-                ok: false,
-                error: Some(e.to_string()),
-            }),
-            Err(e) => results.push(BatchModifyItem {
-                thread_id: String::new(),
-                ok: false,
-                error: Some(format!("task panic: {e}")),
-            }),
+            .await
+            .map(|_| ())
         }
-    }
+    })
+    .await;
 
-    results.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
     Ok(BatchModifyThreadLabelsOutput { results })
 }
 
