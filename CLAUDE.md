@@ -2,7 +2,7 @@
 
 ## Status
 
-Design phase moving to v0.2 implementation. No code in `src/` yet — the prior Gmail-only prototype was discarded (preserved in git history at commit `377b558` if needed). The architecture is captured in 19 ADRs under [`docs/adr/`](docs/adr/).
+**v0.2 shipped** (28 issues closed, milestone closed). **v0.3 in active planning** — see the [v0.3 milestone](https://github.com/torsday/google-personal-mcp/milestone/2) for the current backlog. Source lives under `src/` (~37 `.rs` files across `auth/`, `gmail/`, `tools/` plus root modules `audit.rs`, `config.rs`, `error.rs`, `http.rs`, `observability.rs`, `perm_check.rs`, `project_quota.rs`, `rate_limit.rs`, `server.rs`). Architecture is captured in 19 ADRs under [`docs/adr/`](docs/adr/).
 
 ## Where to read in what order
 
@@ -51,4 +51,4 @@ Per-user-per-minute cap: **6,000 units**. Per-project-per-minute: 1,200,000. His
 
 ## Tracker
 
-GitHub Issues + Project board for this repo. v0.2 milestone holds the active backlog. Every issue carries exactly one `model:*` tier label per the global convention.
+GitHub Issues + Project board for this repo. v0.3 milestone holds the active backlog; v1.0 milestone holds deferred work (HTTP transport, caching, fan-out, observability v1.0). Every issue carries exactly one `model:*` tier label per the global convention.

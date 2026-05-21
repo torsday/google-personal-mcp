@@ -19,13 +19,13 @@ flowchart LR
     subgraph Daemon["google-personal-mcp daemon"]
         Tools["Tool router<br/>(search, get, send, ...)"]
         Auth["TokenManager<br/>(per-account refresh)"]
-        Audit["Audit log<br/>(v1.0)"]
+        Audit["Audit log<br/>(v0.2+)"]
         Cache[("SQLite cache<br/>(v1.0)")]
     end
 
     subgraph Google["Google APIs"]
         Gmail["Gmail<br/>v0.2"]
-        Cal["Calendar<br/>v0.3+"]
+        Cal["Calendar<br/>Phase 2+"]
         Other["Contacts, Tasks,<br/>Drive, Keep, ...<br/>future"]
     end
 
@@ -49,7 +49,7 @@ flowchart LR
     Daemon -.reads.-> CredsF
 ```
 
-Solid lines are v0.2; dotted lines are v0.3+ or v1.0. The daemon is one process per operator. Tokens live in `0600` files on disk; the daemon refuses to start if permissions are wider ([ADR-0017](docs/adr/0017-secrets-at-rest.md)).
+Solid lines are shipped today (v0.2). Dotted lines are v0.3 work (full audit surface per [ADR-0011](docs/adr/0011-audit-log.md)), v1.0 work (SQLite cache, HTTP transport), or Phase 2+ services (Calendar / Contacts / Tasks / Drive). The daemon is one process per operator. Tokens live in `0600` files on disk; the daemon refuses to start if permissions are wider ([ADR-0017](docs/adr/0017-secrets-at-rest.md)).
 
 ## Why Rust
 
@@ -60,9 +60,9 @@ The daemon is designed to run forever. Rust's lack of a GC means memory stays fl
 | Phase | What it covers | State |
 | --- | --- | --- |
 | **Design** | 19 ADRs in [`docs/adr/`](docs/adr/). Architecture, tool surface, auth, error model, security, testing strategy. | ✅ Complete |
-| **v0.2** | Gmail tools (`list_accounts`, `list_labels`, `get_thread`, `archive_thread`, `batch_archive`, `trash_thread`, `batch_trash`, `modify_thread_labels`, `batch_modify_thread_labels`), multi-account OAuth, `dry_run`, dedup, JSONL audit log, Layer 1–3 tests. | ✅ Released |
-| **v0.3 – v0.x** | `search_threads` with parallel hydration, Calendar tools, hot-reload, `send_email`. | 🔜 Planned |
-| **v1.0** | First public release. SQLite cache, HTTP transport, observability, fan-out, `mcp_status`, additive-only tool-versioning policy. | 🔮 Future |
+| **v0.2** | Gmail tools (`list_accounts`, `list_labels`, `search_threads`, `get_thread`, `archive_thread`, `batch_archive`, `trash_thread`, `batch_trash`, `modify_thread_labels`, `batch_modify_thread_labels`, `send_email`), multi-account OAuth with hot-reload, `dry_run` + send-dedup, per-account rate limiter, minimal JSONL audit log, macOS Keychain backend, read-only operator profile, Layer 1–4 tests. | ✅ Released |
+| **v0.3** | Full audit surface ([ADR-0011](docs/adr/0011-audit-log.md)) — per-tool redaction rules, `audit_summary`, fsync-before-destructive, configurable rotation. Deferred tools: `mcp_status`, `list_attachments`, `download_attachment`. Observability v0.x subset: structured tracing spans, `/healthz`, systemd unit + INSTALL.md. | 🔜 In planning |
+| **v1.0** | First public release. Streamable HTTP transport with session lifecycle ([ADR-0003](docs/adr/0003-transport-stdio-and-streamable-http.md)). Observability v1.0: Prometheus exporter + alertmanager rules + nginx template ([ADR-0008](docs/adr/0008-observability-and-deployment.md)). SQLite caching with Gmail History API invalidation ([ADR-0009](docs/adr/0009-caching-with-sqlite-and-history-api.md)). Cross-account fan-out for read tools ([ADR-0013](docs/adr/0013-cross-account-fan-out.md)). Tool versioning policy enforcement ([ADR-0015](docs/adr/0015-tool-versioning-policy.md)). | 🔮 Future |
 
 The cut between v0.x and v1.0 is deliberate: features only earn their keep when there's a second user or an external operator. v1-scope notes in each affected ADR record what is deferred.
 
