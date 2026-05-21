@@ -13,6 +13,7 @@ use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
 use crate::gmail::quota::GmailMethod;
+use crate::tools::batch::{self, BatchItem};
 use crate::tools::destructive::{Decision, DestructiveContext};
 
 // ── Input / output types ──────────────────────────────────────────────────────
@@ -37,15 +38,8 @@ pub(crate) struct BatchArchiveInput {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct BatchArchiveItem {
-    pub thread_id: String,
-    pub ok: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
 pub(crate) struct BatchArchiveOutput {
-    pub results: Vec<BatchArchiveItem>,
+    pub results: Vec<BatchItem>,
 }
 
 // ── Core logic ────────────────────────────────────────────────────────────────
@@ -97,109 +91,40 @@ pub(crate) async fn archive_thread<T: RefreshTransport>(
 
 /// Archive multiple Gmail threads concurrently.
 ///
-/// Dispatches N concurrent [`archive_thread`] calls and collects per-item
-/// results. Never short-circuits on failure — every id receives an entry in
-/// the output. Input ordering is preserved.
+/// Dispatches N concurrent [`archive_thread`] calls via
+/// [`batch::run_thread_batch`] and collects per-item results. Never
+/// short-circuits on failure — every id receives an entry in the output.
+/// Input ordering is preserved.
 pub(crate) async fn batch_archive<T: RefreshTransport + Send + Sync + 'static>(
     client: Arc<GmailClient<T>>,
     input: BatchArchiveInput,
 ) -> Result<BatchArchiveOutput, Error> {
-    if input.account.is_empty() {
-        return Err(Error::InvalidArgument {
-            field: "account".into(),
-            detail: "account alias must not be empty".into(),
-        });
-    }
-    if input.thread_ids.is_empty() {
-        return Err(Error::InvalidArgument {
-            field: "thread_ids".into(),
-            detail: "thread_ids must not be empty".into(),
-        });
-    }
-    if input.thread_ids.len() > 100 {
-        return Err(Error::InvalidArgument {
-            field: "thread_ids".into(),
-            detail: format!(
-                "thread_ids must contain at most 100 items, got {}",
-                input.thread_ids.len()
-            ),
-        });
-    }
+    batch::validate_batch_input(&input.account, &input.thread_ids)?;
 
-    // Dry-run: short-circuit without any Gmail calls.
     if input.dry_run {
-        let results = input
-            .thread_ids
-            .into_iter()
-            .map(|thread_id| BatchArchiveItem {
-                thread_id,
-                ok: true,
-                error: None,
-            })
-            .collect();
-        return Ok(BatchArchiveOutput { results });
+        return Ok(BatchArchiveOutput {
+            results: batch::dry_run_results(input.thread_ids),
+        });
     }
 
-    // Apply: dispatch N concurrent archive calls, collect in order.
-    let mut join_set = tokio::task::JoinSet::new();
-    for thread_id in &input.thread_ids {
+    let account = Arc::new(input.account);
+    let results = batch::run_thread_batch(input.thread_ids, |tid| {
         let c = Arc::clone(&client);
-        let account = input.account.clone();
-        let tid = thread_id.clone();
-        join_set.spawn(async move {
-            let result = archive_thread(
+        let a = Arc::clone(&account);
+        async move {
+            archive_thread(
                 &c,
                 ArchiveThreadInput {
-                    account,
-                    thread_id: tid.clone(),
+                    account: (*a).clone(),
+                    thread_id: tid,
                     dry_run: false,
                 },
             )
-            .await;
-            (tid, result)
-        });
-    }
-
-    // Collect results from the JoinSet into a map, then restore input order.
-    let mut map: std::collections::HashMap<String, Result<ArchiveThreadOutput, Error>> =
-        std::collections::HashMap::new();
-    while let Some(join_result) = join_set.join_next().await {
-        // join_result is Result<(String, Result<...>), JoinError>
-        match join_result {
-            Ok((tid, outcome)) => {
-                map.insert(tid, outcome);
-            }
-            Err(join_err) => {
-                // Task panicked — shouldn't happen in normal operation.
-                // We can't recover the thread_id from a panicked task cleanly;
-                // log the panic and continue (the missing entry will be handled
-                // below when building ordered results).
-                tracing::error!("batch_archive task panicked: {join_err}");
-            }
+            .await
+            .map(|_| ())
         }
-    }
-
-    let results = input
-        .thread_ids
-        .into_iter()
-        .map(|thread_id| match map.remove(&thread_id) {
-            Some(Ok(_)) => BatchArchiveItem {
-                thread_id,
-                ok: true,
-                error: None,
-            },
-            Some(Err(e)) => BatchArchiveItem {
-                thread_id,
-                ok: false,
-                error: Some(e.to_string()),
-            },
-            None => BatchArchiveItem {
-                thread_id,
-                ok: false,
-                error: Some("task did not complete".into()),
-            },
-        })
-        .collect();
+    })
+    .await;
 
     Ok(BatchArchiveOutput { results })
 }
