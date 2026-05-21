@@ -72,6 +72,19 @@ impl AuditWriter {
     }
 
     fn try_write(&self, entry: &AuditEntry) -> std::io::Result<()> {
+        // Reject account values that could escape `audit_dir` via path traversal
+        // or absolute-path replacement. The MCP layer should validate too, but
+        // this is the last line of defense before disk I/O. See issue #101.
+        if !is_safe_account_alias(&entry.account) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to write audit entry: account alias {:?} fails [A-Za-z0-9_-]+ rule",
+                    entry.account
+                ),
+            ));
+        }
+
         std::fs::create_dir_all(&self.audit_dir)?;
 
         let path = self.audit_dir.join(format!("{}.jsonl", entry.account));
@@ -86,6 +99,18 @@ impl AuditWriter {
         writeln!(file, "{line}")?;
         Ok(())
     }
+}
+
+/// Validate that `account` is a safe alias: non-empty and matches `[A-Za-z0-9_-]+`.
+///
+/// Mirrors `validate_alias` in [`src/auth/cli.rs`](crate::auth::cli). Used to
+/// prevent path traversal (`"../.."`) and absolute-path replacement (`"/etc/x"`)
+/// in audit-log filenames — see issue #101. `PathBuf::join` discards the base
+/// when joined with an absolute path, and does not normalize `..`.
+fn is_safe_account_alias(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
 /// Open `path` in append mode (create if absent, mode 0600 on Unix).
@@ -284,5 +309,145 @@ mod tests {
         let meta = std::fs::metadata(&path).unwrap();
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "audit file should be 0600, got {mode:o}");
+    }
+
+    // ── Path-traversal defense (#101) ──────────────────────────────────────
+
+    #[test]
+    fn is_safe_account_alias_accepts_valid_names() {
+        for ok in [
+            "personal",
+            "work",
+            "a",
+            "user-1",
+            "user_1",
+            "A1",
+            "ABC_def-123",
+        ] {
+            assert!(is_safe_account_alias(ok), "should accept {ok:?}");
+        }
+    }
+
+    #[test]
+    fn is_safe_account_alias_rejects_traversal_and_unsafe() {
+        for bad in [
+            "",                // empty
+            "..",              // pure parent
+            "../etc/passwd",   // relative traversal
+            "/tmp/evil",       // absolute path
+            "/etc/cron.daily", // absolute path 2
+            "a/b",             // path separator
+            "a\\b",            // backslash
+            "a.b",             // dot — could compose with `.jsonl`
+            "a\x00b",          // null byte
+            "a\nb",            // newline (would break JSONL grep too)
+            "a b",             // whitespace
+            " leading",        // leading space
+            "trailing ",       // trailing space
+            "café",            // non-ASCII
+        ] {
+            assert!(!is_safe_account_alias(bad), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_relative_traversal_no_file_created() {
+        let dir = TempDir::new().unwrap();
+        let writer = AuditWriter::new(dir.path());
+
+        writer.write(&make_entry("../etc/x", "archive_thread", "applied"));
+
+        // Neither the bogus traversal path nor the audit_dir's own file should exist.
+        assert!(
+            !dir.path().join("etc/x.jsonl").exists(),
+            "traversal must not write outside audit_dir"
+        );
+        assert!(
+            !dir.path().join("audit/../etc/x.jsonl").exists(),
+            "traversal must not resolve into audit_dir"
+        );
+    }
+
+    #[test]
+    fn rejects_absolute_path_no_file_created() {
+        let dir = TempDir::new().unwrap();
+        let writer = AuditWriter::new(dir.path());
+
+        // The dangerous shape — `PathBuf::join("/tmp/x")` discards the base.
+        // The validator must catch this before `join` is reached.
+        writer.write(&make_entry("/tmp/pwn-test-audit", "archive_thread", "applied"));
+
+        assert!(
+            !std::path::Path::new("/tmp/pwn-test-audit.jsonl").exists(),
+            "absolute-path account must not create a file outside audit_dir"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_account_no_file_created() {
+        let dir = TempDir::new().unwrap();
+        let writer = AuditWriter::new(dir.path());
+
+        writer.write(&make_entry("", "archive_thread", "applied"));
+
+        // Audit dir may be created, but no `.jsonl` should land in it.
+        let audit_dir = dir.path().join("audit");
+        if audit_dir.exists() {
+            let entries: Vec<_> = std::fs::read_dir(&audit_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .collect();
+            assert!(
+                entries.is_empty(),
+                "empty account must not create any file; got {entries:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_path_separator_no_file_created() {
+        let dir = TempDir::new().unwrap();
+        let writer = AuditWriter::new(dir.path());
+
+        writer.write(&make_entry("a/b", "archive_thread", "applied"));
+
+        assert!(
+            !dir.path().join("audit/a/b.jsonl").exists(),
+            "path-separator account must not create nested file"
+        );
+    }
+
+    #[test]
+    fn rejects_null_byte_no_file_created() {
+        let dir = TempDir::new().unwrap();
+        let writer = AuditWriter::new(dir.path());
+
+        writer.write(&make_entry("a\x00b", "archive_thread", "applied"));
+
+        // Null byte would fail at the OS layer anyway, but the validator catches it first.
+        let audit_dir = dir.path().join("audit");
+        if audit_dir.exists() {
+            let entries: Vec<_> = std::fs::read_dir(&audit_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .collect();
+            assert!(
+                entries.is_empty(),
+                "null-byte account must not create any file; got {entries:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_account_still_writes_after_validator_added() {
+        // Regression guard: the validator must not break the happy path.
+        let dir = TempDir::new().unwrap();
+        let writer = AuditWriter::new(dir.path());
+        writer.write(&make_entry("work-1_personal", "send_email", "applied"));
+
+        let path = dir.path().join("audit/work-1_personal.jsonl");
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"send_email\""));
     }
 }
