@@ -375,7 +375,11 @@ mod tests {
 
         // The dangerous shape — `PathBuf::join("/tmp/x")` discards the base.
         // The validator must catch this before `join` is reached.
-        writer.write(&make_entry("/tmp/pwn-test-audit", "archive_thread", "applied"));
+        writer.write(&make_entry(
+            "/tmp/pwn-test-audit",
+            "archive_thread",
+            "applied",
+        ));
 
         assert!(
             !std::path::Path::new("/tmp/pwn-test-audit.jsonl").exists(),
@@ -395,7 +399,7 @@ mod tests {
         if audit_dir.exists() {
             let entries: Vec<_> = std::fs::read_dir(&audit_dir)
                 .unwrap()
-                .filter_map(|e| e.ok())
+                .filter_map(Result::ok)
                 .collect();
             assert!(
                 entries.is_empty(),
@@ -429,7 +433,7 @@ mod tests {
         if audit_dir.exists() {
             let entries: Vec<_> = std::fs::read_dir(&audit_dir)
                 .unwrap()
-                .filter_map(|e| e.ok())
+                .filter_map(Result::ok)
                 .collect();
             assert!(
                 entries.is_empty(),
