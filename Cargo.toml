@@ -99,6 +99,10 @@ macos-keychain = ["dep:keyring"]
 tempfile = "3"
 wiremock = "0.6"
 insta = { version = "1", features = ["json"] }
+# `test-util` gates `tokio::time::{pause, advance}` and the
+# `start_paused` attribute on `#[tokio::test]` — used by the SessionStore
+# sweeper tests to advance the clock deterministically.
+tokio = { version = "1", features = ["test-util"] }
 # `default-features = false` drops `rayon` (parallel sample collection)
 # — keeps the dep graph closer to the runtime crate. `async_tokio`
 # enables `AsyncBencher::to_async(&runtime).iter(|| async {...})` so
