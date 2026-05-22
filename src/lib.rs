@@ -264,7 +264,24 @@ fn run_serve_blocking() -> Result<(), Error> {
         });
     }
 
-    let server = GoogleServer::new(accounts, tokens, gmail, audit);
+    // Resolve audit verbosity from config and warn when verbose mode is on.
+    // Verbose mode logs full query strings, recipient addresses, and body
+    // previews — the audit log becomes sensitive (email-metadata equivalent).
+    // The WARN is always emitted so it appears in the system journal even
+    // when RUST_LOG is at INFO or higher. See ADR-0011 §Configuration.
+    let verbosity = if cfg.audit.verbose {
+        tracing::warn!(
+            "audit verbose mode enabled — the audit log will contain full \
+             query strings, recipient addresses, and email body previews; \
+             treat the audit log file with the same access controls as token files; \
+             see SECURITY.md and docs/adr/0011-audit-log.md"
+        );
+        audit::Verbosity::Verbose
+    } else {
+        audit::Verbosity::Redacted
+    };
+
+    let server = GoogleServer::new(accounts, tokens, gmail, audit, verbosity);
 
     runtime.block_on(run_stdio(server))
 }

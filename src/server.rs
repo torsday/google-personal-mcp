@@ -20,7 +20,7 @@ use rmcp::service::RequestContext;
 use rmcp::RoleServer;
 use serde_json::{json, Value};
 
-use crate::audit::{AuditEntry, AuditWriter};
+use crate::audit::{AuditEntry, AuditWriter, Verbosity};
 use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager};
 use crate::config::AccountEntry;
 use crate::error::{self, Error};
@@ -481,6 +481,9 @@ pub(crate) struct GoogleServer {
     gmail: Arc<GmailClient<ReqwestRefreshTransport>>,
     /// Best-effort JSONL audit writer per ADR-0011 v0.2 subset.
     audit: AuditWriter,
+    /// Audit verbosity configured via `[audit] verbose` in config.toml.
+    /// `Redacted` by default; `Verbose` only when the operator has opted in.
+    verbosity: Verbosity,
 }
 
 impl GoogleServer {
@@ -490,12 +493,14 @@ impl GoogleServer {
         tokens: Arc<TokenManager<ReqwestRefreshTransport>>,
         gmail: Arc<GmailClient<ReqwestRefreshTransport>>,
         audit: AuditWriter,
+        verbosity: Verbosity,
     ) -> Self {
         Self {
             accounts,
             tokens,
             gmail,
             audit,
+            verbosity,
         }
     }
 
@@ -723,11 +728,7 @@ impl ServerHandler for GoogleServer {
                 self.write_destructive_intent(
                     &account,
                     "batch_archive",
-                    crate::audit::summarize_batch_archive(
-                        &thread_ids,
-                        crate::audit::Verbosity::Redacted,
-                        dry_run,
-                    ),
+                    crate::audit::summarize_batch_archive(&thread_ids, self.verbosity, dry_run),
                     dry_run,
                 )?;
                 let result = archive::batch_archive(
@@ -745,7 +746,7 @@ impl ServerHandler for GoogleServer {
                     tool: "batch_archive".into(),
                     params_summary: crate::audit::summarize_batch_archive(
                         &thread_ids,
-                        crate::audit::Verbosity::Redacted,
+                        self.verbosity,
                         dry_run,
                     ),
                     action: if dry_run {
@@ -809,11 +810,7 @@ impl ServerHandler for GoogleServer {
                 self.write_destructive_intent(
                     &account,
                     "batch_trash",
-                    crate::audit::summarize_batch_trash(
-                        &thread_ids,
-                        crate::audit::Verbosity::Redacted,
-                        dry_run,
-                    ),
+                    crate::audit::summarize_batch_trash(&thread_ids, self.verbosity, dry_run),
                     dry_run,
                 )?;
                 let result = trash::batch_trash(
@@ -831,7 +828,7 @@ impl ServerHandler for GoogleServer {
                     tool: "batch_trash".into(),
                     params_summary: crate::audit::summarize_batch_trash(
                         &thread_ids,
-                        crate::audit::Verbosity::Redacted,
+                        self.verbosity,
                         dry_run,
                     ),
                     action: if dry_run {
@@ -919,7 +916,7 @@ impl ServerHandler for GoogleServer {
                         &thread_ids,
                         &add_label_ids,
                         &remove_label_ids,
-                        crate::audit::Verbosity::Redacted,
+                        self.verbosity,
                         dry_run,
                     ),
                     dry_run,
@@ -943,7 +940,7 @@ impl ServerHandler for GoogleServer {
                         &thread_ids,
                         &add_label_ids,
                         &remove_label_ids,
-                        crate::audit::Verbosity::Redacted,
+                        self.verbosity,
                         dry_run,
                     ),
                     action: if dry_run {
@@ -1124,7 +1121,7 @@ mod tests {
         let audit = AuditWriter::new(
             std::env::temp_dir().join(format!("gpm-srv-test-{}", std::process::id())),
         );
-        GoogleServer::new(Arc::new(vec![]), tokens, gmail, audit)
+        GoogleServer::new(Arc::new(vec![]), tokens, gmail, audit, Verbosity::Redacted)
     }
 
     fn fake_server_with_accounts(accounts: Vec<AccountEntry>) -> GoogleServer {
@@ -1142,7 +1139,13 @@ mod tests {
         let audit = AuditWriter::new(
             std::env::temp_dir().join(format!("gpm-srv-test-{}", std::process::id())),
         );
-        GoogleServer::new(Arc::new(accounts), tokens, gmail, audit)
+        GoogleServer::new(
+            Arc::new(accounts),
+            tokens,
+            gmail,
+            audit,
+            Verbosity::Redacted,
+        )
     }
 
     #[test]
@@ -1221,7 +1224,7 @@ mod tests {
         ));
         let audit = AuditWriter::new(dir.path());
         (
-            GoogleServer::new(Arc::new(vec![]), tokens, gmail, audit),
+            GoogleServer::new(Arc::new(vec![]), tokens, gmail, audit, Verbosity::Redacted),
             dir,
         )
     }

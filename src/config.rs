@@ -171,6 +171,29 @@ pub(crate) struct Config {
     /// `/metrics` is v1.0 — see #70 / #75).
     #[serde(default)]
     pub(crate) metrics: Option<MetricsConfig>,
+    /// `[audit]` section per [ADR-0011](../docs/adr/0011-audit-log.md).
+    #[serde(default)]
+    pub(crate) audit: AuditConfig,
+}
+
+/// `[audit]` section — controls verbosity of the audit log per
+/// [ADR-0011 §Configuration](../docs/adr/0011-audit-log.md).
+///
+/// `verbose = false` (default): attacker-controlled content (queries, subjects,
+/// body previews, recipient addresses) is redacted in the audit log. Each tool
+/// call is still recorded with its intent and per-item outcomes.
+///
+/// `verbose = true` (operator opt-in): full content is logged — query strings,
+/// full recipient lists, body previews. The audit log file becomes sensitive
+/// (equivalent to email metadata). A startup WARN is emitted to ensure the
+/// operator's choice is always visible in the system journal.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuditConfig {
+    /// When `true`, per-tool audit entries include full content (queries,
+    /// subjects, recipient addresses, body previews). Default `false`.
+    #[serde(default)]
+    pub(crate) verbose: bool,
 }
 
 /// `[secrets]` section — selects the storage backend per
@@ -1060,5 +1083,45 @@ mod tests {
         // Even with mismatched scopes, disabled service → no warning emitted
         // (Can only verify it doesn't panic here)
         cfg.warn_scope_mismatch("personal", &[]);
+    }
+
+    // ── AuditConfig ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn audit_verbose_defaults_to_false() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let cfg = Config::load(&path).unwrap();
+        assert!(!cfg.audit.verbose, "verbose should default to false");
+    }
+
+    #[test]
+    fn audit_verbose_true_parsed() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            "
+            [audit]
+            verbose = true
+            ",
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.audit.verbose);
+    }
+
+    #[test]
+    fn audit_verbose_false_explicit_parsed() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            "
+            [audit]
+            verbose = false
+            ",
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert!(!cfg.audit.verbose);
     }
 }
