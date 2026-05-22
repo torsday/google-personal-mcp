@@ -5,6 +5,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod gmail;
+pub mod healthz;
 pub mod http;
 pub mod observability;
 pub mod perm_check;
@@ -225,6 +226,28 @@ fn run_serve_blocking() -> Result<(), Error> {
 
     let accounts = Arc::new(loaded_accounts.accounts);
     let audit = AuditWriter::new(&dir);
+
+    // Liveness `/healthz` listener per ADR-0008 (#70). Only spawned when
+    // the operator opted in by including `[metrics]` in config.toml. Bind
+    // happens on the runtime (eager, so a port collision fails the
+    // daemon at startup instead of silently a few seconds later); accept
+    // loop lives in a detached task and dies with the runtime.
+    if let Some(metrics_cfg) = cfg.metrics.as_ref() {
+        let bind = metrics_cfg.bind.clone();
+        let state = Arc::new(healthz::HealthState::new(accounts.len()));
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind(&bind))
+            .map_err(|e| Error::Config {
+                path: bind.clone(),
+                message: format!("metrics listener could not bind: {e}"),
+            })?;
+        runtime.spawn(async move {
+            if let Err(err) = healthz::run(listener, state).await {
+                tracing::error!(error = %err, "healthz listener stopped");
+            }
+        });
+    }
+
     let server = GoogleServer::new(accounts, tokens, gmail, audit);
 
     runtime.block_on(run_stdio(server))
