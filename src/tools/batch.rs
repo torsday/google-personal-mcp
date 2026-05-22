@@ -8,7 +8,6 @@
 //! batch tools return per-item `{ thread_id, ok, error? }` and never
 //! short-circuit on per-item failure.
 
-use std::collections::HashMap;
 use std::future::Future;
 
 use serde::Serialize;
@@ -75,11 +74,21 @@ pub(crate) fn dry_run_results(thread_ids: Vec<String>) -> Vec<BatchItem> {
 /// Concurrently apply `spawn_one(thread_id)` to each ID, collecting per-item
 /// results in **input order**. Never short-circuits on per-item failure.
 ///
+/// Results are tracked by **input index**, not by `thread_id`, so duplicate
+/// IDs in `thread_ids` (e.g. `["t1", "t1"]`) produce two independently
+/// populated result rows instead of overwriting each other's slot — fix
+/// for [#104](https://github.com/torsday/google-personal-mcp/issues/104).
+/// The caller's intent (asking the API twice for the same ID) is preserved
+/// faithfully; if they didn't mean to dup, the duplicate is a caller-side
+/// problem worth surfacing in the output.
+///
 /// `JoinError` (panic in a spawned task) is logged at `tracing::error!`; the
-/// unaccounted `thread_id` appears in the output as
-/// `ok: false, error: Some("task did not complete")`. The `thread_id` is
-/// preserved because we capture it before dispatch — `JoinError` itself does
-/// not carry it.
+/// corresponding slot stays `None` and surfaces as
+/// `ok: false, error: Some("task did not complete")`. We can't attribute a
+/// panic to a specific index — `JoinError` doesn't carry one — so when N
+/// tasks panic, the first N empty slots get the "did not complete" message.
+/// In practice, batch tasks don't panic; the case is logged loudly enough
+/// that the operator notices.
 ///
 /// The caller is responsible for validation ([`validate_batch_input`]) and
 /// the dry-run shortcut ([`dry_run_results`]) before reaching this helper.
@@ -92,24 +101,31 @@ where
     Fut: Future<Output = Result<(), Error>> + Send + 'static,
 {
     let mut join_set = tokio::task::JoinSet::new();
-    for thread_id in &thread_ids {
-        let tid_for_task = thread_id.clone();
+    for (idx, thread_id) in thread_ids.iter().enumerate() {
         let fut = spawn_one(thread_id.clone());
         join_set.spawn(async move {
             let result = fut.await;
-            (tid_for_task, result)
+            (idx, result)
         });
     }
 
-    let mut by_id: HashMap<String, Result<(), Error>> = HashMap::new();
+    // Pre-allocate one slot per input index. Per-index keying (rather
+    // than per-thread_id) is what fixes #104: two tasks for the same
+    // thread_id land in distinct slots instead of overwriting.
+    let mut slots: Vec<Option<Result<(), Error>>> = std::iter::repeat_with(|| None)
+        .take(thread_ids.len())
+        .collect();
     while let Some(join_result) = join_set.join_next().await {
         match join_result {
-            Ok((tid, outcome)) => {
-                by_id.insert(tid, outcome);
+            Ok((idx, outcome)) => {
+                if let Some(slot) = slots.get_mut(idx) {
+                    *slot = Some(outcome);
+                }
             }
             Err(join_err) => {
-                // JoinError doesn't carry the thread_id; the unaccounted entry
-                // surfaces as "task did not complete" in the ordered merge below.
+                // JoinError doesn't carry the index; an empty slot
+                // surfaces as "task did not complete" in the ordered
+                // merge below.
                 tracing::error!("batch task panicked: {join_err}");
             }
         }
@@ -117,7 +133,8 @@ where
 
     thread_ids
         .into_iter()
-        .map(|thread_id| match by_id.remove(&thread_id) {
+        .zip(slots)
+        .map(|(thread_id, slot)| match slot {
             Some(Ok(())) => BatchItem {
                 thread_id,
                 ok: true,
@@ -256,6 +273,54 @@ mod tests {
         assert!(!results[1].ok);
         assert_eq!(results[1].error.as_deref(), Some("task did not complete"));
         assert!(results[2].ok);
+    }
+
+    // ── #104: duplicate thread_ids get distinct, populated result slots ──
+
+    #[tokio::test]
+    async fn run_thread_batch_handles_duplicate_thread_ids() {
+        // Before #104: HashMap<thread_id, Result> meant the second
+        // task's outcome overwrote the first, and the merge loop's
+        // second remove() returned None → spurious "task did not
+        // complete". After: index-keyed slots produce two populated
+        // entries.
+        let ids = vec!["t1".into(), "t1".into(), "t2".into(), "t1".into()];
+        let results = run_thread_batch(ids, |_tid| async { Ok(()) }).await;
+
+        assert_eq!(results.len(), 4, "one row per input, even duplicates");
+        // Every row populated — no "task did not complete" leaks.
+        assert!(
+            results.iter().all(|r| r.ok && r.error.is_none()),
+            "every row must be ok; got: {results:?}"
+        );
+        // Input order preserved verbatim.
+        let order: Vec<&str> = results.iter().map(|r| r.thread_id.as_str()).collect();
+        assert_eq!(order, vec!["t1", "t1", "t2", "t1"]);
+    }
+
+    #[tokio::test]
+    async fn run_thread_batch_duplicates_with_mixed_outcomes() {
+        // Two `bad` rows must independently report the error; the
+        // intervening `good` row stays populated.
+        let ids = vec!["bad".into(), "good".into(), "bad".into()];
+        let results = run_thread_batch(ids, |tid| async move {
+            if tid == "bad" {
+                Err(Error::NotFound { what: tid })
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].thread_id, "bad");
+        assert!(!results[0].ok);
+        assert!(results[0].error.as_ref().unwrap().contains("not found"));
+        assert_eq!(results[1].thread_id, "good");
+        assert!(results[1].ok);
+        assert_eq!(results[2].thread_id, "bad");
+        assert!(!results[2].ok);
+        assert!(results[2].error.as_ref().unwrap().contains("not found"));
     }
 
     #[tokio::test]
