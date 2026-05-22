@@ -120,6 +120,19 @@ fn bench_tools(c: &mut Criterion) {
     group.warm_up_time(std::time::Duration::from_secs(3));
     group.measurement_time(std::time::Duration::from_secs(3));
 
+    // Sanity-check the wiring once outside the bench loop — a silently
+    // fast-failing dispatch (auth gate, rate limiter) would otherwise
+    // produce misleadingly fast numbers. If any of these return `false`
+    // the bench panics, surfacing the wiring bug instead of measuring it.
+    runtime.block_on(async {
+        assert!(handle.list_labels().await, "list_labels wiring failed");
+        assert!(handle.get_thread("thr-1").await, "get_thread wiring failed");
+        assert!(
+            handle.search_threads("from:alice").await,
+            "search_threads wiring failed"
+        );
+    });
+
     group.bench_function("list_labels", |b| {
         b.to_async(&runtime).iter(|| async {
             let ok = handle.list_labels().await;
