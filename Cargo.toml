@@ -79,7 +79,7 @@ url = "2"
 toml = "0.8"
 
 mailparse = "0.16"
-html2text = { version = "0.15", default-features = false }
+html2text = { version = "0.17", default-features = false }
 encoding_rs = "0.8"
 
 clap = { version = "4", features = ["derive"] }
