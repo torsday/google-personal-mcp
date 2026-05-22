@@ -498,6 +498,37 @@ impl GoogleServer {
             audit,
         }
     }
+
+    /// Write+fsync a pre-call "intent" audit record for a destructive
+    /// tool per [ADR-0011 lines 83-86](../docs/adr/0011-audit-log.md)
+    /// (#66). Returns an `ErrorData` mapped from `Error::Internal` if
+    /// the audit write fails — caller propagates, **refusing the op**.
+    ///
+    /// Skipped for `dry_run` calls: there's no API call to crash
+    /// during, and the existing post-call audit record captures the
+    /// dry-run shape on its own.
+    fn write_destructive_intent(
+        &self,
+        account: &str,
+        tool: &'static str,
+        params_summary: Value,
+        dry_run: bool,
+    ) -> Result<(), rmcp::ErrorData> {
+        if dry_run {
+            return Ok(());
+        }
+        let entry = AuditEntry {
+            timestamp: chrono::Utc::now(),
+            account: account.to_owned(),
+            tool: tool.to_owned(),
+            params_summary,
+            action: "intent".to_owned(),
+            result: "pending".to_owned(),
+        };
+        self.audit
+            .write_synced(&entry)
+            .map_err(|e| error::to_mcp_error(&e))
+    }
 }
 
 impl ServerHandler for GoogleServer {
@@ -650,6 +681,12 @@ impl ServerHandler for GoogleServer {
                 let account = extract_account_arg(&request, "archive_thread")?;
                 let thread_id = extract_string_arg(&request, "thread_id")?;
                 let dry_run = extract_bool_arg(&request, "dry_run");
+                self.write_destructive_intent(
+                    &account,
+                    "archive_thread",
+                    crate::audit::summarize_archive_thread(&thread_id, dry_run),
+                    dry_run,
+                )?;
                 let result = archive::archive_thread(
                     &self.gmail,
                     archive::ArchiveThreadInput {
@@ -683,6 +720,16 @@ impl ServerHandler for GoogleServer {
                 let account = extract_account_arg(&request, "batch_archive")?;
                 let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
                 let dry_run = extract_bool_arg(&request, "dry_run");
+                self.write_destructive_intent(
+                    &account,
+                    "batch_archive",
+                    crate::audit::summarize_batch_archive(
+                        &thread_ids,
+                        crate::audit::Verbosity::Redacted,
+                        dry_run,
+                    ),
+                    dry_run,
+                )?;
                 let result = archive::batch_archive(
                     Arc::clone(&self.gmail),
                     archive::BatchArchiveInput {
@@ -720,6 +767,12 @@ impl ServerHandler for GoogleServer {
                 let account = extract_account_arg(&request, "trash_thread")?;
                 let thread_id = extract_string_arg(&request, "thread_id")?;
                 let dry_run = extract_bool_arg(&request, "dry_run");
+                self.write_destructive_intent(
+                    &account,
+                    "trash_thread",
+                    crate::audit::summarize_trash_thread(&thread_id, dry_run),
+                    dry_run,
+                )?;
                 let result = trash::trash_thread(
                     &self.gmail,
                     trash::TrashThreadInput {
@@ -753,6 +806,16 @@ impl ServerHandler for GoogleServer {
                 let account = extract_account_arg(&request, "batch_trash")?;
                 let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
                 let dry_run = extract_bool_arg(&request, "dry_run");
+                self.write_destructive_intent(
+                    &account,
+                    "batch_trash",
+                    crate::audit::summarize_batch_trash(
+                        &thread_ids,
+                        crate::audit::Verbosity::Redacted,
+                        dry_run,
+                    ),
+                    dry_run,
+                )?;
                 let result = trash::batch_trash(
                     Arc::clone(&self.gmail),
                     trash::BatchTrashInput {
@@ -794,6 +857,17 @@ impl ServerHandler for GoogleServer {
                 let remove_label_ids =
                     extract_string_array_arg(&request, "remove_label_ids").unwrap_or_default();
                 let dry_run = extract_bool_arg(&request, "dry_run");
+                self.write_destructive_intent(
+                    &account,
+                    "modify_thread_labels",
+                    crate::audit::summarize_modify_thread_labels(
+                        &thread_id,
+                        &add_label_ids,
+                        &remove_label_ids,
+                        dry_run,
+                    ),
+                    dry_run,
+                )?;
                 let result = modify_labels::modify_thread_labels(
                     &self.gmail,
                     modify_labels::ModifyThreadLabelsInput {
@@ -838,6 +912,18 @@ impl ServerHandler for GoogleServer {
                 let remove_label_ids =
                     extract_string_array_arg(&request, "remove_label_ids").unwrap_or_default();
                 let dry_run = extract_bool_arg(&request, "dry_run");
+                self.write_destructive_intent(
+                    &account,
+                    "batch_modify_thread_labels",
+                    crate::audit::summarize_batch_modify_thread_labels(
+                        &thread_ids,
+                        &add_label_ids,
+                        &remove_label_ids,
+                        crate::audit::Verbosity::Redacted,
+                        dry_run,
+                    ),
+                    dry_run,
+                )?;
                 let result = modify_labels::batch_modify_thread_labels(
                     Arc::clone(&self.gmail),
                     modify_labels::BatchModifyThreadLabelsInput {
@@ -1103,6 +1189,85 @@ mod tests {
             server.get_info().server_info.name,
             cloned.get_info().server_info.name
         );
+    }
+
+    // ── Destructive-op fsync refusal (#66, ADR-0011) ─────────────────────────
+
+    /// Build a server whose audit dir is pre-created read-only so any
+    /// `write_synced` call fails with EACCES — simulating the disk-full
+    /// / file-handle-exhaustion failure mode the trust property guards
+    /// against. Returns the audit dir path so the caller can verify
+    /// nothing was written after the failure.
+    #[cfg(unix)]
+    fn fake_server_with_unwritable_audit() -> (GoogleServer, tempfile::TempDir) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let audit_dir = dir.path().join("audit");
+        std::fs::create_dir(&audit_dir).unwrap();
+        let mut perms = std::fs::metadata(&audit_dir).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(&audit_dir, perms).unwrap();
+
+        let tokens = Arc::new(TokenManager::new(
+            HashMap::new(),
+            ReqwestRefreshTransport::new(reqwest::Client::new()),
+            "https://example/token",
+            std::env::temp_dir().join(format!("gpm-srv-test-ro-{}", std::process::id())),
+        ));
+        let gmail = Arc::new(GmailClient::new(
+            "https://gmail.googleapis.com/gmail/v1",
+            tokens.clone(),
+            reqwest::Client::new(),
+        ));
+        let audit = AuditWriter::new(dir.path());
+        (
+            GoogleServer::new(Arc::new(vec![]), tokens, gmail, audit),
+            dir,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destructive_intent_failure_refuses_op() {
+        // Acceptance: audit-write failure → destructive op refusal.
+        // We call the helper that every destructive dispatch arm goes
+        // through; if it returns Err, the `?` in the arm short-circuits
+        // before Gmail is ever contacted.
+        use std::os::unix::fs::PermissionsExt;
+        let (server, dir) = fake_server_with_unwritable_audit();
+        let result = server.write_destructive_intent(
+            "personal",
+            "archive_thread",
+            crate::audit::summarize_archive_thread("thr-1", false),
+            /* dry_run = */ false,
+        );
+        // Restore perms before assertions (TempDir Drop needs to clean up).
+        let audit_dir = dir.path().join("audit");
+        let mut perms = std::fs::metadata(&audit_dir).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&audit_dir, perms).ok();
+
+        let err = result.expect_err("must refuse destructive op on audit failure");
+        // INTERNAL_ERROR is rmcp's mapping for Error::Internal.
+        assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn destructive_intent_skipped_for_dry_run() {
+        // dry_run = true: no API call to crash during, so no pre-fsync
+        // burden. The post-call best-effort write still captures the
+        // dry-run shape. This test guards against a regression where
+        // someone makes the pre-fsync unconditional.
+        let server = fake_server();
+        // Audit dir doesn't even exist yet — would fail on a real
+        // write — but dry_run path doesn't touch it.
+        let result = server.write_destructive_intent(
+            "personal",
+            "archive_thread",
+            crate::audit::summarize_archive_thread("thr-1", true),
+            /* dry_run = */ true,
+        );
+        assert!(result.is_ok(), "dry_run path must short-circuit cleanly");
     }
 
     // ── Descriptor snapshot tests (Layer 4) ──────────────────────────────────
