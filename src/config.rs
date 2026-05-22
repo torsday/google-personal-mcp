@@ -445,6 +445,17 @@ fn default_metrics_bind() -> String {
     "127.0.0.1:9100".into()
 }
 
+/// Returns `true` when `addr` is a valid `host:port` socket address whose IP
+/// part is the IPv4 loopback (`127.x.x.x`) or IPv6 loopback (`::1`).
+///
+/// Any parse failure (invalid address) is treated as **non-loopback** so the
+/// caller can surface an error through the normal config-validation path rather
+/// than silently suppressing the warning.
+pub(crate) fn is_loopback_bind(addr: &str) -> bool {
+    addr.parse::<SocketAddr>()
+        .is_ok_and(|sa| sa.ip().is_loopback())
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RetryConfig {
@@ -589,6 +600,43 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    // ── is_loopback_bind ────────────────────────────────────────────────────
+
+    #[test]
+    fn loopback_ipv4_127_0_0_1_is_loopback() {
+        assert!(is_loopback_bind("127.0.0.1:8765"));
+    }
+
+    #[test]
+    fn loopback_ipv4_127_x_x_x_is_loopback() {
+        // The entire 127.0.0.0/8 range is loopback per RFC 5735.
+        assert!(is_loopback_bind("127.1.2.3:1234"));
+    }
+
+    #[test]
+    fn loopback_ipv6_is_loopback() {
+        assert!(is_loopback_bind("[::1]:8765"));
+    }
+
+    #[test]
+    fn non_loopback_ipv4_is_not_loopback() {
+        assert!(!is_loopback_bind("0.0.0.0:8765"));
+        assert!(!is_loopback_bind("192.168.1.1:8765"));
+        assert!(!is_loopback_bind("10.0.0.1:8765"));
+    }
+
+    #[test]
+    fn non_loopback_ipv6_is_not_loopback() {
+        assert!(!is_loopback_bind("[::]:8765"));
+        assert!(!is_loopback_bind("[2001:db8::1]:8765"));
+    }
+
+    #[test]
+    fn invalid_addr_is_not_loopback() {
+        assert!(!is_loopback_bind("not-an-address"));
+        assert!(!is_loopback_bind(""));
+    }
 
     // ── tilde expansion ──────────────────────────────────────────────────────
 

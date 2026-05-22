@@ -189,6 +189,21 @@ fn run_serve_blocking() -> Result<(), Error> {
     let loaded_accounts = config::Accounts::load(&config::accounts_path(&dir))?;
     let cfg = config::Config::load(&config::config_path(&dir))?;
 
+    // Warn when the HTTP bind address is not loopback. Auth tokens flow over
+    // this connection on every tool call; non-loopback without TLS termination
+    // in front is a credential-exposure risk (ADR-0003 §Risks). The warning is
+    // always emitted regardless of RUST_LOG so it surfaces in syslog / systemd
+    // journal even when debug logging is off.
+    if !config::is_loopback_bind(&cfg.http.bind) {
+        tracing::warn!(
+            bind = %cfg.http.bind,
+            "HTTP transport bound to a non-loopback address without TLS — \
+             auth tokens are sent in cleartext on every tool call; \
+             place nginx (or another TLS-terminating reverse proxy) in front \
+             of this listener; see docs/adr/0003-transport-stdio-and-streamable-http.md"
+        );
+    }
+
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
