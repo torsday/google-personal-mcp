@@ -88,8 +88,20 @@ impl Error {
     /// The truncation point is rounded *down* to the nearest UTF-8 character
     /// boundary so multi-byte characters straddling the byte limit don't cause
     /// a panic (#98). 4 KiB is per ADR-0005.
+    ///
+    /// **OAuth-specific redaction (#103):** when `service == "google-oauth"`,
+    /// the body is scrubbed of `access_token`, `refresh_token`, and `id_token`
+    /// values *before* truncation, so a token sitting at byte 3000 of a 5 KiB
+    /// response can't leak via the truncated prefix.
+    /// [ADR-0017](../docs/adr/0017-secrets-at-rest.md) §"Logging hygiene".
     pub(crate) fn upstream(service: impl Into<String>, status: u16, body: String) -> Self {
         const MAX_BODY: usize = 4 * 1024;
+        let service = service.into();
+        let body = if service == "google-oauth" {
+            redact_oauth_token_fields(&body).into_owned()
+        } else {
+            body
+        };
         let message = if body.len() > MAX_BODY {
             format!(
                 "{}… (truncated)",
@@ -99,7 +111,7 @@ impl Error {
             body
         };
         Self::Upstream {
-            service: service.into(),
+            service,
             status,
             message,
         }
@@ -135,6 +147,147 @@ impl Error {
             Self::InsecurePermissions { .. } => "insecure_permissions",
             Self::Internal { .. } => "internal",
         }
+    }
+}
+
+/// Scrub OAuth-token-shaped JSON fields from `body`.
+///
+/// Replaces the string value of any `"access_token"`, `"refresh_token"`,
+/// or `"id_token"` JSON key with `"<redacted>"`. Tries strict JSON
+/// parsing first — any structure (objects, arrays, deeply nested) is
+/// walked. If `body` isn't valid JSON (truncated, surrounded by HTML,
+/// etc.) we fall back to a substring scrubber that looks for the same
+/// keys and rewrites just the string literal that follows.
+///
+/// Returned as `Cow` so the common "no tokens present" path doesn't
+/// allocate. Per [#103](https://github.com/torsday/google-personal-mcp/issues/103) /
+/// [ADR-0017](../docs/adr/0017-secrets-at-rest.md) §"Logging hygiene":
+/// Google's `invalid_grant` body may contain a fresh `access_token` on
+/// partial-refresh paths.
+pub(crate) fn redact_oauth_token_fields(body: &str) -> std::borrow::Cow<'_, str> {
+    const SENSITIVE: &[&str] = &["access_token", "refresh_token", "id_token"];
+    const REDACTED: &str = "<redacted>";
+
+    // Fast path: if none of the keys appear, nothing to do.
+    if !SENSITIVE.iter().any(|k| body.contains(k)) {
+        return std::borrow::Cow::Borrowed(body);
+    }
+
+    // Preferred path: strict JSON walk. Handles nested objects, arrays,
+    // mixed quoting, and the partial-refresh "the body is valid JSON
+    // and the token sits at /access_token" case the ADR calls out.
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) {
+        redact_json_in_place(&mut value, SENSITIVE, REDACTED);
+        if let Ok(s) = serde_json::to_string(&value) {
+            return std::borrow::Cow::Owned(s);
+        }
+    }
+
+    // Fallback: scanner-based scrub for non-JSON or truncated bodies.
+    // Walks the input once, looking for `"<key>"`-then-`:`-then-string,
+    // overwriting the string literal value with REDACTED. Conservative
+    // — better to leave a literal-looking byte that doesn't match the
+    // pattern in place than risk corrupting unrelated data.
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    'outer: while !rest.is_empty() {
+        // Find the next sensitive key occurrence (any of the three).
+        let next_key = SENSITIVE
+            .iter()
+            .filter_map(|k| {
+                let needle = format!("\"{k}\"");
+                rest.find(&needle).map(|i| (i, needle))
+            })
+            .min_by_key(|(i, _)| *i);
+        let Some((idx, needle)) = next_key else {
+            out.push_str(rest);
+            break;
+        };
+        // Copy through the key + `"key"` text.
+        let key_end = idx + needle.len();
+        out.push_str(&rest[..key_end]);
+        // Skip whitespace + colon + whitespace.
+        let mut tail = rest[key_end..].chars();
+        let mut consumed = 0;
+        let mut saw_colon = false;
+        for c in tail.by_ref() {
+            consumed += c.len_utf8();
+            if c == ':' {
+                saw_colon = true;
+                break;
+            }
+            if !c.is_whitespace() {
+                // Not a `"key": value` shape — bail on rewriting, just
+                // emit what we consumed so far and continue scanning.
+                out.push_str(&rest[key_end..key_end + consumed]);
+                rest = &rest[key_end + consumed..];
+                continue 'outer;
+            }
+        }
+        if !saw_colon {
+            out.push_str(&rest[key_end..]);
+            break;
+        }
+        // Skip post-colon whitespace.
+        let value_start_rel = consumed;
+        let post_colon = &rest[key_end + value_start_rel..];
+        let ws_skip = post_colon
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(post_colon.len());
+        out.push_str(&rest[key_end..key_end + value_start_rel + ws_skip]);
+        let value_pos = key_end + value_start_rel + ws_skip;
+        let value_slice = &rest[value_pos..];
+        // Expect an opening quote.
+        if !value_slice.starts_with('"') {
+            rest = value_slice;
+            continue;
+        }
+        // Find closing quote, skipping `\\"` escapes.
+        let mut end = 1;
+        let bytes = value_slice.as_bytes();
+        while end < bytes.len() {
+            let b = bytes[end];
+            if b == b'\\' && end + 1 < bytes.len() {
+                end += 2;
+                continue;
+            }
+            if b == b'"' {
+                break;
+            }
+            end += 1;
+        }
+        if end >= bytes.len() {
+            // Unterminated string — emit a redacted stub for the rest.
+            out.push('"');
+            out.push_str(REDACTED);
+            out.push('"');
+            break;
+        }
+        out.push('"');
+        out.push_str(REDACTED);
+        out.push('"');
+        rest = &value_slice[end + 1..];
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+fn redact_json_in_place(value: &mut serde_json::Value, keys: &[&str], placeholder: &str) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if keys.contains(&k.as_str()) {
+                    *v = serde_json::Value::String(placeholder.to_owned());
+                } else {
+                    redact_json_in_place(v, keys, placeholder);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                redact_json_in_place(v, keys, placeholder);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -489,5 +642,91 @@ mod tests {
         };
         let mcp = to_mcp_error(&e);
         assert!(mcp.message.contains("thread:abc"), "got: {}", mcp.message);
+    }
+
+    // ── OAuth token-leak redaction (#103, ADR-0017) ───────────────────────────
+
+    #[test]
+    fn redact_oauth_token_fields_strict_json() {
+        let body = r#"{"access_token":"FRESH-AT","refresh_token":"R-T","id_token":"ID","error":"invalid_grant"}"#;
+        let out = redact_oauth_token_fields(body);
+        assert!(!out.contains("FRESH-AT"), "got: {out}");
+        assert!(!out.contains("R-T\""), "got: {out}");
+        assert!(!out.contains("\"ID\""), "got: {out}");
+        assert!(out.contains("<redacted>"), "got: {out}");
+        assert!(out.contains("invalid_grant"), "got: {out}");
+    }
+
+    #[test]
+    fn redact_oauth_token_fields_nested_json() {
+        let body =
+            r#"{"wrapper":{"access_token":"NESTED-AT"},"list":[{"refresh_token":"NESTED-RT"}]}"#;
+        let out = redact_oauth_token_fields(body);
+        assert!(!out.contains("NESTED-AT"), "got: {out}");
+        assert!(!out.contains("NESTED-RT"), "got: {out}");
+    }
+
+    #[test]
+    fn redact_oauth_token_fields_non_json_fallback() {
+        // Truncated JSON (no closing brace) — fallback scanner must
+        // still scrub the token literal.
+        let body = r#"some preamble {"access_token":"BARE-AT","#;
+        let out = redact_oauth_token_fields(body);
+        assert!(!out.contains("BARE-AT"), "got: {out}");
+        assert!(out.contains("<redacted>"), "got: {out}");
+    }
+
+    #[test]
+    fn redact_oauth_token_fields_passthrough_when_clean() {
+        // No sensitive keys — should return Borrowed (no allocation).
+        let body = r#"{"error":"invalid_grant","error_description":"Token revoked"}"#;
+        let out = redact_oauth_token_fields(body);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn upstream_google_oauth_redacts_in_display() {
+        let body = r#"{"access_token":"FRESH-AT","error":"invalid_grant"}"#;
+        let e = Error::upstream("google-oauth", 400, body.to_owned());
+        let display = e.to_string();
+        let debug = format!("{e:?}");
+        assert!(!display.contains("FRESH-AT"), "display: {display}");
+        assert!(!debug.contains("FRESH-AT"), "debug: {debug}");
+    }
+
+    #[test]
+    fn upstream_non_oauth_service_does_not_redact() {
+        // Defense-in-depth: only google-oauth is scrubbed so we don't
+        // accidentally hide structured Gmail error bodies that
+        // operators need to debug.
+        let body = r#"{"access_token":"OTHER-AT","error":"x"}"#;
+        let e = Error::upstream("gmail", 400, body.to_owned());
+        assert!(e.to_string().contains("OTHER-AT"));
+    }
+
+    #[test]
+    fn auth_required_constructed_with_clean_reason_never_leaks_body() {
+        // Mirrors the new tokens.rs path: we build AuthRequired with a
+        // stable reason, never the raw body. This test guards against
+        // anyone re-introducing the splice.
+        let body = r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked.","access_token":"FRESH-AT"}"#;
+        let detail: Option<String> = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| {
+                v.get("error_description")
+                    .and_then(|d| d.as_str().map(str::to_owned))
+            });
+        let reason = detail.map_or_else(
+            || "refresh_token rejected (invalid_grant)".to_owned(),
+            |d| format!("refresh_token rejected (invalid_grant): {d}"),
+        );
+        let e = Error::AuthRequired {
+            account: "work".into(),
+            reason,
+        };
+        assert!(!e.to_string().contains("FRESH-AT"));
+        assert!(!format!("{e:?}").contains("FRESH-AT"));
+        assert!(e.to_string().contains("Token has been expired"));
     }
 }

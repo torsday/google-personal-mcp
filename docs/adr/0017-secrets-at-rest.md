@@ -76,6 +76,13 @@ The structured-logging facility ([ADR-0008]) **must never** log `access_token`, 
 
 Same rule applies to anything that wraps `TokenState`: `TokenManager`, `Account`, and any error variant that captures upstream OAuth response bodies (the `body.contains("invalid_grant")` path in [ADR-0004]). The OAuth response body **may** contain a fresh access token on the error path of a partial refresh; redact before logging or attaching to an `Error::Upstream`.
 
+Enforced as of [#103](https://github.com/torsday/google-personal-mcp/issues/103) by two complementary guards in `src/error.rs`:
+
+- `Error::AuthRequired.reason` is constructed from stable strings only — never spliced with the raw response body. If a structured `error_description` is useful, parse it out (`serde_json::Value::get("error_description")`) and reference the parsed field, *not* the body.
+- `Error::upstream(service, status, body)` scrubs `access_token`, `refresh_token`, and `id_token` JSON fields when `service == "google-oauth"` via `redact_oauth_token_fields`. Scrub runs *before* the 4 KiB truncation so a token sitting deep in an oversized body can't leak through the truncated prefix.
+
+Format-output tests in `src/error.rs` and `src/auth/tokens.rs` assert that `format!("{e:?}")` / `format!("{e}")` on the constructed errors never contains a synthetic token literal — regression-prevents the splice from coming back.
+
 ## Options Considered
 
 | Option | Pros | Cons |

@@ -324,6 +324,16 @@ fn cooldown_secs(consecutive_failures: u32) -> i64 {
     secs.min(COOLDOWN_MAX_SECS)
 }
 
+/// Extract the OAuth `error_description` field from a JSON error body.
+/// Returns `None` if `body` isn't JSON or the field is missing. Used
+/// instead of splicing the full body into `Error::AuthRequired.reason`
+/// per ADR-0017 §"Logging hygiene" (#103) — the description is a
+/// human-meant string, never carries a token.
+fn parse_oauth_error_description(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    v.get("error_description")?.as_str().map(str::to_owned)
+}
+
 fn build_refresh_body(refresh_token: &str, client_id: &str, client_secret: &str) -> String {
     url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "refresh_token")
@@ -344,9 +354,18 @@ fn apply_refresh_response(
 ) -> Result<TokenState, Error> {
     if !(200..300).contains(&status) {
         if body.contains("invalid_grant") {
+            // ADR-0017 §"Logging hygiene" (#103): the response body may
+            // contain a fresh access_token on partial-refresh paths.
+            // Never splice it into `reason` — parse out the structured
+            // `error_description` if present and reference *that*.
+            let detail = parse_oauth_error_description(body);
+            let reason = detail.map_or_else(
+                || "refresh_token rejected (invalid_grant)".to_owned(),
+                |d| format!("refresh_token rejected (invalid_grant): {d}"),
+            );
             return Err(Error::AuthRequired {
                 account: account.to_owned(),
-                reason: format!("refresh_token rejected (invalid_grant): {body}"),
+                reason,
             });
         }
         return Err(Error::upstream("google-oauth", status, body.to_owned()));
