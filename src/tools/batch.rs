@@ -91,24 +91,28 @@ where
     F: Fn(String) -> Fut,
     Fut: Future<Output = Result<(), Error>> + Send + 'static,
 {
+    // Index tasks by position, not by thread_id, so duplicate IDs in the input
+    // each get their own result slot. Using a HashMap keyed by thread_id would
+    // cause the second duplicate's result to overwrite the first, and the
+    // output loop's second removal would synthesise a spurious "task did not
+    // complete" error. See #104.
     let mut join_set = tokio::task::JoinSet::new();
-    for thread_id in &thread_ids {
-        let tid_for_task = thread_id.clone();
+    for (idx, thread_id) in thread_ids.iter().enumerate() {
         let fut = spawn_one(thread_id.clone());
         join_set.spawn(async move {
             let result = fut.await;
-            (tid_for_task, result)
+            (idx, result)
         });
     }
 
-    let mut by_id: HashMap<String, Result<(), Error>> = HashMap::new();
+    let mut by_idx: HashMap<usize, Result<(), Error>> = HashMap::new();
     while let Some(join_result) = join_set.join_next().await {
         match join_result {
-            Ok((tid, outcome)) => {
-                by_id.insert(tid, outcome);
+            Ok((idx, outcome)) => {
+                by_idx.insert(idx, outcome);
             }
             Err(join_err) => {
-                // JoinError doesn't carry the thread_id; the unaccounted entry
+                // JoinError doesn't carry the index; the unaccounted entry
                 // surfaces as "task did not complete" in the ordered merge below.
                 tracing::error!("batch task panicked: {join_err}");
             }
@@ -117,7 +121,8 @@ where
 
     thread_ids
         .into_iter()
-        .map(|thread_id| match by_id.remove(&thread_id) {
+        .enumerate()
+        .map(|(idx, thread_id)| match by_idx.remove(&idx) {
             Some(Ok(())) => BatchItem {
                 thread_id,
                 ok: true,
@@ -262,6 +267,26 @@ mod tests {
     async fn run_thread_batch_empty_input_returns_empty() {
         let results = run_thread_batch(vec![], |_| async { Ok(()) }).await;
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_thread_batch_handles_duplicate_thread_ids() {
+        // Regression test for #104: duplicate IDs in the input must each get
+        // their own result slot. Previously the HashMap-by-id approach caused
+        // the second removal to return None and synthesise a spurious
+        // "task did not complete" error.
+        let ids = vec!["t1".into(), "t1".into(), "t2".into()];
+        let results = run_thread_batch(ids, |_tid| async { Ok(()) }).await;
+
+        assert_eq!(results.len(), 3);
+        // All three entries must be populated — no spurious "task did not complete".
+        for result in &results {
+            assert!(result.ok, "expected ok=true, got: {result:?}");
+            assert!(result.error.is_none());
+        }
+        assert_eq!(results[0].thread_id, "t1");
+        assert_eq!(results[1].thread_id, "t1");
+        assert_eq!(results[2].thread_id, "t2");
     }
 
     #[tokio::test]
