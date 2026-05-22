@@ -134,54 +134,295 @@ fn open_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Per-tool params_summary builders ─────────────────────────────────────────
+//
+// One builder per v0.2 tool, matching the redaction table in
+// [ADR-0011 §Redaction rules per tool](../docs/adr/0011-audit-log.md).
+//
+// Each builder either takes no `verbosity` argument (the redacted form is the
+// only sane form — e.g. IDs aren't content) or accepts a [`Verbosity`] flag
+// so the operator-opt-in verbose mode can be wired by a future ticket (#68)
+// without changing call sites again.
 
-/// Build a `params_summary` for non-send destructive tools (archive, trash,
-/// `modify_labels`). Thread IDs and label IDs are operator-controlled and
-/// included as-is; no redaction needed.
-pub(crate) fn summarize_thread_op(
-    thread_ids: &[String],
+/// Operator-facing audit verbosity per ADR-0011. Default redacted; verbose
+/// is opt-in via the (forthcoming) `[audit] verbose = true` config flag (#68).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verbosity {
+    /// Redact attacker-controlled content (default).
+    Redacted,
+    /// Operator opt-in: full content for the operator's own audit log.
+    Verbose,
+}
+
+// ── Single-thread tools — no content to redact ───────────────────────────────
+
+/// `archive_thread` params: just `thread_id` + `dry_run`. Both are
+/// operator-controlled IDs, not content — no verbosity dimension.
+pub(crate) fn summarize_archive_thread(thread_id: &str, dry_run: bool) -> Value {
+    serde_json::json!({
+        "thread_id": thread_id,
+        "dry_run": dry_run,
+    })
+}
+
+/// `trash_thread` params: same shape as `archive_thread`.
+pub(crate) fn summarize_trash_thread(thread_id: &str, dry_run: bool) -> Value {
+    serde_json::json!({
+        "thread_id": thread_id,
+        "dry_run": dry_run,
+    })
+}
+
+/// `modify_thread_labels` params: thread + label IDs + `dry_run`. Label IDs
+/// are operator-assigned (system labels like `INBOX` or user-created); not
+/// considered content.
+pub(crate) fn summarize_modify_thread_labels(
+    thread_id: &str,
+    add_label_ids: &[String],
+    remove_label_ids: &[String],
     dry_run: bool,
-    extra: Option<Value>,
+) -> Value {
+    serde_json::json!({
+        "thread_id": thread_id,
+        "add_label_ids": add_label_ids,
+        "remove_label_ids": remove_label_ids,
+        "dry_run": dry_run,
+    })
+}
+
+/// `get_thread` params: `thread_id` only — no content even in verbose mode.
+pub(crate) fn summarize_get_thread(thread_id: &str) -> Value {
+    serde_json::json!({ "thread_id": thread_id })
+}
+
+// ── Batch tools — `thread_ids` redacts to count + first/last ─────────────────
+
+/// `batch_archive` params. Redacted: `{thread_ids_count, thread_ids_first,
+/// thread_ids_last, dry_run}`. Verbose: full `thread_ids` array.
+pub(crate) fn summarize_batch_archive(
+    thread_ids: &[String],
+    verbosity: Verbosity,
+    dry_run: bool,
 ) -> Value {
     let mut m = serde_json::Map::new();
-    if thread_ids.len() == 1 {
-        m.insert("thread_id".into(), Value::String(thread_ids[0].clone()));
-    } else {
+    redact_thread_ids(&mut m, thread_ids, verbosity);
+    m.insert("dry_run".into(), Value::Bool(dry_run));
+    Value::Object(m)
+}
+
+/// `batch_trash` params — same redaction shape as `batch_archive`.
+pub(crate) fn summarize_batch_trash(
+    thread_ids: &[String],
+    verbosity: Verbosity,
+    dry_run: bool,
+) -> Value {
+    let mut m = serde_json::Map::new();
+    redact_thread_ids(&mut m, thread_ids, verbosity);
+    m.insert("dry_run".into(), Value::Bool(dry_run));
+    Value::Object(m)
+}
+
+/// `batch_modify_thread_labels` params. Same `thread_ids` redaction; label
+/// IDs are always included regardless of verbosity per the ADR.
+pub(crate) fn summarize_batch_modify_thread_labels(
+    thread_ids: &[String],
+    add_label_ids: &[String],
+    remove_label_ids: &[String],
+    verbosity: Verbosity,
+    dry_run: bool,
+) -> Value {
+    let mut m = serde_json::Map::new();
+    redact_thread_ids(&mut m, thread_ids, verbosity);
+    m.insert(
+        "add_label_ids".into(),
+        Value::Array(
+            add_label_ids
+                .iter()
+                .map(|s| Value::String(s.clone()))
+                .collect(),
+        ),
+    );
+    m.insert(
+        "remove_label_ids".into(),
+        Value::Array(
+            remove_label_ids
+                .iter()
+                .map(|s| Value::String(s.clone()))
+                .collect(),
+        ),
+    );
+    m.insert("dry_run".into(), Value::Bool(dry_run));
+    Value::Object(m)
+}
+
+/// Populate `m` with redacted `thread_ids_*` fields, or the full `thread_ids`
+/// array in verbose mode. Shared by every batch tool's summarizer.
+fn redact_thread_ids(
+    m: &mut serde_json::Map<String, Value>,
+    thread_ids: &[String],
+    verbosity: Verbosity,
+) {
+    if verbosity == Verbosity::Verbose {
         m.insert(
             "thread_ids".into(),
             Value::Array(
                 thread_ids
                     .iter()
-                    .map(|t| Value::String(t.clone()))
+                    .map(|s| Value::String(s.clone()))
                     .collect(),
             ),
         );
+        return;
     }
-    m.insert("dry_run".into(), Value::Bool(dry_run));
-    if let Some(extra) = extra {
-        if let Some(obj) = extra.as_object() {
-            m.extend(obj.clone());
+    m.insert(
+        "thread_ids_count".into(),
+        Value::Number(serde_json::Number::from(thread_ids.len())),
+    );
+    if let Some(first) = thread_ids.first() {
+        m.insert("thread_ids_first".into(), Value::String(first.clone()));
+    }
+    if thread_ids.len() > 1 {
+        if let Some(last) = thread_ids.last() {
+            m.insert("thread_ids_last".into(), Value::String(last.clone()));
         }
+    }
+}
+
+// ── search_threads — query is potentially sensitive content ──────────────────
+
+/// `search_threads` params. Redacted: `query_len` + `query_token_count`
+/// only. Verbose: full `query`. Token count uses whitespace splitting — a
+/// readable signal of search complexity without echoing the operator's
+/// terms.
+pub(crate) fn summarize_search_threads(query: &str, verbosity: Verbosity) -> Value {
+    let mut m = serde_json::Map::new();
+    if verbosity == Verbosity::Verbose {
+        m.insert("query".into(), Value::String(query.to_owned()));
+    } else {
+        m.insert(
+            "query_len".into(),
+            Value::Number(serde_json::Number::from(query.len())),
+        );
+        m.insert(
+            "query_token_count".into(),
+            Value::Number(serde_json::Number::from(query.split_whitespace().count())),
+        );
     }
     Value::Object(m)
 }
 
-/// Build a `params_summary` for `send_email`. The body text is redacted to
-/// `{length, sha256_prefix}` — never logged as plaintext.
-pub(crate) fn summarize_send(
+// ── send_email — most attacker-controlled fields; tightest redaction ─────────
+
+/// `send_email` params per ADR-0011. Redacted mode:
+/// - `to` collapses to one entry per *unique domain* (local-parts stripped)
+/// - `subject` → length only
+/// - `body` → length + sha256 prefix only (the hash supports correlating
+///   audit records with the dedup cache per ADR-0012 without leaking content)
+/// - `cc` → count only
+///
+/// Verbose mode: full `to`, full `subject`, first 200 chars of body
+/// preview (truncated, char-boundary safe), full `cc`. The 200-char ceiling
+/// matches the ADR.
+pub(crate) fn summarize_send_email(
     to: &[String],
-    subject_len: usize,
-    body_len: usize,
+    subject: &str,
+    body: &str,
     body_sha256_prefix: &str,
+    cc: &[String],
+    verbosity: Verbosity,
     dry_run: bool,
 ) -> Value {
+    let mut m = serde_json::Map::new();
+    match verbosity {
+        Verbosity::Redacted => {
+            m.insert("to_domains".into(), Value::Array(to_domains(to)));
+            m.insert(
+                "subject_len".into(),
+                Value::Number(serde_json::Number::from(subject.len())),
+            );
+            m.insert(
+                "body_len".into(),
+                Value::Number(serde_json::Number::from(body.len())),
+            );
+            m.insert(
+                "body_sha256_prefix".into(),
+                Value::String(body_sha256_prefix.to_owned()),
+            );
+            m.insert(
+                "cc_count".into(),
+                Value::Number(serde_json::Number::from(cc.len())),
+            );
+        }
+        Verbosity::Verbose => {
+            m.insert(
+                "to".into(),
+                Value::Array(to.iter().map(|s| Value::String(s.clone())).collect()),
+            );
+            m.insert("subject".into(), Value::String(subject.to_owned()));
+            m.insert("body_preview".into(), Value::String(truncate_body(body)));
+            m.insert(
+                "body_len".into(),
+                Value::Number(serde_json::Number::from(body.len())),
+            );
+            m.insert(
+                "body_sha256_prefix".into(),
+                Value::String(body_sha256_prefix.to_owned()),
+            );
+            m.insert(
+                "cc".into(),
+                Value::Array(cc.iter().map(|s| Value::String(s.clone())).collect()),
+            );
+        }
+    }
+    m.insert("dry_run".into(), Value::Bool(dry_run));
+    Value::Object(m)
+}
+
+/// Extract the deduplicated set of domains from a list of addresses. Output
+/// is in first-occurrence order so the audit log is deterministic. Inputs
+/// without an `@` surface as `<unparseable>` so the operator can still tell
+/// *something* was passed.
+fn to_domains(to: &[String]) -> Vec<Value> {
+    let mut seen: Vec<String> = Vec::with_capacity(to.len());
+    for addr in to {
+        let domain = addr
+            .rsplit_once('@')
+            .map_or("<unparseable>", |(_local, dom)| dom)
+            .to_owned();
+        if !seen.contains(&domain) {
+            seen.push(domain);
+        }
+    }
+    seen.into_iter().map(Value::String).collect()
+}
+
+/// Truncate `body` to the first 200 chars (char-boundary safe). ADR-0011
+/// caps the verbose-mode body preview at 200 chars; longer bodies get an
+/// ellipsis appended.
+fn truncate_body(body: &str) -> String {
+    const CAP: usize = 200;
+    if body.chars().count() <= CAP {
+        return body.to_owned();
+    }
+    body.chars().take(CAP).collect::<String>() + "…"
+}
+
+// ── download_attachment — paths are operator-chosen; no content ──────────────
+
+/// `download_attachment` params. The `save_to` path is operator-chosen on
+/// every call, so it's not redacted; the ADR notes the operator owns this
+/// choice. No verbosity dimension.
+pub(crate) fn summarize_download_attachment(
+    attachment_id: &str,
+    mime_type: &str,
+    size_bytes: u64,
+    save_to: &str,
+) -> Value {
     serde_json::json!({
-        "to_count": to.len(),
-        "subject_len": subject_len,
-        "body_len": body_len,
-        "body_sha256_prefix": body_sha256_prefix,
-        "dry_run": dry_run,
+        "attachment_id": attachment_id,
+        "mime_type": mime_type,
+        "size_bytes": size_bytes,
+        "save_to": save_to,
     })
 }
 
@@ -281,20 +522,317 @@ mod tests {
         assert!(content.contains("\"action\":\"dry_run\""));
     }
 
+    // ── Per-tool extra-builder tests (ADR-0011 §Redaction rules per tool) ──
+
+    // archive_thread / trash_thread — IDs only, no verbosity dimension.
+
     #[test]
-    fn send_email_params_summary_redacts_body() {
-        let summary = summarize_send(
-            &["alice@example.com".to_owned()],
-            14,   // subject_len
-            1024, // body_len
-            "abc123",
+    fn archive_thread_summary_has_id_and_dry_run() {
+        let s = summarize_archive_thread("tid1", false);
+        assert_eq!(s["thread_id"], "tid1");
+        assert_eq!(s["dry_run"], false);
+    }
+
+    #[test]
+    fn trash_thread_summary_has_id_and_dry_run() {
+        let s = summarize_trash_thread("tid7", true);
+        assert_eq!(s["thread_id"], "tid7");
+        assert_eq!(s["dry_run"], true);
+    }
+
+    #[test]
+    fn modify_thread_labels_summary_has_id_and_labels() {
+        let s = summarize_modify_thread_labels(
+            "tid",
+            &["INBOX".into()],
+            &["STARRED".into(), "UNREAD".into()],
             false,
         );
-        assert_eq!(summary["body_len"], 1024);
-        assert_eq!(summary["body_sha256_prefix"], "abc123");
-        // body text must NOT appear in the summary
-        assert!(summary.get("body").is_none());
-        assert!(summary.get("body_text").is_none());
+        assert_eq!(s["thread_id"], "tid");
+        assert_eq!(s["add_label_ids"], serde_json::json!(["INBOX"]));
+        assert_eq!(
+            s["remove_label_ids"],
+            serde_json::json!(["STARRED", "UNREAD"])
+        );
+    }
+
+    #[test]
+    fn get_thread_summary_has_id_only() {
+        let s = summarize_get_thread("tid42");
+        assert_eq!(s["thread_id"], "tid42");
+        // No other fields — get_thread is read-only with no other meaningful params.
+        assert_eq!(s.as_object().unwrap().len(), 1);
+    }
+
+    // batch tools — redact thread_ids to count + first/last by default.
+
+    #[test]
+    fn batch_archive_redacted_omits_full_list() {
+        let ids: Vec<String> = (0..10).map(|i| format!("tid{i}")).collect();
+        let s = summarize_batch_archive(&ids, Verbosity::Redacted, false);
+        assert_eq!(s["thread_ids_count"], 10);
+        assert_eq!(s["thread_ids_first"], "tid0");
+        assert_eq!(s["thread_ids_last"], "tid9");
+        assert!(
+            s.get("thread_ids").is_none(),
+            "redacted must not emit full list"
+        );
+    }
+
+    #[test]
+    fn batch_archive_redacted_single_id_omits_last() {
+        let s = summarize_batch_archive(&["only".into()], Verbosity::Redacted, false);
+        assert_eq!(s["thread_ids_count"], 1);
+        assert_eq!(s["thread_ids_first"], "only");
+        // last is suppressed when count == 1 (it would duplicate first).
+        assert!(s.get("thread_ids_last").is_none());
+    }
+
+    #[test]
+    fn batch_archive_redacted_empty_ok() {
+        let s = summarize_batch_archive(&[], Verbosity::Redacted, false);
+        assert_eq!(s["thread_ids_count"], 0);
+        assert!(s.get("thread_ids_first").is_none());
+        assert!(s.get("thread_ids_last").is_none());
+    }
+
+    #[test]
+    fn batch_archive_verbose_includes_full_list() {
+        let ids = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let s = summarize_batch_archive(&ids, Verbosity::Verbose, true);
+        assert_eq!(s["thread_ids"], serde_json::json!(["a", "b", "c"]));
+        assert_eq!(s["dry_run"], true);
+        assert!(
+            s.get("thread_ids_count").is_none(),
+            "verbose must not emit the redacted-form count field"
+        );
+    }
+
+    #[test]
+    fn batch_trash_uses_same_redaction_as_batch_archive() {
+        let ids: Vec<String> = vec!["x".into(), "y".into()];
+        let s = summarize_batch_trash(&ids, Verbosity::Redacted, false);
+        assert_eq!(s["thread_ids_count"], 2);
+        assert_eq!(s["thread_ids_first"], "x");
+        assert_eq!(s["thread_ids_last"], "y");
+    }
+
+    #[test]
+    fn batch_modify_thread_labels_redacts_ids_keeps_labels() {
+        let ids: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
+        let s = summarize_batch_modify_thread_labels(
+            &ids,
+            &["INBOX".into()],
+            &[],
+            Verbosity::Redacted,
+            false,
+        );
+        assert_eq!(s["thread_ids_count"], 5);
+        assert_eq!(s["thread_ids_first"], "t0");
+        assert_eq!(s["thread_ids_last"], "t4");
+        assert_eq!(s["add_label_ids"], serde_json::json!(["INBOX"]));
+        assert_eq!(s["remove_label_ids"], serde_json::json!([]));
+    }
+
+    // search_threads — query content is potentially sensitive.
+
+    #[test]
+    fn search_threads_redacted_emits_len_and_token_count_only() {
+        let query = "from:alice subject:secret-project";
+        let s = summarize_search_threads(query, Verbosity::Redacted);
+        assert_eq!(s["query_len"], query.len());
+        assert_eq!(s["query_token_count"], 2);
+        assert!(s.get("query").is_none(), "redacted must not echo query");
+    }
+
+    #[test]
+    fn search_threads_verbose_emits_full_query() {
+        let s = summarize_search_threads("from:alice", Verbosity::Verbose);
+        assert_eq!(s["query"], "from:alice");
+        assert!(s.get("query_len").is_none());
+    }
+
+    #[test]
+    fn search_threads_redacted_does_not_leak_content() {
+        // Sentinel content must not appear anywhere in the serialized output.
+        let sentinel = "S3CRET-PROJECT-NAME";
+        let s = summarize_search_threads(&format!("subject:{sentinel}"), Verbosity::Redacted);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains(sentinel), "redacted leaked query: {json}");
+    }
+
+    // send_email — strictest redaction; PII never appears in default mode.
+
+    #[test]
+    fn send_email_redacted_strips_local_parts_and_subject() {
+        let subject = "Q3 forecast";
+        let body = "Hi team, attached is the forecast for Q3. Confidential.";
+        let s = summarize_send_email(
+            &[
+                "alice@example.com".into(),
+                "bob@example.com".into(),
+                "carol@other.org".into(),
+            ],
+            subject,
+            body,
+            "deadbeef",
+            &["cc1@x.com".into(), "cc2@y.com".into()],
+            Verbosity::Redacted,
+            false,
+        );
+        // Domains are deduped + in first-occurrence order.
+        assert_eq!(
+            s["to_domains"],
+            serde_json::json!(["example.com", "other.org"])
+        );
+        assert_eq!(s["subject_len"], subject.len());
+        assert_eq!(s["body_len"], body.len());
+        assert_eq!(s["body_sha256_prefix"], "deadbeef");
+        assert_eq!(s["cc_count"], 2);
+        assert!(s.get("subject").is_none());
+        assert!(s.get("body").is_none());
+        assert!(s.get("body_preview").is_none());
+        assert!(s.get("to").is_none());
+        assert!(s.get("cc").is_none());
+    }
+
+    #[test]
+    fn send_email_redacted_does_not_leak_pii() {
+        // The most important assertion in this whole file: no recipient
+        // local-part, no subject text, no body text in default-mode output.
+        let sentinels = [
+            "alice",
+            "S3CRET-DEAL",
+            "highly-confidential-body-content",
+            "bob",
+            "carol",
+        ];
+        let s = summarize_send_email(
+            &["alice@x.example.com".into(), "bob@x.example.com".into()],
+            "Re: S3CRET-DEAL",
+            "Body: highly-confidential-body-content",
+            "abc",
+            &["carol@cc.example".into()],
+            Verbosity::Redacted,
+            false,
+        );
+        let json = serde_json::to_string(&s).unwrap();
+        for sentinel in sentinels {
+            assert!(
+                !json.contains(sentinel),
+                "redacted send_email leaked {sentinel:?}: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn send_email_verbose_includes_full_to_and_subject_and_body_preview() {
+        let s = summarize_send_email(
+            &["alice@x.com".into()],
+            "Hello",
+            "The full body content here.",
+            "abc",
+            &[],
+            Verbosity::Verbose,
+            false,
+        );
+        assert_eq!(s["to"], serde_json::json!(["alice@x.com"]));
+        assert_eq!(s["subject"], "Hello");
+        assert_eq!(s["body_preview"], "The full body content here.");
+        assert_eq!(s["body_len"], 27);
+    }
+
+    #[test]
+    fn send_email_verbose_truncates_body_at_200_chars() {
+        // 250 'a' chars; verbose preview must be exactly 200 + ellipsis.
+        let body = "a".repeat(250);
+        let s = summarize_send_email(
+            &["x@y.com".into()],
+            "",
+            &body,
+            "",
+            &[],
+            Verbosity::Verbose,
+            false,
+        );
+        let preview = s["body_preview"].as_str().unwrap();
+        let count = preview.chars().count();
+        // 200 'a' chars + the ellipsis character = 201 chars.
+        assert_eq!(count, 201, "got {count} chars: {preview}");
+        assert!(preview.ends_with('…'));
+        assert_eq!(s["body_len"], 250);
+    }
+
+    #[test]
+    fn send_email_truncation_is_char_boundary_safe() {
+        // 200 multi-byte chars, each 3 bytes (CJK). String truncation via
+        // byte slicing would panic; char-boundary-safe truncation must not.
+        let body = "好".repeat(250);
+        let s = summarize_send_email(
+            &["x@y.com".into()],
+            "",
+            &body,
+            "",
+            &[],
+            Verbosity::Verbose,
+            false,
+        );
+        let preview = s["body_preview"].as_str().unwrap();
+        assert_eq!(preview.chars().count(), 201);
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn send_email_redacted_handles_unparseable_address() {
+        let s = summarize_send_email(
+            &["no-at-sign".into(), "valid@example.com".into()],
+            "x",
+            "y",
+            "z",
+            &[],
+            Verbosity::Redacted,
+            false,
+        );
+        // <unparseable> stays in the output as a signal that something was
+        // there, but local part never leaks.
+        assert_eq!(
+            s["to_domains"],
+            serde_json::json!(["<unparseable>", "example.com"])
+        );
+    }
+
+    #[test]
+    fn send_email_redacted_dedupes_repeated_domains() {
+        let s = summarize_send_email(
+            &[
+                "a@example.com".into(),
+                "b@example.com".into(),
+                "c@example.com".into(),
+            ],
+            "x",
+            "y",
+            "z",
+            &[],
+            Verbosity::Redacted,
+            false,
+        );
+        assert_eq!(s["to_domains"], serde_json::json!(["example.com"]));
+    }
+
+    // download_attachment — operator-controlled fields only.
+
+    #[test]
+    fn download_attachment_summary_has_all_fields() {
+        let s = summarize_download_attachment(
+            "att1",
+            "application/pdf",
+            4096,
+            "/Users/me/Downloads/report.pdf",
+        );
+        assert_eq!(s["attachment_id"], "att1");
+        assert_eq!(s["mime_type"], "application/pdf");
+        assert_eq!(s["size_bytes"], 4096);
+        assert_eq!(s["save_to"], "/Users/me/Downloads/report.pdf");
     }
 
     #[cfg(unix)]
