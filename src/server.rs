@@ -523,7 +523,7 @@ impl ServerHandler for GoogleServer {
                     timestamp: chrono::Utc::now(),
                     account,
                     tool: "archive_thread".into(),
-                    params_summary: crate::audit::summarize_thread_op(&[thread_id], dry_run, None),
+                    params_summary: crate::audit::summarize_archive_thread(&thread_id, dry_run),
                     action: if dry_run {
                         "dry_run".into()
                     } else {
@@ -556,7 +556,11 @@ impl ServerHandler for GoogleServer {
                     timestamp: chrono::Utc::now(),
                     account,
                     tool: "batch_archive".into(),
-                    params_summary: crate::audit::summarize_thread_op(&thread_ids, dry_run, None),
+                    params_summary: crate::audit::summarize_batch_archive(
+                        &thread_ids,
+                        crate::audit::Verbosity::Redacted,
+                        dry_run,
+                    ),
                     action: if dry_run {
                         "dry_run".into()
                     } else {
@@ -589,7 +593,7 @@ impl ServerHandler for GoogleServer {
                     timestamp: chrono::Utc::now(),
                     account,
                     tool: "trash_thread".into(),
-                    params_summary: crate::audit::summarize_thread_op(&[thread_id], dry_run, None),
+                    params_summary: crate::audit::summarize_trash_thread(&thread_id, dry_run),
                     action: if dry_run {
                         "dry_run".into()
                     } else {
@@ -622,7 +626,11 @@ impl ServerHandler for GoogleServer {
                     timestamp: chrono::Utc::now(),
                     account,
                     tool: "batch_trash".into(),
-                    params_summary: crate::audit::summarize_thread_op(&thread_ids, dry_run, None),
+                    params_summary: crate::audit::summarize_batch_trash(
+                        &thread_ids,
+                        crate::audit::Verbosity::Redacted,
+                        dry_run,
+                    ),
                     action: if dry_run {
                         "dry_run".into()
                     } else {
@@ -661,13 +669,11 @@ impl ServerHandler for GoogleServer {
                     timestamp: chrono::Utc::now(),
                     account,
                     tool: "modify_thread_labels".into(),
-                    params_summary: crate::audit::summarize_thread_op(
-                        &[thread_id],
+                    params_summary: crate::audit::summarize_modify_thread_labels(
+                        &thread_id,
+                        &add_label_ids,
+                        &remove_label_ids,
                         dry_run,
-                        Some(serde_json::json!({
-                            "add_label_ids": add_label_ids,
-                            "remove_label_ids": remove_label_ids,
-                        })),
                     ),
                     action: if dry_run {
                         "dry_run".into()
@@ -707,13 +713,12 @@ impl ServerHandler for GoogleServer {
                     timestamp: chrono::Utc::now(),
                     account,
                     tool: "batch_modify_thread_labels".into(),
-                    params_summary: crate::audit::summarize_thread_op(
+                    params_summary: crate::audit::summarize_batch_modify_thread_labels(
                         &thread_ids,
+                        &add_label_ids,
+                        &remove_label_ids,
+                        crate::audit::Verbosity::Redacted,
                         dry_run,
-                        Some(serde_json::json!({
-                            "add_label_ids": add_label_ids,
-                            "remove_label_ids": remove_label_ids,
-                        })),
                     ),
                     action: if dry_run {
                         "dry_run".into()
