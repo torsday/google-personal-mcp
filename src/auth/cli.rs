@@ -393,7 +393,7 @@ fn run_remove(alias: &str, yes: bool, revoke: bool, config_dir: &Path) -> Result
         if let Ok(body) = std::fs::read_to_string(&token_path) {
             if let Ok(state) = serde_json::from_str::<TokenState>(&body) {
                 // Try revoke with refresh_token; ignore errors (best-effort).
-                let _ = revoke_token_at_google(&state.refresh_token);
+                let _ = revoke_token_at_google(&state.refresh_token, GOOGLE_REVOKE_URI);
             }
         }
     }
@@ -425,17 +425,22 @@ fn run_remove(alias: &str, yes: bool, revoke: bool, config_dir: &Path) -> Result
     Ok(())
 }
 
-/// POST to Google's revoke endpoint with `token=<refresh_token>`.
+const GOOGLE_REVOKE_URI: &str = "https://oauth2.googleapis.com/revoke";
+
+/// POST `token=<refresh_token>` to `revoke_uri` in the **request body**
+/// (RFC 7009 §2.1). The token must never appear in the URL — URLs leak via
+/// proxy logs, OS crash dumps, and process traces. `revoke_uri` is
+/// parameterised so that tests can point at a local mock server.
 /// Best-effort: errors are ignored by the caller.
-fn revoke_token_at_google(refresh_token: &str) -> Result<(), Error> {
+fn revoke_token_at_google(refresh_token: &str, revoke_uri: &str) -> Result<(), Error> {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("token", refresh_token)
+        .finish();
     let client = blocking_reqwest_client()?;
-    let revoke_url = format!(
-        "https://oauth2.googleapis.com/revoke?token={}",
-        url::form_urlencoded::byte_serialize(refresh_token.as_bytes()).collect::<String>()
-    );
     client
-        .post(&revoke_url)
+        .post(revoke_uri)
         .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
         .send()
         .map_err(Error::Network)?;
     Ok(())
@@ -672,5 +677,68 @@ mod tests {
         run_remove("work", true, false, &dir).expect("remove ok");
 
         assert!(!token_path.exists(), "token file should have been deleted");
+    }
+
+    // ── revoke_token_at_google (Layer 2 wiremock) ────────────────────────────
+
+    /// Verifies that `revoke_token_at_google`:
+    ///  (a) uses POST
+    ///  (b) sends no query parameters in the URL
+    ///  (c) puts the token in the request body as `application/x-www-form-urlencoded`
+    ///
+    /// These three properties are what RFC 7009 §2.1 requires and what the old
+    /// URL-query-string implementation violated.
+    #[tokio::test]
+    async fn revoke_sends_token_in_body_not_url() {
+        use wiremock::matchers::{body_string_contains, header, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(header("Content-Type", "application/x-www-form-urlencoded"))
+            .and(body_string_contains("token=fake-refresh-token"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        // revoke_token_at_google uses reqwest::blocking which cannot run on a
+        // tokio thread directly — spawn onto blocking pool.
+        let result =
+            tokio::task::spawn_blocking(move || revoke_token_at_google("fake-refresh-token", &uri))
+                .await
+                .expect("spawn_blocking");
+
+        assert!(result.is_ok(), "revoke should succeed: {result:?}");
+        // MockServer::verify() is called automatically on drop — the `.expect(1)`
+        // assertion fires if the POST was never received.
+    }
+
+    /// Token must NOT appear in the URL path or query string.
+    #[tokio::test]
+    async fn revoke_url_has_no_query_params() {
+        use wiremock::matchers::{method, path, query_param_is_missing};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(query_param_is_missing("token"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let _ =
+            tokio::task::spawn_blocking(move || revoke_token_at_google("super-secret-token", &uri))
+                .await
+                .expect("spawn_blocking");
+        // MockServer drop verifies the `.expect(1)` — if the token were in the
+        // URL as `?token=...`, the `query_param_is_missing("token")` matcher
+        // would fail to match and the expectation would not be met.
     }
 }
