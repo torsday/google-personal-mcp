@@ -45,6 +45,16 @@ pub(crate) struct BatchArchiveOutput {
 // ── Core logic ────────────────────────────────────────────────────────────────
 
 /// Archive a single Gmail thread by removing the `INBOX` label.
+#[tracing::instrument(
+    skip_all,
+    err(Display),
+    fields(
+        tool.name = "archive_thread",
+        tool.account = %input.account,
+        tool.thread_id = %input.thread_id,
+        tool.dry_run = input.dry_run,
+    ),
+)]
 pub(crate) async fn archive_thread<T: RefreshTransport>(
     client: &GmailClient<T>,
     input: ArchiveThreadInput,
@@ -95,6 +105,16 @@ pub(crate) async fn archive_thread<T: RefreshTransport>(
 /// [`batch::run_thread_batch`] and collects per-item results. Never
 /// short-circuits on failure — every id receives an entry in the output.
 /// Input ordering is preserved.
+#[tracing::instrument(
+    skip_all,
+    err(Display),
+    fields(
+        tool.name = "batch_archive",
+        tool.account = %input.account,
+        tool.count = input.thread_ids.len(),
+        tool.dry_run = input.dry_run,
+    ),
+)]
 pub(crate) async fn batch_archive<T: RefreshTransport + Send + Sync + 'static>(
     client: Arc<GmailClient<T>>,
     input: BatchArchiveInput,

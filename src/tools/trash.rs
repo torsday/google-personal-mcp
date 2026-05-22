@@ -43,6 +43,16 @@ pub(crate) struct BatchTrashOutput {
 // ── Core logic ────────────────────────────────────────────────────────────────
 
 /// Move a single Gmail thread to trash.
+#[tracing::instrument(
+    skip_all,
+    err(Display),
+    fields(
+        tool.name = "trash_thread",
+        tool.account = %input.account,
+        tool.thread_id = %input.thread_id,
+        tool.dry_run = input.dry_run,
+    ),
+)]
 pub(crate) async fn trash_thread<T: RefreshTransport>(
     client: &GmailClient<T>,
     input: TrashThreadInput,
@@ -90,6 +100,16 @@ pub(crate) async fn trash_thread<T: RefreshTransport>(
 /// Never short-circuits: all results are collected regardless of per-item
 /// failures. Input ordering is preserved (previously sorted alphabetically —
 /// see issue #105).
+#[tracing::instrument(
+    skip_all,
+    err(Display),
+    fields(
+        tool.name = "batch_trash",
+        tool.account = %input.account,
+        tool.count = input.thread_ids.len(),
+        tool.dry_run = input.dry_run,
+    ),
+)]
 pub(crate) async fn batch_trash<T: RefreshTransport + Send + Sync + 'static>(
     client: Arc<GmailClient<T>>,
     input: BatchTrashInput,

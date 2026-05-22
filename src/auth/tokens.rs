@@ -191,6 +191,11 @@ impl<T: RefreshTransport> TokenManager<T> {
         self.refresh_locked(account, state, true).await
     }
 
+    #[tracing::instrument(
+        skip_all,
+        err(Display),
+        fields(oauth.account = %account, oauth.force = force),
+    )]
     async fn refresh_locked(
         &self,
         account: &str,

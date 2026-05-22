@@ -84,6 +84,16 @@ pub(crate) struct SearchThreadsInput {
 /// propagate as `Error` — partial-success is not the right semantics for a
 /// search-results page where any missing row would silently bias what the
 /// host LLM sees.
+#[tracing::instrument(
+    skip_all,
+    err(Display),
+    fields(
+        tool.name = "search_threads",
+        tool.account = %input.account,
+        tool.query_len = input.query.len(),
+        tool.max_results = input.max_results,
+    ),
+)]
 pub(crate) async fn search_threads<T: RefreshTransport + Send + Sync + 'static>(
     client: Arc<GmailClient<T>>,
     input: SearchThreadsInput,

@@ -115,6 +115,27 @@ impl Error {
         }
         Ok(())
     }
+
+    /// Short, stable identifier for this error variant — suitable for
+    /// the `error.kind` tracing field per ADR-0005 / ADR-0008. Never
+    /// includes user-controlled bytes; safe to log unconditionally.
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::AuthRequired { .. } => "auth_required",
+            Self::AccountNotFound { .. } => "account_not_found",
+            Self::NotFound { .. } => "not_found",
+            Self::InvalidArgument { .. } => "invalid_argument",
+            Self::HeaderInjection { .. } => "header_injection",
+            Self::RateLimited { .. } => "rate_limited",
+            Self::Upstream { .. } => "upstream",
+            Self::Network(_) => "network",
+            Self::Parse { .. } => "parse",
+            Self::Io(_) => "io",
+            Self::Config { .. } => "config",
+            Self::InsecurePermissions { .. } => "insecure_permissions",
+            Self::Internal { .. } => "internal",
+        }
+    }
 }
 
 /// Return the longest prefix of `s` that fits within `max_bytes` and ends on a
