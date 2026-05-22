@@ -161,6 +161,16 @@ pub(crate) struct Config {
     pub(crate) retry: RetryConfig,
     #[serde(default)]
     pub(crate) secrets: SecretsConfig,
+    /// `[metrics]` section per [ADR-0008 §`/metrics` endpoint](../docs/adr/0008-observability-and-deployment.md).
+    ///
+    /// `None` (the default) means **disabled** — no listener is bound, no
+    /// background task spawned. Mere presence of `[metrics]` in
+    /// `config.toml` flips it on, even with no fields set. That matches the
+    /// ADR's "Disabled by default unless the section is present" rule and
+    /// matches the v0.x scope (liveness `/healthz` only; Prometheus
+    /// `/metrics` is v1.0 — see #70 / #75).
+    #[serde(default)]
+    pub(crate) metrics: Option<MetricsConfig>,
 }
 
 /// `[secrets]` section — selects the storage backend per
@@ -410,6 +420,29 @@ const fn default_max_sessions() -> u32 {
 
 const fn default_require_loopback_or_tls() -> bool {
     true
+}
+
+/// `[metrics]` section — internal listener for liveness `/healthz` (v0.x)
+/// and the Prometheus `/metrics` endpoint (v1.0; #75). Bound to a
+/// loopback address by default; never reachable through nginx per
+/// [ADR-0008 §nginx termination](../docs/adr/0008-observability-and-deployment.md).
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MetricsConfig {
+    #[serde(default = "default_metrics_bind")]
+    pub(crate) bind: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_metrics_bind(),
+        }
+    }
+}
+
+fn default_metrics_bind() -> String {
+    "127.0.0.1:9100".into()
 }
 
 #[derive(Debug, Deserialize, Serialize)]
