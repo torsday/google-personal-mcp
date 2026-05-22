@@ -304,17 +304,20 @@ fn wait_for_redirect(
 /// A legitimate OAuth redirect is `GET /?code=<64 chars>&state=<43 chars> HTTP/1.1\r\n`
 /// — well under 256 bytes. 8 KiB gives headroom for unusually long codes while
 /// bounding worst-case allocation from a malicious local connection.
-const REQUEST_LINE_LIMIT: u64 = 8 * 1024;
+///
+/// Using `usize` (rather than `u64`) avoids truncation lints on 32-bit targets
+/// and is compatible with `Read::take`, which accepts a `u64` via `.into()`.
+const REQUEST_LINE_LIMIT: usize = 8 * 1024;
 
 /// Read the first line of an HTTP request from `reader`, capped at
 /// [`REQUEST_LINE_LIMIT`] bytes. Returns `Error::Parse` if the line
 /// exceeds the limit (no `\n` found within the budget).
 fn read_request_line(reader: impl Read) -> Result<String, Error> {
-    let mut limited = BufReader::new(reader.take(REQUEST_LINE_LIMIT));
+    let mut limited = BufReader::new(reader.take(REQUEST_LINE_LIMIT as u64));
     let mut line = String::new();
     let n = limited.read_line(&mut line).map_err(Error::Io)?;
     // If we consumed the full budget without a newline, the request is oversized.
-    if n as u64 == REQUEST_LINE_LIMIT && !line.contains('\n') {
+    if n == REQUEST_LINE_LIMIT && !line.contains('\n') {
         return Err(Error::Parse {
             context: "OAuth redirect request line".into(),
             source: serde::de::Error::custom(
@@ -709,7 +712,8 @@ mod tests {
     #[test]
     fn read_request_line_accepts_line_just_under_limit() {
         // 8 KiB - 1 byte of content + newline — should succeed (within budget).
-        let mut input = vec![b'X'; REQUEST_LINE_LIMIT as usize - 1];
+        // 8 KiB - 1, matching REQUEST_LINE_LIMIT without a u64→usize cast.
+        let mut input = vec![b'X'; 8 * 1024 - 1];
         input.push(b'\n');
         let result = read_request_line(input.as_slice());
         assert!(
