@@ -14,6 +14,13 @@ categories = ["command-line-utilities", "email"]
 name = "google-personal-mcp"
 path = "src/main.rs"
 
+# Library target exists so `benches/*.rs` and future integration tests
+# can import the crate's public API (e.g. `bench_parse_mime`). The bin
+# `main.rs` is a thin shim that calls `lib::main_entry()`.
+[lib]
+name = "google_personal_mcp"
+path = "src/lib.rs"
+
 # ── Lints ─────────────────────────────────────────────────────────────────────
 
 [lints.rust]
@@ -92,3 +99,20 @@ macos-keychain = ["dep:keyring"]
 tempfile = "3"
 wiremock = "0.6"
 insta = { version = "1", features = ["json"] }
+# `default-features = false` drops `rayon` (parallel sample collection)
+# — keeps the dep graph closer to the runtime crate. `async_tokio`
+# enables `AsyncBencher::to_async(&runtime).iter(|| async {...})` so
+# `tool_latency` can drive wiremock-backed tool dispatch.
+criterion = { version = "0.5", default-features = false, features = ["async_tokio"] }
+
+# ── Benchmarks ────────────────────────────────────────────────────────────────
+# `harness = false` lets criterion provide its own harness — the default
+# `#[test]` harness doesn't understand criterion's CLI flags.
+
+[[bench]]
+name = "mime_parsing"
+harness = false
+
+[[bench]]
+name = "tool_latency"
+harness = false
