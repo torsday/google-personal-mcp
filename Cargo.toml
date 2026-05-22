@@ -89,11 +89,12 @@ sha2 = "0.11"
 hex = "0.4"
 async-trait = "0.1"
 
-keyring = { version = "3", optional = true, features = ["apple-native"] }
+keyring-core = { version = "1", optional = true }
+apple-native-keyring-store = { version = "1", optional = true, features = ["keychain"] }
 
 [features]
 default = []
-macos-keychain = ["dep:keyring"]
+macos-keychain = ["dep:keyring-core", "dep:apple-native-keyring-store"]
 
 [dev-dependencies]
 tempfile = "3"

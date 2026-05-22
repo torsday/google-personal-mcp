@@ -13,8 +13,9 @@
 //! `keyring` crate handles all the platform-specific protocol; we just
 //! call `set_password` / `get_password` / `delete_credential`.
 
+use apple_native_keyring_store::keychain::{Cred, MacKeychainDomain};
 use async_trait::async_trait;
-use keyring::Entry;
+use keyring_core::Entry;
 
 use crate::auth::tokens::TokenState;
 use crate::error::Error;
@@ -28,7 +29,7 @@ pub(crate) struct KeychainSecretStore;
 
 impl KeychainSecretStore {
     fn entry(alias: &str) -> Result<Entry, Error> {
-        Entry::new(SERVICE, alias).map_err(|e| Error::Config {
+        Cred::build(MacKeychainDomain::User, SERVICE, alias).map_err(|e| Error::Config {
             path: format!("keychain://{SERVICE}/{alias}"),
             message: format!("could not open Keychain entry: {e}"),
         })
@@ -43,7 +44,7 @@ impl super::SecretStore for KeychainSecretStore {
             let entry = Self::entry(&alias)?;
             match entry.get_password() {
                 Ok(s) => Ok(Some(s)),
-                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(keyring_core::Error::NoEntry) => Ok(None),
                 Err(e) => Err(Error::Config {
                     path: format!("keychain://{SERVICE}/{alias}"),
                     message: format!("Keychain read failed: {e}"),
@@ -92,7 +93,7 @@ impl super::SecretStore for KeychainSecretStore {
         tokio::task::spawn_blocking(move || {
             let entry = Self::entry(&alias)?;
             match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
                 Err(e) => Err(Error::Config {
                     path: format!("keychain://{SERVICE}/{alias}"),
                     message: format!("Keychain delete failed: {e}"),
