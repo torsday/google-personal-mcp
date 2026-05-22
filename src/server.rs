@@ -1120,6 +1120,7 @@ mod tests {
         ));
         let audit = AuditWriter::new(
             std::env::temp_dir().join(format!("gpm-srv-test-{}", std::process::id())),
+            crate::config::RotateMode::Monthly,
         );
         GoogleServer::new(Arc::new(vec![]), tokens, gmail, audit, Verbosity::Redacted)
     }
@@ -1138,6 +1139,7 @@ mod tests {
         ));
         let audit = AuditWriter::new(
             std::env::temp_dir().join(format!("gpm-srv-test-{}", std::process::id())),
+            crate::config::RotateMode::Monthly,
         );
         GoogleServer::new(
             Arc::new(accounts),
@@ -1222,7 +1224,7 @@ mod tests {
             tokens.clone(),
             reqwest::Client::new(),
         ));
-        let audit = AuditWriter::new(dir.path());
+        let audit = AuditWriter::new(dir.path(), crate::config::RotateMode::Monthly);
         (
             GoogleServer::new(Arc::new(vec![]), tokens, gmail, audit, Verbosity::Redacted),
             dir,

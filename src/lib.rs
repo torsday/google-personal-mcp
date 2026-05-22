@@ -241,7 +241,7 @@ fn run_serve_blocking() -> Result<(), Error> {
     let gmail = Arc::new(GmailClient::new(gmail_base, tokens.clone(), http_client));
 
     let accounts = Arc::new(loaded_accounts.accounts);
-    let audit = AuditWriter::new(&dir);
+    let audit = AuditWriter::new(&dir, cfg.audit.rotate.clone());
 
     // Liveness `/healthz` listener per ADR-0008 (#70). Only spawned when
     // the operator opted in by including `[metrics]` in config.toml. Bind

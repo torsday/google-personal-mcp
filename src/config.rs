@@ -176,7 +176,88 @@ pub(crate) struct Config {
     pub(crate) audit: AuditConfig,
 }
 
-/// `[audit]` section — controls verbosity of the audit log per
+/// Controls when the audit-log file is rotated per
+/// [ADR-0011](../docs/adr/0011-audit-log.md).
+///
+/// | Config value        | Filename pattern        |
+/// |---------------------|-------------------------|
+/// | `"monthly"` (default) | `audit-2026-04.log`   |
+/// | `"weekly"`          | `audit-2026-W17.log`    |
+/// | `"daily"`           | `audit-2026-04-25.log`  |
+/// | `"size:<bytes>"`    | `audit-<seq>.log`       |
+///
+/// Rotation is **lazy**: the filename is computed from the current clock (or
+/// current file size) at the moment of the first write in a new period.
+/// No background task is required; the old file simply stops receiving writes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum RotateMode {
+    /// Rotate once per calendar month (UTC). Default.
+    #[default]
+    Monthly,
+    /// Rotate once per ISO week (UTC, Monday-start per ISO 8601).
+    Weekly,
+    /// Rotate once per calendar day (UTC).
+    Daily,
+    /// Rotate when the current file exceeds `n` bytes; sequential numbering.
+    Size(u64),
+}
+
+impl std::fmt::Display for RotateMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Monthly => write!(f, "monthly"),
+            Self::Weekly => write!(f, "weekly"),
+            Self::Daily => write!(f, "daily"),
+            Self::Size(n) => write!(f, "size:{n}"),
+        }
+    }
+}
+
+impl TryFrom<String> for RotateMode {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        match s.as_str() {
+            "monthly" => Ok(Self::Monthly),
+            "weekly" => Ok(Self::Weekly),
+            "daily" => Ok(Self::Daily),
+            _ if s.starts_with("size:") => {
+                let n_str = &s["size:".len()..];
+                let n = n_str
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid size in `{s}`: expected `size:<bytes>`"))?;
+                if n == 0 {
+                    return Err(format!("`{s}`: size must be > 0"));
+                }
+                Ok(Self::Size(n))
+            }
+            _ => Err(format!(
+                "unknown rotate value `{s}`; expected `monthly`, `weekly`, `daily`, or `size:<bytes>`"
+            )),
+        }
+    }
+}
+
+impl From<RotateMode> for String {
+    fn from(m: RotateMode) -> Self {
+        m.to_string()
+    }
+}
+
+impl<'de> Deserialize<'de> for RotateMode {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(de)?;
+        Self::try_from(s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for RotateMode {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.to_string())
+    }
+}
+
+/// `[audit]` section — controls verbosity and rotation of the audit log per
 /// [ADR-0011 §Configuration](../docs/adr/0011-audit-log.md).
 ///
 /// `verbose = false` (default): attacker-controlled content (queries, subjects,
@@ -194,6 +275,12 @@ pub(crate) struct AuditConfig {
     /// subjects, recipient addresses, body previews). Default `false`.
     #[serde(default)]
     pub(crate) verbose: bool,
+    /// Controls when the audit-log file rotates. Default `"monthly"`.
+    ///
+    /// See [`RotateMode`] for the full list of accepted values and
+    /// corresponding filename patterns.
+    #[serde(default)]
+    pub(crate) rotate: RotateMode,
 }
 
 /// `[secrets]` section — selects the storage backend per
@@ -1123,5 +1210,97 @@ mod tests {
         );
         let cfg = Config::load(&path).unwrap();
         assert!(!cfg.audit.verbose);
+    }
+
+    // ── RotateMode ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rotate_mode_default_is_monthly() {
+        assert_eq!(RotateMode::default(), RotateMode::Monthly);
+    }
+
+    #[test]
+    fn rotate_mode_parses_all_variants() {
+        assert_eq!(
+            RotateMode::try_from("monthly".to_owned()),
+            Ok(RotateMode::Monthly)
+        );
+        assert_eq!(
+            RotateMode::try_from("weekly".to_owned()),
+            Ok(RotateMode::Weekly)
+        );
+        assert_eq!(
+            RotateMode::try_from("daily".to_owned()),
+            Ok(RotateMode::Daily)
+        );
+        assert_eq!(
+            RotateMode::try_from("size:1048576".to_owned()),
+            Ok(RotateMode::Size(1_048_576))
+        );
+        assert_eq!(
+            RotateMode::try_from("size:1".to_owned()),
+            Ok(RotateMode::Size(1))
+        );
+    }
+
+    #[test]
+    fn rotate_mode_rejects_unknown_values() {
+        assert!(RotateMode::try_from("hourly".to_owned()).is_err());
+        assert!(RotateMode::try_from("".to_owned()).is_err());
+        assert!(RotateMode::try_from("size:abc".to_owned()).is_err());
+        assert!(RotateMode::try_from("size:0".to_owned()).is_err());
+        assert!(RotateMode::try_from("size:-1".to_owned()).is_err());
+    }
+
+    #[test]
+    fn rotate_mode_roundtrips_display() {
+        for mode in [
+            RotateMode::Monthly,
+            RotateMode::Weekly,
+            RotateMode::Daily,
+            RotateMode::Size(100),
+        ] {
+            let s: String = mode.clone().into();
+            let reparsed = RotateMode::try_from(s.clone()).unwrap();
+            assert_eq!(reparsed, mode, "roundtrip failed for `{s}`");
+        }
+    }
+
+    #[test]
+    fn audit_rotate_parses_from_config_toml() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            "
+            [audit]
+            rotate = \"weekly\"
+            ",
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.audit.rotate, RotateMode::Weekly);
+    }
+
+    #[test]
+    fn audit_rotate_defaults_to_monthly_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.audit.rotate, RotateMode::Monthly);
+    }
+
+    #[test]
+    fn audit_rotate_size_parses_from_config_toml() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            "
+            [audit]
+            rotate = \"size:10485760\"
+            ",
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.audit.rotate, RotateMode::Size(10_485_760));
     }
 }
