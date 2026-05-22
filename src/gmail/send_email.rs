@@ -13,6 +13,7 @@ use crate::error::Error;
 use crate::gmail::client::GmailClient;
 use crate::gmail::compose::{compose_raw, ComposeInput};
 use crate::gmail::quota::GmailMethod;
+use crate::http::percent_encode_path_segment;
 use crate::tools::destructive::{DestructiveContext, SendDecision, SendDedupKey};
 
 /// Caller-supplied request shape per ADR-0016 `send_email`.
@@ -191,8 +192,9 @@ async fn prefetch_reply_headers<T: RefreshTransport>(
     thread_id: &str,
 ) -> Result<(Option<String>, Vec<String>), Error> {
     let path = format!(
-        "/users/me/threads/{thread_id}?format=metadata\
-         &metadataHeaders=Message-ID&metadataHeaders=References"
+        "/users/me/threads/{t}?format=metadata\
+         &metadataHeaders=Message-ID&metadataHeaders=References",
+        t = percent_encode_path_segment(thread_id),
     );
     let thread: ThreadMetadata = client
         .authed_get(account, &path, GmailMethod::ThreadsGet.cost())

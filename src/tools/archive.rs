@@ -13,6 +13,7 @@ use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
 use crate::gmail::quota::GmailMethod;
+use crate::http::percent_encode_path_segment;
 use crate::tools::batch::{self, BatchItem};
 use crate::tools::destructive::{Decision, DestructiveContext};
 
@@ -70,7 +71,8 @@ pub(crate) async fn archive_thread<T: RefreshTransport>(
         Decision::Apply => {
             let path = format!(
                 "/users/{}/threads/{}/modify",
-                input.account, input.thread_id
+                percent_encode_path_segment(&input.account),
+                percent_encode_path_segment(&input.thread_id),
             );
             let body = serde_json::json!({ "removeLabelIds": ["INBOX"] });
             let _: serde_json::Value = client

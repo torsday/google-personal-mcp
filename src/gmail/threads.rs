@@ -11,6 +11,7 @@ use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
 use crate::gmail::quota::GmailMethod;
+use crate::http::percent_encode_path_segment;
 
 // ── Gmail API response shapes ─────────────────────────────────────────────────
 
@@ -165,7 +166,11 @@ pub(crate) async fn get_thread<T: RefreshTransport>(
         });
     }
 
-    let path = format!("/users/{account}/threads/{thread_id}?format=FULL");
+    let path = format!(
+        "/users/{a}/threads/{t}?format=FULL",
+        a = percent_encode_path_segment(account),
+        t = percent_encode_path_segment(thread_id),
+    );
     let raw: RawThread = client
         .authed_get(account, &path, GmailMethod::ThreadsGet.cost())
         .await?;
@@ -198,14 +203,17 @@ pub(crate) async fn list_threads<T: RefreshTransport>(
     let mut qs = format!("maxResults={max_results}");
     if !query.is_empty() {
         qs.push_str("&q=");
-        qs.push_str(&urlencode(query));
+        qs.push_str(&percent_encode_path_segment(query));
     }
     if let Some(tok) = page_token.filter(|t| !t.is_empty()) {
         qs.push_str("&pageToken=");
-        qs.push_str(&urlencode(tok));
+        qs.push_str(&percent_encode_path_segment(tok));
     }
 
-    let path = format!("/users/{account}/threads?{qs}");
+    let path = format!(
+        "/users/{a}/threads?{qs}",
+        a = percent_encode_path_segment(account),
+    );
     client
         .authed_get(account, &path, GmailMethod::ThreadsList.cost())
         .await
@@ -235,8 +243,10 @@ pub(crate) async fn get_thread_metadata<T: RefreshTransport>(
     }
 
     let path = format!(
-        "/users/{account}/threads/{thread_id}?format=metadata\
-         &metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date"
+        "/users/{a}/threads/{t}?format=metadata\
+         &metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date",
+        a = percent_encode_path_segment(account),
+        t = percent_encode_path_segment(thread_id),
     );
     let raw: RawThread = client
         .authed_get(account, &path, GmailMethod::ThreadsGet.cost())
@@ -274,27 +284,6 @@ fn metadata_from_raw(raw: RawThread) -> ThreadMetadata {
         thread_id: raw.id,
         messages,
     }
-}
-
-/// Minimal URL-form-encoding for query-string values. Gmail accepts standard
-/// `application/x-www-form-urlencoded` for both `q` and `pageToken`.
-/// Implemented inline (~10 lines) to avoid pulling in a percent-encoding crate.
-fn urlencode(s: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                out.push('%');
-                out.push(HEX[(b >> 4) as usize] as char);
-                out.push(HEX[(b & 0xF) as usize] as char);
-            }
-        }
-    }
-    out
 }
 
 // ── Parsing logic ─────────────────────────────────────────────────────────────
@@ -727,5 +716,50 @@ mod tests {
             matches!(err, Error::InvalidArgument { ref field, .. } if field == "account"),
             "got: {err:?}"
         );
+    }
+
+    // ── Test: thread_id containing `/` reaches the wire percent-encoded ──────
+    //
+    // Layer 2 wiremock test for issue #106. The wiremock matcher is anchored on
+    // the exact `%2F`-encoded path; if `format!` interpolation lets the raw `/`
+    // through, the matcher misses, the mock returns 404, and the test fails.
+
+    #[tokio::test]
+    async fn thread_id_with_slash_is_percent_encoded_on_the_wire() {
+        let server = MockServer::start().await;
+        let msgs = vec![simple_message("m", "S", "F", "body")];
+        let body = thread_response("foo%2Fbar", &msgs);
+        // path_regex matches the path component verbatim — `%2F` literal here.
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/threads/foo%2Fbar$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let thread = get_thread(&client, "work", "foo/bar")
+            .await
+            .expect("encoded path should match");
+        assert_eq!(thread.thread_id, "foo%2Fbar");
+    }
+
+    #[tokio::test]
+    async fn thread_id_with_question_mark_does_not_smuggle_query() {
+        // Without encoding, `thread_id="x?format=raw"` would override the
+        // `?format=FULL` query string — proving the encoding is doing real work.
+        let server = MockServer::start().await;
+        let msgs = vec![simple_message("m", "S", "F", "body")];
+        let body = thread_response("evil", &msgs);
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/threads/x%3Fformat%3Draw$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let thread = get_thread(&client, "work", "x?format=raw")
+            .await
+            .expect("encoded path should match");
+        assert_eq!(thread.thread_id, "evil");
     }
 }

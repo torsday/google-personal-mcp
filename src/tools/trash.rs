@@ -11,6 +11,7 @@ use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
 use crate::gmail::quota::GmailMethod;
+use crate::http::percent_encode_path_segment;
 use crate::tools::batch::{self, BatchItem};
 use crate::tools::destructive::{Decision, DestructiveContext};
 
@@ -66,7 +67,11 @@ pub(crate) async fn trash_thread<T: RefreshTransport>(
             applied: false,
         }),
         Decision::Apply => {
-            let path = format!("/users/{}/threads/{}/trash", input.account, input.thread_id);
+            let path = format!(
+                "/users/{}/threads/{}/trash",
+                percent_encode_path_segment(&input.account),
+                percent_encode_path_segment(&input.thread_id),
+            );
             // threads.trash is a POST with empty body; response contains the trashed thread.
             let _: serde_json::Value = client
                 .authed_post(

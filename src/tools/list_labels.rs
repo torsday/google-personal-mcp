@@ -10,6 +10,7 @@ use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
 use crate::gmail::quota::GmailMethod;
+use crate::http::percent_encode_path_segment;
 
 // ── Gmail API response shapes ─────────────────────────────────────────────────
 
@@ -78,7 +79,10 @@ pub(crate) async fn list_labels<T: RefreshTransport>(
         });
     }
 
-    let path = format!("/users/{account}/labels");
+    let path = format!(
+        "/users/{a}/labels",
+        a = percent_encode_path_segment(account),
+    );
     let resp: LabelsListResponse = client
         .authed_get(account, &path, GmailMethod::LabelsList.cost())
         .await?;
