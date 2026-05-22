@@ -11,8 +11,8 @@ use serde::Serialize;
 
 use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
-use crate::gmail::client::GmailClient;
 use crate::gmail::quota::GmailMethod;
+use crate::gmail::service::GmailService;
 use crate::http::percent_encode_path_segment;
 use crate::tools::batch::{self, BatchItem};
 use crate::tools::destructive::{Decision, DestructiveContext};
@@ -94,7 +94,7 @@ fn extract_label_ids(resp: &ModifyResponse) -> Vec<String> {
     ),
 )]
 pub(crate) async fn modify_thread_labels<T: RefreshTransport>(
-    client: &GmailClient<T>,
+    gmail: &GmailService<T>,
     input: ModifyThreadLabelsInput,
 ) -> Result<ModifyThreadLabelsOutput, Error> {
     if input.account.is_empty() {
@@ -132,7 +132,8 @@ pub(crate) async fn modify_thread_labels<T: RefreshTransport>(
                 "addLabelIds": input.add_label_ids,
                 "removeLabelIds": input.remove_label_ids,
             });
-            let resp: ModifyResponse = client
+            let resp: ModifyResponse = gmail
+                .client()
                 .authed_post(
                     &input.account,
                     &path,
@@ -169,7 +170,7 @@ pub(crate) async fn modify_thread_labels<T: RefreshTransport>(
     ),
 )]
 pub(crate) async fn batch_modify_thread_labels<T: RefreshTransport + Send + Sync + 'static>(
-    client: Arc<GmailClient<T>>,
+    gmail: Arc<GmailService<T>>,
     input: BatchModifyThreadLabelsInput,
 ) -> Result<BatchModifyThreadLabelsOutput, Error> {
     batch::validate_batch_input(&input.account, &input.thread_ids)?;
@@ -192,13 +193,13 @@ pub(crate) async fn batch_modify_thread_labels<T: RefreshTransport + Send + Sync
     let add = Arc::new(input.add_label_ids);
     let remove = Arc::new(input.remove_label_ids);
     let results = batch::run_thread_batch(input.thread_ids, |tid| {
-        let c = Arc::clone(&client);
+        let g = Arc::clone(&gmail);
         let a = Arc::clone(&account);
         let add = Arc::clone(&add);
         let remove = Arc::clone(&remove);
         async move {
             modify_thread_labels(
-                &c,
+                &g,
                 ModifyThreadLabelsInput {
                     account: (*a).clone(),
                     thread_id: tid,
@@ -231,6 +232,7 @@ mod tests {
 
     use crate::auth::tokens::{RefreshTransport, TokenManager, TokenState};
     use crate::error::Error;
+    use crate::gmail::client::GmailClient;
 
     #[derive(Clone)]
     struct NoRefresh;
@@ -244,7 +246,7 @@ mod tests {
         }
     }
 
-    fn make_client(base_url: &str) -> Arc<GmailClient<NoRefresh>> {
+    fn make_client(base_url: &str) -> Arc<GmailService<NoRefresh>> {
         let state = TokenState {
             access_token: "TOKEN".into(),
             refresh_token: "R".into(),
@@ -266,7 +268,8 @@ mod tests {
             std::env::temp_dir().join(format!("mod-labels-test-{}", std::process::id())),
         )
         .unwrap();
-        Arc::new(GmailClient::new(base_url, tokens, reqwest::Client::new()))
+        let client = Arc::new(GmailClient::new(base_url, tokens, reqwest::Client::new()));
+        Arc::new(GmailService::new(client, None))
     }
 
     fn thread_resp(id: &str, labels: &[&str]) -> serde_json::Value {

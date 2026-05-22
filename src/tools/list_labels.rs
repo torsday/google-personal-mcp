@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
-use crate::gmail::client::GmailClient;
 use crate::gmail::quota::GmailMethod;
+use crate::gmail::service::GmailService;
 use crate::http::percent_encode_path_segment;
 
 // ── Gmail API response shapes ─────────────────────────────────────────────────
@@ -74,7 +74,7 @@ fn map_raw_label(r: RawLabel) -> LabelItem {
     fields(tool.name = "list_labels", tool.account = %account),
 )]
 pub(crate) async fn list_labels<T: RefreshTransport>(
-    client: &GmailClient<T>,
+    gmail: &GmailService<T>,
     account: &str,
 ) -> Result<ListLabelsOutput, Error> {
     if account.is_empty() {
@@ -88,7 +88,8 @@ pub(crate) async fn list_labels<T: RefreshTransport>(
         "/users/{a}/labels",
         a = percent_encode_path_segment(account),
     );
-    let resp: LabelsListResponse = client
+    let resp: LabelsListResponse = gmail
+        .client()
         .authed_get(account, &path, GmailMethod::LabelsList.cost())
         .await?;
 
@@ -177,6 +178,7 @@ mod tests {
         use crate::auth::tokens::{RefreshTransport, TokenManager, TokenState};
         use crate::error::Error;
         use crate::gmail::client::GmailClient;
+        use crate::gmail::service::GmailService;
         use crate::http::RetryPolicy;
         use crate::tools::fanout::{self, FanoutOutcome};
         use crate::tools::list_labels;
@@ -254,10 +256,11 @@ mod tests {
                 "https://example/token",
                 tmpdir,
             ));
-            let gmail = Arc::new(
+            let client = Arc::new(
                 GmailClient::new(server.uri(), tokens, reqwest::Client::new())
                     .with_retry(RetryPolicy::for_tests()),
             );
+            let gmail = Arc::new(GmailService::new(client, None));
 
             // Run fan-out: closure clones the Arc into each per-account future.
             let resp = fanout::run_fanout(

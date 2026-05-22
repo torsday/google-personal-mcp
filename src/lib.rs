@@ -48,10 +48,11 @@ pub mod bench_handle {
 
     use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager, TokenState};
     use crate::gmail::client::GmailClient;
+    use crate::gmail::service::GmailService;
     use crate::tools::{get_thread, list_labels, search_threads};
 
     pub struct BenchHandle {
-        client: Arc<GmailClient<ReqwestRefreshTransport>>,
+        gmail: Arc<GmailService<ReqwestRefreshTransport>>,
         account: String,
     }
 
@@ -82,22 +83,23 @@ pub mod bench_handle {
                 tokens_dir,
             ));
             let client = Arc::new(GmailClient::new(base_url, tokens, reqwest::Client::new()));
+            let gmail = Arc::new(GmailService::new(client, None));
             Self {
-                client,
+                gmail,
                 account: account.to_owned(),
             }
         }
 
         /// Run `list_labels(account)` end-to-end.
         pub async fn list_labels(&self) -> bool {
-            list_labels::list_labels(&self.client, &self.account)
+            list_labels::list_labels(&self.gmail, &self.account)
                 .await
                 .is_ok()
         }
 
         /// Run `get_thread(account, thread_id)` end-to-end.
         pub async fn get_thread(&self, thread_id: &str) -> bool {
-            get_thread::get_thread(&self.client, &self.account, thread_id)
+            get_thread::get_thread(&self.gmail, &self.account, thread_id)
                 .await
                 .is_ok()
         }
@@ -107,7 +109,7 @@ pub mod bench_handle {
         /// bounded.
         pub async fn search_threads(&self, query: &str) -> bool {
             search_threads::search_threads(
-                Arc::clone(&self.client),
+                Arc::clone(&self.gmail),
                 search_threads::SearchThreadsInput {
                     account: self.account.clone(),
                     query: query.to_owned(),
@@ -133,6 +135,7 @@ use crate::auth::secrets::SecretStore;
 use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager, TokenState};
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
+use crate::gmail::service::GmailService;
 use crate::server::{run_stdio, GoogleServer};
 
 /// Top-level CLI surface. `serve` is the default; `auth` covers account setup.
@@ -239,7 +242,11 @@ fn run_serve_blocking() -> Result<(), Error> {
         tokens_dir,
     ));
     let gmail_base = "https://gmail.googleapis.com/gmail/v1";
-    let gmail = Arc::new(GmailClient::new(gmail_base, tokens.clone(), http_client));
+    let gmail_client = Arc::new(GmailClient::new(gmail_base, tokens.clone(), http_client));
+    // Phase 0 (#149) of the cache plan: the GmailService wrapper is the seam
+    // future cache reads route through. `cache = None` here until Phase 2
+    // (#150) wires the Cache constructor into this same path.
+    let gmail = Arc::new(GmailService::new(gmail_client, None));
 
     let accounts = Arc::new(loaded_accounts.accounts);
     let audit = AuditWriter::new(&dir, cfg.audit.rotate.clone());

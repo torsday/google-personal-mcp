@@ -27,7 +27,7 @@ use crate::audit::{AuditEntry, AuditWriter, Verbosity};
 use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager};
 use crate::config::AccountEntry;
 use crate::error::{self, Error};
-use crate::gmail::client::GmailClient;
+use crate::gmail::service::GmailService;
 
 /// The root rmcp service. Holds shared state passed to tool implementations.
 ///
@@ -38,7 +38,7 @@ pub(crate) struct GoogleServer {
     /// Registered Google accounts from `accounts.toml`. Used by `list_accounts`.
     pub(super) accounts: Arc<Vec<AccountEntry>>,
     pub(super) tokens: Arc<TokenManager<ReqwestRefreshTransport>>,
-    pub(super) gmail: Arc<GmailClient<ReqwestRefreshTransport>>,
+    pub(super) gmail: Arc<GmailService<ReqwestRefreshTransport>>,
     /// Best-effort JSONL audit writer per ADR-0011 v0.2 subset.
     pub(super) audit: AuditWriter,
     /// Audit verbosity configured via `[audit] verbose` in config.toml.
@@ -51,7 +51,7 @@ impl GoogleServer {
     pub(crate) const fn new(
         accounts: Arc<Vec<AccountEntry>>,
         tokens: Arc<TokenManager<ReqwestRefreshTransport>>,
-        gmail: Arc<GmailClient<ReqwestRefreshTransport>>,
+        gmail: Arc<GmailService<ReqwestRefreshTransport>>,
         audit: AuditWriter,
         verbosity: Verbosity,
     ) -> Self {
@@ -123,6 +123,8 @@ mod tests {
 
     use rmcp::handler::server::ServerHandler;
 
+    use crate::gmail::client::GmailClient;
+
     fn fake_server() -> GoogleServer {
         let tokens = Arc::new(TokenManager::new(
             HashMap::new(),
@@ -130,11 +132,12 @@ mod tests {
             "https://example/token",
             std::env::temp_dir().join(format!("gpm-srv-test-{}", std::process::id())),
         ));
-        let gmail = Arc::new(GmailClient::new(
+        let client = Arc::new(GmailClient::new(
             "https://gmail.googleapis.com/gmail/v1",
             tokens.clone(),
             reqwest::Client::new(),
         ));
+        let gmail = Arc::new(GmailService::new(client, None));
         let audit = AuditWriter::new(
             std::env::temp_dir().join(format!("gpm-srv-test-{}", std::process::id())),
             crate::config::RotateMode::Monthly,
@@ -211,11 +214,12 @@ mod tests {
             "https://example/token",
             std::env::temp_dir().join(format!("gpm-srv-test-ro-{}", std::process::id())),
         ));
-        let gmail = Arc::new(GmailClient::new(
+        let client = Arc::new(GmailClient::new(
             "https://gmail.googleapis.com/gmail/v1",
             tokens.clone(),
             reqwest::Client::new(),
         ));
+        let gmail = Arc::new(GmailService::new(client, None));
         let audit = AuditWriter::new(dir.path(), crate::config::RotateMode::Monthly);
         (
             GoogleServer::new(Arc::new(vec![]), tokens, gmail, audit, Verbosity::Redacted),
