@@ -21,10 +21,8 @@ use serde::Serialize;
 
 use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
-use crate::gmail::client::GmailClient;
-use crate::gmail::threads::{
-    get_thread_metadata, list_threads, RawListedThread, ThreadMetadata, ThreadMetadataMessage,
-};
+use crate::gmail::service::GmailService;
+use crate::gmail::threads::{RawListedThread, ThreadMetadata, ThreadMetadataMessage};
 use crate::gmail::untrusted::UntrustedString;
 
 /// Hard upper bound on `max_results`. ADR-0016 §`search_threads` caps at 100
@@ -95,7 +93,7 @@ pub(crate) struct SearchThreadsInput {
     ),
 )]
 pub(crate) async fn search_threads<T: RefreshTransport + Send + Sync + 'static>(
-    client: Arc<GmailClient<T>>,
+    gmail: Arc<GmailService<T>>,
     input: SearchThreadsInput,
 ) -> Result<SearchThreadsOutput, Error> {
     let SearchThreadsInput {
@@ -119,14 +117,9 @@ pub(crate) async fn search_threads<T: RefreshTransport + Send + Sync + 'static>(
     }
 
     // 1. threads.list
-    let listed = list_threads(
-        &client,
-        &account,
-        &query,
-        max_results,
-        page_token.as_deref(),
-    )
-    .await?;
+    let listed = gmail
+        .list_threads(&account, &query, max_results, page_token.as_deref())
+        .await?;
 
     if listed.threads.is_empty() {
         return Ok(SearchThreadsOutput {
@@ -151,11 +144,13 @@ pub(crate) async fn search_threads<T: RefreshTransport + Send + Sync + 'static>(
             snippet,
             history_id,
         } = listed_thread;
-        let client_clone = Arc::clone(&client);
+        let gmail_clone = Arc::clone(&gmail);
         let account_clone = account.clone();
         let id_for_task = id.clone();
         set.spawn(async move {
-            let result = get_thread_metadata(&client_clone, &account_clone, &id_for_task).await;
+            let result = gmail_clone
+                .get_thread_metadata(&account_clone, &id_for_task)
+                .await;
             (id_for_task, snippet, history_id, result)
         });
     }
@@ -281,6 +276,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::auth::tokens::{RefreshTransport, TokenManager, TokenState};
+    use crate::gmail::client::GmailClient;
+    use crate::gmail::service::GmailService;
     use crate::http::RetryPolicy;
 
     use super::*;
@@ -297,7 +294,7 @@ mod tests {
         }
     }
 
-    fn make_client(base_url: &str) -> Arc<GmailClient<NoRefresh>> {
+    fn make_client(base_url: &str) -> Arc<GmailService<NoRefresh>> {
         let state = TokenState {
             access_token: "TOKEN".into(),
             refresh_token: "R".into(),
@@ -323,10 +320,11 @@ mod tests {
             "https://example/token",
             tmpdir,
         ));
-        Arc::new(
+        let client = Arc::new(
             GmailClient::new(base_url, tokens, reqwest::Client::new())
                 .with_retry(RetryPolicy::for_tests()),
-        )
+        );
+        Arc::new(GmailService::new(client, None))
     }
 
     fn b64(s: &str) -> String {

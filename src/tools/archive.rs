@@ -11,8 +11,8 @@ use serde::Serialize;
 
 use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
-use crate::gmail::client::GmailClient;
 use crate::gmail::quota::GmailMethod;
+use crate::gmail::service::GmailService;
 use crate::http::percent_encode_path_segment;
 use crate::tools::batch::{self, BatchItem};
 use crate::tools::destructive::{Decision, DestructiveContext};
@@ -57,7 +57,7 @@ pub(crate) struct BatchArchiveOutput {
     ),
 )]
 pub(crate) async fn archive_thread<T: RefreshTransport>(
-    client: &GmailClient<T>,
+    gmail: &GmailService<T>,
     input: ArchiveThreadInput,
 ) -> Result<ArchiveThreadOutput, Error> {
     if input.account.is_empty() {
@@ -85,7 +85,8 @@ pub(crate) async fn archive_thread<T: RefreshTransport>(
                 percent_encode_path_segment(&input.thread_id),
             );
             let body = serde_json::json!({ "removeLabelIds": ["INBOX"] });
-            let _: serde_json::Value = client
+            let _: serde_json::Value = gmail
+                .client()
                 .authed_post(
                     &input.account,
                     &path,
@@ -118,7 +119,7 @@ pub(crate) async fn archive_thread<T: RefreshTransport>(
     ),
 )]
 pub(crate) async fn batch_archive<T: RefreshTransport + Send + Sync + 'static>(
-    client: Arc<GmailClient<T>>,
+    gmail: Arc<GmailService<T>>,
     input: BatchArchiveInput,
 ) -> Result<BatchArchiveOutput, Error> {
     batch::validate_batch_input(&input.account, &input.thread_ids)?;
@@ -131,11 +132,11 @@ pub(crate) async fn batch_archive<T: RefreshTransport + Send + Sync + 'static>(
 
     let account = Arc::new(input.account);
     let results = batch::run_thread_batch(input.thread_ids, |tid| {
-        let c = Arc::clone(&client);
+        let g = Arc::clone(&gmail);
         let a = Arc::clone(&account);
         async move {
             archive_thread(
-                &c,
+                &g,
                 ArchiveThreadInput {
                     account: (*a).clone(),
                     thread_id: tid,
@@ -166,6 +167,7 @@ mod tests {
     use crate::auth::tokens::{RefreshTransport, TokenManager, TokenState};
     use crate::error::Error;
     use crate::gmail::client::GmailClient;
+    use crate::gmail::service::GmailService;
     use crate::http::RetryPolicy;
 
     use super::*;
@@ -184,7 +186,7 @@ mod tests {
         }
     }
 
-    fn make_client(base_url: &str) -> Arc<GmailClient<NoRefresh>> {
+    fn make_client(base_url: &str) -> Arc<GmailService<NoRefresh>> {
         let state = TokenState {
             access_token: "TOKEN".into(),
             refresh_token: "R".into(),
@@ -206,10 +208,11 @@ mod tests {
             std::env::temp_dir().join(format!("gpm-ar-test-{}", std::process::id())),
         )
         .unwrap();
-        Arc::new(
+        let client = Arc::new(
             GmailClient::new(base_url, tokens, reqwest::Client::new())
                 .with_retry(RetryPolicy::for_tests()),
-        )
+        );
+        Arc::new(GmailService::new(client, None))
     }
 
     // ── archive_thread tests ──────────────────────────────────────────────────

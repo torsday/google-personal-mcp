@@ -9,8 +9,8 @@ use serde::Serialize;
 
 use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
-use crate::gmail::client::GmailClient;
-use crate::gmail::threads::{get_thread as fetch_thread, ParsedAttachment, ParsedThread};
+use crate::gmail::service::GmailService;
+use crate::gmail::threads::{ParsedAttachment, ParsedThread};
 use crate::gmail::untrusted::UntrustedString;
 
 // ── Output types ──────────────────────────────────────────────────────────────
@@ -52,7 +52,7 @@ pub(crate) struct GetThreadOutput {
     fields(tool.name = "get_thread", tool.account = %account, tool.thread_id = %thread_id),
 )]
 pub(crate) async fn get_thread<T: RefreshTransport>(
-    client: &GmailClient<T>,
+    gmail: &GmailService<T>,
     account: &str,
     thread_id: &str,
 ) -> Result<GetThreadOutput, Error> {
@@ -69,7 +69,7 @@ pub(crate) async fn get_thread<T: RefreshTransport>(
         });
     }
 
-    let parsed: ParsedThread = fetch_thread(client, account, thread_id).await?;
+    let parsed: ParsedThread = gmail.get_thread(account, thread_id).await?;
     Ok(map_thread(parsed))
 }
 
