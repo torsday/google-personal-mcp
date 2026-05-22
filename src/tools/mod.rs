@@ -3,6 +3,7 @@
 //! themselves live under `gmail::tools` / `calendar::tools` per service.
 
 pub(crate) mod archive;
+pub(crate) mod audit_summary;
 pub(crate) mod batch;
 pub(crate) mod destructive;
 pub(crate) mod get_thread;
