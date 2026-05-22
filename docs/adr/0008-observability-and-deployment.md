@@ -333,6 +333,7 @@ Metrics and `/healthz` are served on `127.0.0.1:9100` and intentionally NOT expo
 - [ADR-0004](0004-oauth-token-refresh.md) — refresh metrics and spans
 - [ADR-0005](0005-error-model.md) — structured tracing fields per error variant
 - [ADR-0006](0006-config.md) — `[server.log_format]`, `[metrics]`, `[http]` sections
+- [ADR-0020](0020-http-transport-authentication.md) — amends the nginx template (mTLS block in place of the htpasswd hand-wave); adds `gmcp_http_auth_failures_total` to the metric inventory
 - [`tracing`](https://docs.rs/tracing), [`tracing-subscriber`](https://docs.rs/tracing-subscriber) — logging
 - [`metrics`](https://docs.rs/metrics), [`metrics-exporter-prometheus`](https://docs.rs/metrics-exporter-prometheus) — metrics
 - systemd [hardening directives](https://www.freedesktop.org/software/systemd/man/systemd.exec.html) — security baseline for the unit file
