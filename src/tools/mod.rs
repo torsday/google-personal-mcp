@@ -9,6 +9,7 @@ pub(crate) mod get_thread;
 pub(crate) mod list_accounts;
 pub(crate) mod list_labels;
 pub(crate) mod mcp_status;
+pub(crate) mod metadata;
 pub(crate) mod modify_labels;
 pub(crate) mod search_threads;
 pub(crate) mod trash;
