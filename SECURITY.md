@@ -15,7 +15,8 @@ Three concrete threats shape the design:
 - Token files are loud-fail at startup if permissions are too wide.
 - Tokens, refresh tokens, and client secrets never appear in logs (redacted `Debug`).
 - Atomic writes (tmpfile + rename) on token persistence: crashes leave the old token or the new token, never a partial write.
-- Destructive tool calls (`send_email`, `batch_archive`, `trash_thread`, `modify_thread_labels`) record full inputs to an audit log (when implemented per [ADR-0011](docs/adr/0011-audit-log.md)) and support `dry_run: true` per [ADR-0012](docs/adr/0012-idempotency-and-dry-run.md).
+- Destructive tool calls (`send_email`, `batch_archive`, `trash_thread`, `modify_thread_labels`) record full inputs to an audit log per [ADR-0011](docs/adr/0011-audit-log.md) and support `dry_run: true` per [ADR-0012](docs/adr/0012-idempotency-and-dry-run.md).
+- Audit log verbosity is **redacted by default** — attacker-controlled content (query strings, subject lines, recipient addresses, body previews) is replaced with summary counts. Set `[audit] verbose = true` in `config.toml` to opt in to full logging; doing so makes the audit log file sensitive (treat it like your token files: mode 0600, included in disk-encryption scope).
 - Attacker-controllable text returned to the host LLM is marked unambiguously.
 
 ## What you (the operator) defend
