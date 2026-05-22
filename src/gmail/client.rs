@@ -66,12 +66,17 @@ impl<T: RefreshTransport> GmailClient<T> {
         self
     }
 
-    /// Run both quota checks (per-account, then per-project) in order. The
-    /// per-account bucket protects burst behavior; the per-project bucket
-    /// catches sustained behavior across the operator's account set. AND-gated
-    /// — whichever exhausts first returns `Error::RateLimited`.
+    /// Run both quota checks in order: per-project first, then per-account.
+    ///
+    /// Ordering matters: both checks consume budget on success, so the second
+    /// check must never fail after the first has already charged. By checking
+    /// the project quota (shared, more likely to be exhausted) first, a denial
+    /// returns before the per-account bucket is touched. The per-account bucket
+    /// then only deducts when the project quota had room.
+    ///
+    /// AND-gated — whichever exhausts first returns `Error::RateLimited`.
     fn quota_check(&self, account: &str, cost: u32) -> Result<(), Error> {
-        self.rate_limiter.try_acquire(account, cost)?;
+        // Check per-project first so a denial does not charge the per-account bucket.
         if let Some(registry) = self.project_quota.as_ref() {
             if let Some(client_id) = self.tokens.client_id(account) {
                 if let Some(project_id) = project_id_from_client_id(client_id) {
@@ -79,6 +84,7 @@ impl<T: RefreshTransport> GmailClient<T> {
                 }
             }
         }
+        self.rate_limiter.try_acquire(account, cost)?;
         Ok(())
     }
 
@@ -654,5 +660,68 @@ mod tests {
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }
+    }
+
+    /// Regression test: project-quota denial must not drain the per-account bucket.
+    ///
+    /// Setup: per-account cap = 10 units; project cap = 3 units.
+    /// After 3 successful calls the project quota is exhausted. Five further
+    /// calls are denied at the project level. The per-account limiter must
+    /// still have ~7 units (10 – 3 successful), not ~2 (10 – 3 – 5 leaked).
+    ///
+    /// We verify by asking the same limiter Arc to serve 7 units directly
+    /// after the test — if the old bug were present that call would fail.
+    #[tokio::test]
+    async fn project_quota_denial_does_not_drain_per_account_bucket() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"ok":true}"#))
+            .mount(&server)
+            .await;
+
+        // Per-account cap=10 (small enough to detect the leak), project cap=3.
+        let limiter = Arc::new(KeyedRateLimiter::new(10, 10));
+        let client = {
+            // Must use a Google-style client_id so project_id_from_client_id succeeds.
+            let mut token = fresh_state("ACCESS");
+            token.client_id = "999-test.apps.googleusercontent.com".into();
+            let tokens = Arc::new(TokenManager::new(
+                HashMap::from([("work".to_owned(), token)]),
+                MockRefreshTransport::new(vec![]),
+                "https://example/token",
+                std::env::temp_dir().join(format!("gpm-qco-{}", std::process::id())),
+            ));
+            std::fs::create_dir_all(
+                std::env::temp_dir().join(format!("gpm-qco-{}", std::process::id())),
+            )
+            .expect("mkdir");
+            Arc::new(
+                GmailClient::new(server.uri(), tokens, reqwest::Client::new())
+                    .with_retry(RetryPolicy::for_tests())
+                    .with_rate_limiter(Arc::clone(&limiter))
+                    .with_project_quota(Arc::new(ProjectQuotaRegistry::new(3))),
+            )
+        };
+
+        // Exhaust project budget (3 calls, cost 1 each).
+        for _ in 0..3 {
+            client
+                .authed_get::<EchoBody>("work", "/v1/me", 1)
+                .await
+                .expect("within budget");
+        }
+
+        // 5 calls denied by project quota (cost 1 each).
+        for _ in 0..5 {
+            let _ = client.authed_get::<EchoBody>("work", "/v1/me", 1).await;
+        }
+
+        // Per-account limiter consumed 3 units (successful calls) plus 0 from
+        // the 5 denied calls. It must still have ≥ 7 units available.
+        // A try_acquire(7) proves at least 7 remain.
+        limiter
+            .try_acquire("work", 7)
+            .expect("per-account bucket must retain budget after project-quota denials");
     }
 }
