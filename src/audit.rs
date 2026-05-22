@@ -18,13 +18,14 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // ── Entry ─────────────────────────────────────────────────────────────────────
 
 /// One audit record. Written as a single JSON line (no newline in values).
-#[derive(Debug, Serialize)]
+/// `Deserialize` is for the reader path used by `audit_summary` (#65).
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct AuditEntry {
     /// RFC 3339 UTC timestamp of the invocation.
     pub timestamp: DateTime<Utc>,
@@ -59,6 +60,12 @@ impl AuditWriter {
         let mut audit_dir = config_dir.into();
         audit_dir.push("audit");
         Self { audit_dir }
+    }
+
+    /// Path the writer stores JSONL files under. Used by `audit_summary`
+    /// (#65) to read back the same directory.
+    pub(crate) fn audit_dir(&self) -> &std::path::Path {
+        &self.audit_dir
     }
 
     /// Append `entry` to `<audit_dir>/<account>.jsonl`.

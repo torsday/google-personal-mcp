@@ -26,6 +26,7 @@ use crate::config::AccountEntry;
 use crate::error::{self, Error};
 use crate::gmail::client::GmailClient;
 use crate::tools::archive;
+use crate::tools::audit_summary;
 use crate::tools::get_thread;
 use crate::tools::list_accounts;
 use crate::tools::list_labels;
@@ -73,6 +74,37 @@ fn mcp_status_descriptor() -> Tool {
             "account": {
                 "type": "string",
                 "description": "Optional account alias to filter to a single account. Omit to list all."
+            }
+        },
+        "required": []
+    }));
+    t
+}
+
+fn audit_summary_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "audit_summary".into();
+    t.description = Some(
+        "Aggregate over the local audit log of destructive tool calls. \
+         Returns counts_by_tool, counts_by_account, failure_rate, window first/last timestamps, \
+         and the last 5 destructive ops (timestamp+tool+account only — no params). \
+         No per-record content — operators querying raw lines use `jq` directly per ADR-0011."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "since": {
+                "type": "string",
+                "description": "Optional inclusive lower bound on the timestamp (RFC 3339). Omit for all recorded history."
+            },
+            "account": {
+                "type": "string",
+                "description": "Optional account alias filter."
+            },
+            "tool": {
+                "type": "string",
+                "description": "Optional tool name filter (e.g. \"send_email\")."
             }
         },
         "required": []
@@ -412,6 +444,7 @@ pub(crate) fn registered_tools() -> Vec<Tool> {
         list_accounts_descriptor(),
         list_labels_descriptor(),
         mcp_status_descriptor(),
+        audit_summary_descriptor(),
         search_threads_descriptor(),
         get_thread_descriptor(),
         archive_thread_descriptor(),
@@ -499,6 +532,22 @@ impl ServerHandler for GoogleServer {
                 let snapshots = self.tokens.account_snapshot(account.as_deref()).await;
                 let out = mcp_status::build_status(&snapshots, chrono::Utc::now());
                 ok_result("mcp_status serialize", &out)
+            }
+
+            "audit_summary" => {
+                let since = extract_optional_string_arg(&request, "since")
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|d| d.with_timezone(&chrono::Utc));
+                let account = extract_optional_string_arg(&request, "account");
+                let tool = extract_optional_string_arg(&request, "tool");
+                let input = audit_summary::AuditSummaryInput {
+                    since,
+                    account,
+                    tool,
+                };
+                audit_summary::audit_summary(self.audit.audit_dir(), &input)
+                    .map_err(|e| error::to_mcp_error(&e))
+                    .and_then(|out| ok_result("audit_summary serialize", &out))
             }
 
             "list_labels" => {
