@@ -59,6 +59,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --all-features --locked
 
+  systemd-unit:
+    # Per #71 acceptance: lint the deploy/ systemd unit so a broken
+    # template doesn't reach operators. Pinned to ubuntu-latest because
+    # systemd-analyze isn't on macOS runners.
+    name: systemd-analyze verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: verify deploy/google-personal-mcp.service
+        run: |
+          # `verify` resolves [Install]/[Service] directives; the binary
+          # won't exist on the CI runner, so suppress that specific
+          # warning and fail only on actual unit-file syntax errors.
+          out=$(systemd-analyze verify deploy/google-personal-mcp.service 2>&1 || true)
+          echo "$out"
+          filtered=$(printf '%s\n' "$out" \
+            | grep -v 'Command .* is not executable' \
+            | grep -v 'does not exist' \
+            | grep -v '^$' || true)
+          if [ -n "$filtered" ]; then
+            echo "::error::systemd-analyze flagged unexpected issues in the unit file"
+            exit 1
+          fi
+
   deny:
     name: cargo deny
     runs-on: ubuntu-latest

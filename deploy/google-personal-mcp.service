@@ -1,0 +1,41 @@
+[Unit]
+Description=google-personal-mcp — Google services MCP daemon
+Documentation=https://github.com/torsday/google-personal-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=google-personal-mcp
+Group=google-personal-mcp
+# NOTE: `--http <addr>` requires the HTTP transport (issue #72 / #73) which
+# is not yet built. Until that lands, drop the `--http ...` flag and run
+# stdio mode locally; the unit ships matching ADR-0008 line 184 so v1.0
+# deployments don't need to edit it.
+ExecStart=/usr/local/bin/google-personal-mcp serve --http 127.0.0.1:8765
+Restart=always
+RestartSec=2s
+Environment=RUST_LOG=google_personal_mcp=info,reqwest=warn,hyper=warn
+
+# Hardening — see ADR-0017 §"Dedicated user" and ADR-0008 §VPS deployment.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/home/google-personal-mcp/.config/google-personal-mcp
+ReadOnlyPaths=/usr/local/bin/google-personal-mcp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+# Resource limits — small daemon, small budget.
+LimitNOFILE=4096
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
