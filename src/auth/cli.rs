@@ -706,11 +706,10 @@ mod tests {
         let uri = server.uri();
         // revoke_token_at_google uses reqwest::blocking which cannot run on a
         // tokio thread directly — spawn onto blocking pool.
-        let result = tokio::task::spawn_blocking(move || {
-            revoke_token_at_google("fake-refresh-token", &uri)
-        })
-        .await
-        .expect("spawn_blocking");
+        let result =
+            tokio::task::spawn_blocking(move || revoke_token_at_google("fake-refresh-token", &uri))
+                .await
+                .expect("spawn_blocking");
 
         assert!(result.is_ok(), "revoke should succeed: {result:?}");
         // MockServer::verify() is called automatically on drop — the `.expect(1)`
@@ -734,11 +733,10 @@ mod tests {
             .await;
 
         let uri = server.uri();
-        let _ = tokio::task::spawn_blocking(move || {
-            revoke_token_at_google("super-secret-token", &uri)
-        })
-        .await
-        .expect("spawn_blocking");
+        let _ =
+            tokio::task::spawn_blocking(move || revoke_token_at_google("super-secret-token", &uri))
+                .await
+                .expect("spawn_blocking");
         // MockServer drop verifies the `.expect(1)` — if the token were in the
         // URL as `?token=...`, the `query_param_is_missing("token")` matcher
         // would fail to match and the expectation would not be met.
