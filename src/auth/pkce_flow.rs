@@ -638,7 +638,7 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let timeout = StdDuration::from_millis(300);
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let result = wait_for_redirect(&listener, timeout);
         let elapsed = start.elapsed();
 
