@@ -6,6 +6,7 @@ pub(crate) mod archive;
 pub(crate) mod audit_summary;
 pub(crate) mod batch;
 pub(crate) mod destructive;
+pub(crate) mod fanout;
 pub(crate) mod get_thread;
 pub(crate) mod list_accounts;
 pub(crate) mod list_labels;
