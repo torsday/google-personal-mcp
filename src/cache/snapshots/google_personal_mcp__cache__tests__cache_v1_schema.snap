@@ -1,0 +1,68 @@
+---
+source: src/cache/mod.rs
+expression: ddl
+---
+-- index: idx_messages_date
+CREATE INDEX idx_messages_date ON messages (internal_date DESC)
+
+-- index: idx_messages_thread
+CREATE INDEX idx_messages_thread ON messages (thread_id)
+
+-- table: account_state
+CREATE TABLE account_state (
+    rowid              INTEGER PRIMARY KEY CHECK (rowid = 1),
+    last_history_id    INTEGER,
+    last_full_sync_at  INTEGER,
+    schema_version     INTEGER NOT NULL DEFAULT 1
+)
+
+-- table: labels
+CREATE TABLE labels (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    kind        TEXT,                         -- "system" | "user"
+    fetched_at  INTEGER NOT NULL
+)
+
+-- table: message_labels
+CREATE TABLE message_labels (
+    message_id TEXT NOT NULL,
+    label_id   TEXT NOT NULL,
+    PRIMARY KEY (message_id, label_id),
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+)
+
+-- table: messages
+CREATE TABLE messages (
+    id               TEXT PRIMARY KEY,
+    thread_id        TEXT NOT NULL,
+    internal_date    INTEGER NOT NULL,        -- Gmail internalDate (ms epoch)
+    headers_json     TEXT NOT NULL,           -- full headers as JSON
+    body_text        TEXT,                    -- best-effort plain-text per ADR-0010
+    body_html        TEXT,                    -- raw HTML if present
+    snippet          TEXT,
+    has_attachments  INTEGER NOT NULL,        -- bool 0/1
+    attachments_json TEXT,                    -- attachment metadata (no content) per ADR-0010
+    raw_size         INTEGER,
+    fetched_at       INTEGER NOT NULL,        -- ms epoch; diagnostics only
+    deleted_at       INTEGER                  -- nullable; set on Gmail-side delete
+)
+
+-- table: query_cache
+CREATE TABLE query_cache (
+    query_hash      TEXT PRIMARY KEY,         -- sha256(query || max_results)
+    query           TEXT NOT NULL,
+    max_results     INTEGER NOT NULL,
+    page_token      TEXT,
+    result_ids_json TEXT NOT NULL,
+    cached_at       INTEGER NOT NULL,
+    expires_at      INTEGER NOT NULL
+)
+
+-- table: threads
+CREATE TABLE threads (
+    id          TEXT PRIMARY KEY,
+    snippet     TEXT,
+    history_id  INTEGER,                      -- latest history event we know
+    fetched_at  INTEGER NOT NULL
+)

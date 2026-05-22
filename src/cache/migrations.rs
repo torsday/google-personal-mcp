@@ -1,0 +1,226 @@
+//! Hand-rolled migration framework per [ADR-0009 §Schema migration
+//! mechanism](../../../docs/adr/0009-caching-with-sqlite-and-history-api.md).
+//!
+//! On open: read `account_state.schema_version` (or treat a missing table as
+//! version 0); apply every migration whose `from_version` is `<` the on-disk
+//! version up to and including the highest known target; each migration runs
+//! in a transaction and updates `schema_version` atomically.
+//!
+//! Refuses to operate if the on-disk version is *higher* than the highest
+//! known migration target — this prevents a downgraded daemon from
+//! truncating columns it does not understand. ADR-0009 §"Compatibility rule".
+
+use rusqlite::{params, Connection, OptionalExtension};
+
+use crate::error::Error;
+
+/// One forward migration step.
+pub(crate) struct Migration {
+    /// On-disk version this migration applies to. The migration leaves the
+    /// database at `to_version`.
+    pub(crate) from_version: u32,
+    /// Resulting schema version.
+    pub(crate) to_version: u32,
+    /// SQL applied in a single transaction.
+    pub(crate) sql: &'static str,
+}
+
+/// The full migration corpus. Append-only; each entry must be the strict
+/// successor of the previous (`to_version` of N must equal `from_version` of
+/// N+1).
+pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
+    from_version: 0,
+    to_version: 1,
+    sql: include_str!("migrations/001_initial.sql"),
+}];
+
+/// Highest known schema version. Used for the downgrade-refuse check.
+pub(crate) const MAX_KNOWN_VERSION: u32 = match MIGRATIONS.last() {
+    Some(m) => m.to_version,
+    None => 0,
+};
+
+/// Read the on-disk schema version. Returns `0` when the `account_state`
+/// table is absent (fresh database).
+fn current_version(conn: &Connection) -> Result<u32, Error> {
+    // First check the table exists at all. A fresh DB has no tables.
+    let has_table: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_state'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(rusqlite_to_internal)?
+        .unwrap_or(false);
+
+    if !has_table {
+        return Ok(0);
+    }
+
+    let v: i64 = conn
+        .query_row(
+            "SELECT schema_version FROM account_state WHERE rowid = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(rusqlite_to_internal)?
+        .ok_or_else(|| Error::Internal {
+            context: "cache::migrations".into(),
+            source: anyhow::anyhow!(
+                "account_state table exists but rowid=1 is missing — corrupt cache DB"
+            ),
+        })?;
+
+    u32::try_from(v).map_err(|_| Error::Internal {
+        context: "cache::migrations".into(),
+        source: anyhow::anyhow!("schema_version {v} out of range"),
+    })
+}
+
+/// Apply every pending migration. Returns the resulting version, which is
+/// always [`MAX_KNOWN_VERSION`] on success.
+///
+/// On a fresh database (`current_version` returns 0) this initializes the
+/// schema from `001_initial.sql`. The initial migration `INSERT`s the
+/// `account_state` row, so subsequent migrations can rely on its presence.
+///
+/// Errors:
+/// - [`Error::Internal`] on a SQL execution failure.
+/// - [`Error::Internal`] with a downgrade-refuse message when the on-disk
+///   schema is newer than this binary knows about.
+pub(crate) fn apply_pending(conn: &mut Connection) -> Result<u32, Error> {
+    let current = current_version(conn)?;
+
+    if current > MAX_KNOWN_VERSION {
+        return Err(Error::Internal {
+            context: "cache::migrations".into(),
+            source: anyhow::anyhow!(
+                "on-disk schema version {current} is newer than this binary supports \
+                 (max known: {MAX_KNOWN_VERSION}). Refusing to open — upgrade the binary \
+                 or remove the cache file."
+            ),
+        });
+    }
+
+    for migration in MIGRATIONS {
+        if migration.from_version < current {
+            continue;
+        }
+        let tx = conn.transaction().map_err(rusqlite_to_internal)?;
+        tx.execute_batch(migration.sql)
+            .map_err(rusqlite_to_internal)?;
+        // The 001 migration seeds account_state with schema_version = 1.
+        // Every later migration updates the existing row.
+        if migration.from_version > 0 {
+            tx.execute(
+                "UPDATE account_state SET schema_version = ?1 WHERE rowid = 1",
+                params![migration.to_version],
+            )
+            .map_err(rusqlite_to_internal)?;
+        }
+        tx.commit().map_err(rusqlite_to_internal)?;
+    }
+
+    Ok(MAX_KNOWN_VERSION)
+}
+
+fn rusqlite_to_internal(e: rusqlite::Error) -> Error {
+    Error::Internal {
+        context: "cache::migrations".into(),
+        source: anyhow::Error::new(e),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn in_memory() -> Connection {
+        Connection::open_in_memory().expect("open in-memory sqlite")
+    }
+
+    #[test]
+    fn fresh_database_initializes_to_v1() {
+        let mut conn = in_memory();
+        let v = apply_pending(&mut conn).expect("apply");
+        assert_eq!(v, 1);
+        assert_eq!(current_version(&conn).expect("read"), 1);
+    }
+
+    #[test]
+    fn fresh_database_creates_all_expected_tables() {
+        let mut conn = in_memory();
+        apply_pending(&mut conn).expect("apply");
+        let expected = [
+            "messages",
+            "message_labels",
+            "threads",
+            "labels",
+            "account_state",
+            "query_cache",
+        ];
+        for table in expected {
+            let exists: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .optional()
+                .expect("query");
+            assert!(exists.is_some(), "expected table `{table}` to exist");
+        }
+    }
+
+    #[test]
+    fn apply_pending_is_idempotent() {
+        let mut conn = in_memory();
+        apply_pending(&mut conn).expect("first apply");
+        let v = apply_pending(&mut conn).expect("second apply");
+        assert_eq!(v, 1);
+    }
+
+    #[test]
+    fn downgrade_is_refused() {
+        let mut conn = in_memory();
+        apply_pending(&mut conn).expect("initial migrate");
+        // Simulate an on-disk schema written by a newer binary.
+        conn.execute(
+            "UPDATE account_state SET schema_version = ?1 WHERE rowid = 1",
+            params![MAX_KNOWN_VERSION + 1],
+        )
+        .expect("bump");
+        let err = apply_pending(&mut conn).expect_err("expected downgrade refusal");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("newer than this binary supports"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn migration_corpus_is_well_formed() {
+        // Each entry must be the strict successor of the previous one,
+        // starting at from_version = 0.
+        let mut expected = 0;
+        for m in MIGRATIONS {
+            assert_eq!(
+                m.from_version, expected,
+                "migration {}→{} expected from_version={expected}",
+                m.from_version, m.to_version
+            );
+            assert_eq!(
+                m.to_version,
+                m.from_version + 1,
+                "migration {}→{} must advance by exactly one",
+                m.from_version,
+                m.to_version
+            );
+            expected = m.to_version;
+        }
+        assert_eq!(MAX_KNOWN_VERSION, expected);
+    }
+}
