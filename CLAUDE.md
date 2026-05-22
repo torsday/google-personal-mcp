@@ -2,7 +2,7 @@
 
 ## Status
 
-**v0.2 shipped** (28 issues closed, milestone closed). **v0.3 in active planning** — see the [v0.3 milestone](https://github.com/torsday/google-personal-mcp/milestone/2) for the current backlog. Source lives under `src/` (~37 `.rs` files across `auth/`, `gmail/`, `tools/` plus root modules `audit.rs`, `config.rs`, `error.rs`, `http.rs`, `observability.rs`, `perm_check.rs`, `project_quota.rs`, `rate_limit.rs`, `server.rs`). Architecture is captured in 20 ADRs under [`docs/adr/`](docs/adr/).
+**v0.2 shipped** (28 issues closed, milestone closed). **v0.3 in active planning** — see the [v0.3 milestone](https://github.com/torsday/google-personal-mcp/milestone/2) for the current backlog. Source lives under `src/` (~37 `.rs` files across `auth/`, `gmail/`, `tools/` plus root modules `audit.rs`, `config.rs`, `error.rs`, `http.rs`, `observability.rs`, `perm_check.rs`, `project_quota.rs`, `rate_limit.rs`, `server.rs`). Architecture is captured in 21 ADRs under [`docs/adr/`](docs/adr/).
 
 ## Where to read in what order
 

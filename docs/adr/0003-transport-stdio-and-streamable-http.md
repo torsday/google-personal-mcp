@@ -95,6 +95,7 @@ We choose (c). The cost (slightly bigger binary, more deps, two test paths) is s
 - Future ADRs:
   - [ADR-0006](0006-config.md) — session timeout, HTTP bind address, related transport tunables
   - [ADR-0008](0008-observability-and-deployment.md) — nginx config, systemd unit, TLS strategy, session metrics
+- [ADR-0020](0020-http-transport-authentication.md) — bearer-token auth at the daemon for non-loopback HTTP binds; mTLS optional at nginx
 - [MCP Spec — Transports](https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/transports/) — Streamable HTTP transport definition
 - rmcp 1.5 transport modules:
   - [`transport-io` (stdio server)](https://docs.rs/rmcp/1.5.0/rmcp/transport/io/index.html)

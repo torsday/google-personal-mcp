@@ -105,6 +105,7 @@ A proposed ADR can be withdrawn (status → `Withdrawn`) if the discussion concl
 | [0017](0017-secrets-at-rest.md) | Secrets at rest | Accepted |
 | [0018](0018-email-content-trust.md) | Email content trust / prompt-injection mitigation | Accepted |
 | [0019](0019-data-retention-and-purge.md) | Data retention and purge — cache age cap, audit deletion opt-in, "right to forget" | Accepted, deferred to v1.0 |
+| [0020](0020-http-transport-authentication.md) | HTTP-transport authentication — bearer tokens at the daemon, mTLS optional at nginx | Accepted, deferred to v1.0 |
 
 ## Open questions (decisions queued for later)
 
@@ -115,13 +116,13 @@ These are real gaps; no ADR has been written yet. Each is tagged with the milest
 | **Per-GCP-project daily quota model** — Gmail's per-OAuth-client quota cap matters once requests scale across accounts. | **v0.3** | Multi-account makes quota a real constraint; with caching ([ADR-0009](0009-caching-with-sqlite-and-history-api.md)) it becomes a tuning knob. |
 | **Outbound multipart `send_email` with attachments** — v0.2 is plain text only. Schema for the multipart compose path. | **post-v0.2 when needed** | Not load-bearing for v0.2 use cases. |
 | **Attachment download policy** — path-traversal validation, executable-extension blocklist, max-size enforcement. | **before attachment tools land** | Referenced as a forward dependency in [ADR-0018](0018-email-content-trust.md) §5. |
-| **HTTP-transport authentication** — beyond TLS, the auth layer between client and `/mcp`. | **v1.0** | HTTP transport itself is v1.0 ([ADR-0003](0003-transport-stdio-and-streamable-http.md)). |
 | **Keyring backend for tokens** — macOS Keychain / libsecret as an alternative to the file-perm baseline. | **post-v1.0** | [ADR-0017](0017-secrets-at-rest.md) defers; file-perm baseline is sufficient for v0.x and v1.0. |
 
 **Resolved:**
 
 - v0.2 search-result metadata shape and batch coverage (added `batch_trash`, `batch_modify_thread_labels`) — folded into [ADR-0016](0016-tool-surface-and-conventions.md) per-tool schemas (2026-05-16).
 - Data retention / purge story — decided in [ADR-0019](0019-data-retention-and-purge.md) (2026-05-22).
+- HTTP-transport authentication — decided in [ADR-0020](0020-http-transport-authentication.md) (2026-05-22).
 
 ## References
 
