@@ -18,7 +18,7 @@
 //! 6. Hit Google's `userinfo` endpoint to retrieve the account email.
 //! 7. Return a populated [`TokenState`] ready for atomic persistence.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration as StdDuration, Instant};
 
@@ -299,10 +299,32 @@ fn wait_for_redirect(
     }
 }
 
-fn read_request_line(stream: &TcpStream) -> Result<String, Error> {
-    let mut reader = BufReader::new(stream);
+/// Maximum number of bytes accepted for the HTTP request line.
+///
+/// A legitimate OAuth redirect is `GET /?code=<64 chars>&state=<43 chars> HTTP/1.1\r\n`
+/// — well under 256 bytes. 8 KiB gives headroom for unusually long codes while
+/// bounding worst-case allocation from a malicious local connection.
+///
+/// Using `usize` (rather than `u64`) avoids truncation lints on 32-bit targets
+/// and is compatible with `Read::take`, which accepts a `u64` via `.into()`.
+const REQUEST_LINE_LIMIT: usize = 8 * 1024;
+
+/// Read the first line of an HTTP request from `reader`, capped at
+/// [`REQUEST_LINE_LIMIT`] bytes. Returns `Error::Parse` if the line
+/// exceeds the limit (no `\n` found within the budget).
+fn read_request_line(reader: impl Read) -> Result<String, Error> {
+    let mut limited = BufReader::new(reader.take(REQUEST_LINE_LIMIT as u64));
     let mut line = String::new();
-    reader.read_line(&mut line).map_err(Error::Io)?;
+    let n = limited.read_line(&mut line).map_err(Error::Io)?;
+    // If we consumed the full budget without a newline, the request is oversized.
+    if n == REQUEST_LINE_LIMIT && !line.contains('\n') {
+        return Err(Error::Parse {
+            context: "OAuth redirect request line".into(),
+            source: serde::de::Error::custom(
+                "request line exceeds 8 KiB limit — possible malformed or malicious request",
+            ),
+        });
+    }
     Ok(line)
 }
 
@@ -660,6 +682,43 @@ mod tests {
             elapsed <= timeout * 2,
             "took {elapsed:?}, expected ≤ {}ms",
             timeout.as_millis() * 2
+        );
+    }
+
+    // ── request-line size bound (Layer 1) ────────────────────────────────────
+
+    #[test]
+    fn read_request_line_accepts_normal_redirect() {
+        let input = "GET /?code=abc&state=xyz HTTP/1.1\r\n";
+        let result = read_request_line(input.as_bytes());
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+        assert_eq!(
+            result.unwrap().trim_end(),
+            "GET /?code=abc&state=xyz HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn read_request_line_rejects_oversized_input() {
+        // 10 KiB of 'A' with no newline — exceeds the 8 KiB limit.
+        let oversized = vec![b'A'; 10 * 1024];
+        let result = read_request_line(oversized.as_slice());
+        assert!(
+            matches!(result, Err(Error::Parse { .. })),
+            "expected Parse error for oversized line, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn read_request_line_accepts_line_just_under_limit() {
+        // 8 KiB - 1 byte of content + newline — should succeed (within budget).
+        // 8 KiB - 1, matching REQUEST_LINE_LIMIT without a u64→usize cast.
+        let mut input = vec![b'X'; 8 * 1024 - 1];
+        input.push(b'\n');
+        let result = read_request_line(input.as_slice());
+        assert!(
+            result.is_ok(),
+            "expected Ok for line just under limit: {result:?}"
         );
     }
 }
