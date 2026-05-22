@@ -13,6 +13,7 @@ pub mod project_quota;
 pub mod rate_limit;
 pub mod server;
 pub mod tools;
+pub mod transport;
 
 // ── Bench-only public wrappers ───────────────────────────────────────────────
 //
