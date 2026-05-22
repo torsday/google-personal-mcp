@@ -15,7 +15,7 @@
 //! so this PR stays atomic and reviewable.
 
 pub(crate) mod file;
-#[cfg(feature = "macos-keychain")]
+#[cfg(all(feature = "macos-keychain", target_os = "macos"))]
 pub(crate) mod keychain;
 
 use async_trait::async_trait;
@@ -55,11 +55,11 @@ pub(crate) fn build(
     match backend {
         BackendChoice::File => std::sync::Arc::new(file::FileSecretStore::new(tokens_dir)),
         BackendChoice::Keychain => {
-            #[cfg(feature = "macos-keychain")]
+            #[cfg(all(feature = "macos-keychain", target_os = "macos"))]
             {
                 std::sync::Arc::new(keychain::KeychainSecretStore)
             }
-            #[cfg(not(feature = "macos-keychain"))]
+            #[cfg(not(all(feature = "macos-keychain", target_os = "macos")))]
             {
                 tracing::warn!(
                     "keychain backend requested but binary built without `macos-keychain` \
