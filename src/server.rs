@@ -29,6 +29,7 @@ use crate::tools::archive;
 use crate::tools::get_thread;
 use crate::tools::list_accounts;
 use crate::tools::list_labels;
+use crate::tools::mcp_status;
 use crate::tools::modify_labels;
 use crate::tools::search_threads;
 use crate::tools::trash;
@@ -51,6 +52,29 @@ fn list_accounts_descriptor() -> Tool {
     t.input_schema = schema_object(&json!({
         "type": "object",
         "properties": {},
+        "required": []
+    }));
+    t
+}
+
+fn mcp_status_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "mcp_status".into();
+    t.description = Some(
+        "Daemon self-status: per-account auth state and granted scopes. \
+         Returns alias, scopes_granted, expires_at, expires_in_seconds, \
+         last_refresh_at, auth_state (ok | expiring | expired | auth_required). \
+         No Google API calls — surfaces in-memory daemon state only."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {
+                "type": "string",
+                "description": "Optional account alias to filter to a single account. Omit to list all."
+            }
+        },
         "required": []
     }));
     t
@@ -387,6 +411,7 @@ pub(crate) fn registered_tools() -> Vec<Tool> {
     vec![
         list_accounts_descriptor(),
         list_labels_descriptor(),
+        mcp_status_descriptor(),
         search_threads_descriptor(),
         get_thread_descriptor(),
         archive_thread_descriptor(),
@@ -467,6 +492,13 @@ impl ServerHandler for GoogleServer {
             "list_accounts" => {
                 let out = list_accounts::list_accounts(&self.accounts);
                 ok_result("list_accounts serialize", &out)
+            }
+
+            "mcp_status" => {
+                let account = extract_optional_string_arg(&request, "account");
+                let snapshots = self.tokens.account_snapshot(account.as_deref()).await;
+                let out = mcp_status::build_status(&snapshots, chrono::Utc::now());
+                ok_result("mcp_status serialize", &out)
             }
 
             "list_labels" => {

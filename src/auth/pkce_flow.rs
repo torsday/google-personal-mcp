@@ -415,6 +415,7 @@ fn exchange_code(
         client_secret: creds.client_secret.clone(),
         failed_until: None,
         consecutive_failures: 0,
+        last_refresh_at: None,
     })
 }
 
@@ -617,6 +618,7 @@ mod tests {
             client_secret: sample_creds().client_secret,
             failed_until: None,
             consecutive_failures: 0,
+            last_refresh_at: None,
         };
         let json = serde_json::to_string(&original).expect("ser");
         let decoded: TokenState = serde_json::from_str(&json).expect("de");

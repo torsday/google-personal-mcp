@@ -38,6 +38,13 @@ pub(crate) struct TokenState {
     pub failed_until: Option<DateTime<Utc>>,
     #[serde(skip)]
     pub consecutive_failures: u32,
+    /// When this token was last successfully refreshed by *this* daemon
+    /// process. `None` until the first successful in-process refresh —
+    /// state loaded from disk doesn't carry it because token files predate
+    /// the field. Surfaced via `TokenManager::account_snapshot` to power
+    /// `mcp_status` (#61).
+    #[serde(skip)]
+    pub last_refresh_at: Option<DateTime<Utc>>,
 }
 
 impl fmt::Debug for TokenState {
@@ -51,8 +58,22 @@ impl fmt::Debug for TokenState {
             .field("client_secret", &REDACTED)
             .field("failed_until", &self.failed_until)
             .field("consecutive_failures", &self.consecutive_failures)
+            .field("last_refresh_at", &self.last_refresh_at)
             .finish()
     }
+}
+
+/// Per-account state snapshot for `mcp_status` (#61). Lock-free read-only
+/// view — derived once via [`TokenManager::account_snapshot`] under brief
+/// read locks, then handed to the tool layer.
+#[derive(Debug, Clone)]
+pub(crate) struct AccountSnapshot {
+    pub alias: String,
+    pub scopes: Vec<String>,
+    pub expires_at: DateTime<Utc>,
+    pub last_refresh_at: Option<DateTime<Utc>>,
+    pub failed_until: Option<DateTime<Utc>>,
+    pub consecutive_failures: u32,
 }
 
 /// Raw success response from Google's OAuth token endpoint.
@@ -158,6 +179,34 @@ impl<T: RefreshTransport> TokenManager<T> {
     /// quota tracker (issue #30) to map account → GCP project number.
     pub(crate) fn client_id(&self, account: &str) -> Option<&str> {
         self.client_ids.get(account).map(String::as_str)
+    }
+
+    /// Snapshot per-account state for the `mcp_status` tool (#61). Acquires
+    /// a read lock per account briefly; no refresh side effects. When
+    /// `account` is `Some`, returns only that account (or empty if unknown);
+    /// when `None`, returns every registered account ordered by alias.
+    pub(crate) async fn account_snapshot(&self, account: Option<&str>) -> Vec<AccountSnapshot> {
+        let mut aliases: Vec<&String> = account.map_or_else(
+            || self.states.keys().collect(),
+            |a| self.states.keys().filter(|k| k.as_str() == a).collect(),
+        );
+        aliases.sort();
+        let mut out = Vec::with_capacity(aliases.len());
+        for alias in aliases {
+            // Safe: `alias` came from `self.states.keys()` above.
+            if let Some(lock) = self.states.get(alias) {
+                let s = lock.read().await;
+                out.push(AccountSnapshot {
+                    alias: alias.clone(),
+                    scopes: s.scopes.clone(),
+                    expires_at: s.expires_at,
+                    last_refresh_at: s.last_refresh_at,
+                    failed_until: s.failed_until,
+                    consecutive_failures: s.consecutive_failures,
+                });
+            }
+        }
+        out
     }
 
     fn state_for(&self, account: &str) -> Result<&Arc<RwLock<TokenState>>, Error> {
@@ -308,17 +357,19 @@ fn apply_refresh_response(
         source: e,
     })?;
 
+    let now = Utc::now();
     Ok(TokenState {
         access_token: parsed.access_token,
         refresh_token: parsed
             .refresh_token
             .unwrap_or_else(|| prior.refresh_token.clone()),
-        expires_at: Utc::now() + Duration::seconds(parsed.expires_in),
+        expires_at: now + Duration::seconds(parsed.expires_in),
         scopes: prior.scopes.clone(),
         client_id: prior.client_id.clone(),
         client_secret: prior.client_secret.clone(),
         failed_until: None,
         consecutive_failures: 0,
+        last_refresh_at: Some(now),
     })
 }
 
@@ -374,6 +425,7 @@ mod tests {
             client_secret: "very-secret-shhh".into(),
             failed_until: None,
             consecutive_failures: 0,
+            last_refresh_at: None,
         }
     }
 
@@ -784,6 +836,7 @@ mod wiremock_tests {
             client_secret: "csec".into(),
             failed_until: None,
             consecutive_failures: 0,
+            last_refresh_at: None,
         }
     }
 

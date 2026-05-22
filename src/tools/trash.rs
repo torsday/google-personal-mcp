@@ -187,6 +187,7 @@ mod tests {
             client_secret: "csec".into(),
             failed_until: None,
             consecutive_failures: 0,
+            last_refresh_at: None,
         };
         let tokens = Arc::new(TokenManager::new(
             HashMap::from([("personal".to_owned(), state)]),
