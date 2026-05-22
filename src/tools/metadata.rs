@@ -9,8 +9,8 @@
 
 /// Every destructive tool name as it appears in the MCP `call_tool`
 /// request's `name` field. Maintained in lockstep with
-/// [`crate::server::registered_tools`] and the dispatch arms in
-/// [`crate::server::GoogleServer::call_tool`].
+/// `crate::server::descriptors::registered_tools` and the dispatch arms in
+/// `crate::server::GoogleServer::call_tool`.
 ///
 /// Order is intentional: single-thread variant first, then its `batch_`
 /// sibling — the same grouping used in `registered_tools`.

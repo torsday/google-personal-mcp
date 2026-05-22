@@ -1,6 +1,5 @@
 ---
-source: src/server.rs
-assertion_line: 1322
+source: src/server/descriptors.rs
 expression: json
 ---
 [
