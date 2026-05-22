@@ -67,6 +67,11 @@ fn map_raw_label(r: RawLabel) -> LabelItem {
 }
 
 /// Fetch all labels for `account` and return the listing envelope.
+#[tracing::instrument(
+    skip_all,
+    err(Display),
+    fields(tool.name = "list_labels", tool.account = %account),
+)]
 pub(crate) async fn list_labels<T: RefreshTransport>(
     client: &GmailClient<T>,
     account: &str,

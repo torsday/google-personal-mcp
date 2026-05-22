@@ -31,6 +31,10 @@ pub(crate) struct ListAccountsOutput {
 
 /// Build the `list_accounts` response from a slice of config entries.
 /// Pure — no I/O, no network.
+#[tracing::instrument(
+    skip_all,
+    fields(tool.name = "list_accounts", tool.count = entries.len()),
+)]
 pub(crate) fn list_accounts(entries: &[AccountEntry]) -> ListAccountsOutput {
     let items = entries
         .iter()

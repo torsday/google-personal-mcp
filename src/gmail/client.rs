@@ -92,6 +92,17 @@ impl<T: RefreshTransport> GmailClient<T> {
     /// [`crate::gmail::quota::GmailMethod::cost`]; the rate limiter is
     /// consulted before any network I/O and returns `Error::RateLimited`
     /// immediately on exhaustion.
+    #[tracing::instrument(
+        skip_all,
+        err(Display),
+        fields(
+            google.service = "gmail",
+            google.method = "GET",
+            google.endpoint = %endpoint_of(path),
+            google.account = %account,
+            google.cost = cost,
+        ),
+    )]
     pub(crate) async fn authed_get<R: DeserializeOwned>(
         &self,
         account: &str,
@@ -107,6 +118,17 @@ impl<T: RefreshTransport> GmailClient<T> {
     }
 
     /// Authenticated POST. See [`Self::authed_get`] for the `cost` contract.
+    #[tracing::instrument(
+        skip_all,
+        err(Display),
+        fields(
+            google.service = "gmail",
+            google.method = "POST",
+            google.endpoint = %endpoint_of(path),
+            google.account = %account,
+            google.cost = cost,
+        ),
+    )]
     pub(crate) async fn authed_post<B: Serialize + Sync, R: DeserializeOwned>(
         &self,
         account: &str,
@@ -164,6 +186,13 @@ impl<T: RefreshTransport> GmailClient<T> {
             Err(e) => Err(e),
         }
     }
+}
+
+/// Strip the query string from a path so spans group by endpoint, not by
+/// per-call query. `/users/me/threads?q=foo` → `/users/me/threads`. Used
+/// only for the `google.endpoint` tracing field.
+fn endpoint_of(path: &str) -> &str {
+    path.find('?').map_or(path, |i| &path[..i])
 }
 
 async fn parse_json<R: DeserializeOwned>(resp: reqwest::Response) -> Result<R, Error> {

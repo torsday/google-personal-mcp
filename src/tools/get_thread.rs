@@ -46,6 +46,11 @@ pub(crate) struct GetThreadOutput {
 // ── Core logic ────────────────────────────────────────────────────────────────
 
 /// Fetch and map a Gmail thread to tool output.
+#[tracing::instrument(
+    skip_all,
+    err(Display),
+    fields(tool.name = "get_thread", tool.account = %account, tool.thread_id = %thread_id),
+)]
 pub(crate) async fn get_thread<T: RefreshTransport>(
     client: &GmailClient<T>,
     account: &str,

@@ -80,6 +80,18 @@ fn extract_label_ids(resp: &ModifyResponse) -> Vec<String> {
 // ── Core logic ────────────────────────────────────────────────────────────────
 
 /// Modify the labels on a single Gmail thread.
+#[tracing::instrument(
+    skip_all,
+    err(Display),
+    fields(
+        tool.name = "modify_thread_labels",
+        tool.account = %input.account,
+        tool.thread_id = %input.thread_id,
+        tool.add_count = input.add_label_ids.len(),
+        tool.remove_count = input.remove_label_ids.len(),
+        tool.dry_run = input.dry_run,
+    ),
+)]
 pub(crate) async fn modify_thread_labels<T: RefreshTransport>(
     client: &GmailClient<T>,
     input: ModifyThreadLabelsInput,
@@ -142,6 +154,18 @@ pub(crate) async fn modify_thread_labels<T: RefreshTransport>(
 /// [`batch::run_thread_batch`]. Never short-circuits: per-item failures are
 /// reported alongside successes. Input ordering is preserved (previously
 /// sorted alphabetically — see issue #105).
+#[tracing::instrument(
+    skip_all,
+    err(Display),
+    fields(
+        tool.name = "batch_modify_thread_labels",
+        tool.account = %input.account,
+        tool.count = input.thread_ids.len(),
+        tool.add_count = input.add_label_ids.len(),
+        tool.remove_count = input.remove_label_ids.len(),
+        tool.dry_run = input.dry_run,
+    ),
+)]
 pub(crate) async fn batch_modify_thread_labels<T: RefreshTransport + Send + Sync + 'static>(
     client: Arc<GmailClient<T>>,
     input: BatchModifyThreadLabelsInput,

@@ -86,6 +86,16 @@ struct ThreadMessageHeader {
 
 /// Send one message. Drives validation → dedup-check → optional reply
 /// prefetch → compose → Gmail `messages.send` → `record_send`.
+#[tracing::instrument(
+    skip_all,
+    err(Display),
+    fields(
+        tool.name = "send_email",
+        tool.account = %input.account,
+        tool.dry_run = input.dry_run,
+        tool.in_reply_to_thread_id = ?input.in_reply_to_thread_id,
+    ),
+)]
 pub(crate) async fn send_email<T: RefreshTransport>(
     client: &GmailClient<T>,
     dedup: &DestructiveContext,
