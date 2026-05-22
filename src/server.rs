@@ -588,7 +588,7 @@ impl ServerHandler for GoogleServer {
             }
 
             "archive_thread" => {
-                let account = extract_string_arg(&request, "account")?;
+                let account = extract_account_arg(&request, "archive_thread")?;
                 let thread_id = extract_string_arg(&request, "thread_id")?;
                 let dry_run = extract_bool_arg(&request, "dry_run");
                 let result = archive::archive_thread(
@@ -621,7 +621,7 @@ impl ServerHandler for GoogleServer {
             }
 
             "batch_archive" => {
-                let account = extract_string_arg(&request, "account")?;
+                let account = extract_account_arg(&request, "batch_archive")?;
                 let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
                 let dry_run = extract_bool_arg(&request, "dry_run");
                 let result = archive::batch_archive(
@@ -658,7 +658,7 @@ impl ServerHandler for GoogleServer {
             }
 
             "trash_thread" => {
-                let account = extract_string_arg(&request, "account")?;
+                let account = extract_account_arg(&request, "trash_thread")?;
                 let thread_id = extract_string_arg(&request, "thread_id")?;
                 let dry_run = extract_bool_arg(&request, "dry_run");
                 let result = trash::trash_thread(
@@ -691,7 +691,7 @@ impl ServerHandler for GoogleServer {
             }
 
             "batch_trash" => {
-                let account = extract_string_arg(&request, "account")?;
+                let account = extract_account_arg(&request, "batch_trash")?;
                 let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
                 let dry_run = extract_bool_arg(&request, "dry_run");
                 let result = trash::batch_trash(
@@ -728,7 +728,7 @@ impl ServerHandler for GoogleServer {
             }
 
             "modify_thread_labels" => {
-                let account = extract_string_arg(&request, "account")?;
+                let account = extract_account_arg(&request, "modify_thread_labels")?;
                 let thread_id = extract_string_arg(&request, "thread_id")?;
                 let add_label_ids =
                     extract_string_array_arg(&request, "add_label_ids").unwrap_or_default();
@@ -772,7 +772,7 @@ impl ServerHandler for GoogleServer {
             }
 
             "batch_modify_thread_labels" => {
-                let account = extract_string_arg(&request, "account")?;
+                let account = extract_account_arg(&request, "batch_modify_thread_labels")?;
                 let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
                 let add_label_ids =
                     extract_string_array_arg(&request, "add_label_ids").unwrap_or_default();
@@ -915,6 +915,28 @@ fn extract_string_arg(
             None,
         )),
     }
+}
+
+/// Extract the `account` argument and reject `"*"` when `tool_name` is
+/// destructive per ADR-0013. The cross-account fan-out wildcard is a
+/// read-tool affordance only; allowing it on destructive tools would let a
+/// single mistaken call mutate every registered account.
+///
+/// Returns `Error::InvalidArgument` with the exact wording specified by the
+/// issue body ("cross-account fan-out is not permitted on destructive
+/// tools"); the dispatch arm propagates it via `to_mcp_error`.
+fn extract_account_arg(
+    request: &CallToolRequestParams,
+    tool_name: &str,
+) -> Result<String, rmcp::ErrorData> {
+    let account = extract_string_arg(request, "account")?;
+    if account == "*" && crate::tools::metadata::is_destructive(tool_name) {
+        return Err(rmcp::ErrorData::invalid_params(
+            "cross-account fan-out is not permitted on destructive tools",
+            None,
+        ));
+    }
+    Ok(account)
 }
 
 /// Run the MCP daemon over stdio until the client disconnects (stdin EOF).
@@ -1090,6 +1112,134 @@ mod tests {
         params.arguments = Some(args);
         let err = extract_string_arg(&params, "account").unwrap_err();
         assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    // ── extract_account_arg — ADR-0013 fan-out rejection (#85) ───────────────
+
+    fn account_request(tool: &str, account_value: &str) -> CallToolRequestParams {
+        // `CallToolRequestParams::new` wants `&'static str`; the tool name
+        // here comes from a `for` loop so we round-trip it through the request
+        // by setting the `arguments` map only and leaving `name` empty. The
+        // dispatch layer reads `name` separately; for these unit tests of
+        // `extract_account_arg`, the value of `name` doesn't matter — the
+        // helper takes `tool_name` as a separate parameter.
+        let _ = tool;
+        let mut params = CallToolRequestParams::new("placeholder");
+        let mut args = serde_json::Map::new();
+        args.insert("account".into(), Value::String(account_value.into()));
+        params.arguments = Some(args);
+        params
+    }
+
+    /// Every destructive tool rejects `account = "*"` with `InvalidParams`
+    /// and the exact ADR-0013 wording. Exhaustive — one assertion per tool.
+    #[test]
+    fn extract_account_rejects_wildcard_on_every_destructive_tool() {
+        for tool in [
+            "archive_thread",
+            "batch_archive",
+            "trash_thread",
+            "batch_trash",
+            "modify_thread_labels",
+            "batch_modify_thread_labels",
+            "send_email",
+        ] {
+            let params = account_request(tool, "*");
+            match extract_account_arg(&params, tool) {
+                Err(e) => {
+                    assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+                    assert!(
+                        e.message.contains(
+                            "cross-account fan-out is not permitted on destructive tools"
+                        ),
+                        "destructive tool `{tool}` rejected with wrong message: {}",
+                        e.message,
+                    );
+                }
+                Ok(acct) => {
+                    panic!("destructive tool `{tool}` accepted account=\"*\" — got `{acct}`")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extract_account_rejects_wildcard_archive_thread_explicit_error() {
+        let params = account_request("archive_thread", "*");
+        let err = extract_account_arg(&params, "archive_thread").unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message
+                .contains("cross-account fan-out is not permitted on destructive tools"),
+            "got message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn extract_account_allows_wildcard_on_read_only_tools() {
+        // Read-only tools may legitimately accept `*` once #84 ships fan-out.
+        // The guard is destructive-only; verify it doesn't over-reach.
+        for tool in [
+            "list_labels",
+            "list_accounts",
+            "search_threads",
+            "get_thread",
+        ] {
+            let params = account_request(tool, "*");
+            let account = extract_account_arg(&params, tool)
+                .unwrap_or_else(|e| panic!("read-only tool `{tool}` over-rejected: {}", e.message));
+            assert_eq!(account, "*");
+        }
+    }
+
+    #[test]
+    fn extract_account_passes_normal_aliases_for_destructive_tools() {
+        // Normal aliases must round-trip even on destructive tools.
+        for tool in [
+            "archive_thread",
+            "batch_archive",
+            "trash_thread",
+            "batch_trash",
+            "modify_thread_labels",
+            "batch_modify_thread_labels",
+        ] {
+            let params = account_request(tool, "personal");
+            let account = extract_account_arg(&params, tool)
+                .unwrap_or_else(|e| panic!("alias rejected on `{tool}`: {}", e.message));
+            assert_eq!(account, "personal");
+        }
+    }
+
+    #[test]
+    fn extract_account_inherits_missing_account_error() {
+        // Reuses extract_string_arg, so the missing-arg path must still surface.
+        let params = CallToolRequestParams::new("archive_thread");
+        let err = extract_account_arg(&params, "archive_thread").unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("account"), "got: {}", err.message);
+    }
+
+    /// Descriptor sanity: no destructive tool advertises `"*"` in its
+    /// `account` description. Catches "we added fan-out copy to a tool
+    /// description by mistake" before it ships.
+    #[test]
+    fn destructive_descriptors_do_not_advertise_wildcard() {
+        for tool in registered_tools() {
+            if !crate::tools::metadata::is_destructive(&tool.name) {
+                continue;
+            }
+            let schema = serde_json::to_value(tool.input_schema.as_ref()).expect("schema");
+            let acct_desc = schema
+                .pointer("/properties/account/description")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            assert!(
+                !acct_desc.contains('*'),
+                "destructive tool `{}` advertises `*` in account description: {acct_desc}",
+                tool.name
+            );
+        }
     }
 
     // ── Layer 4: tool-registry snapshot tests ────────────────────────────────
