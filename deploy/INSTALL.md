@@ -180,6 +180,28 @@ Audit logs under `~/.config/google-personal-mcp/audit/*.jsonl` are the only
 data that **cannot** be reconstructed — copy them off the VPS first if you
 want a record. See [ADR-0011 §Backup and durability](../docs/adr/0011-audit-log.md).
 
+## Service-level objectives (SLOs)
+
+These are the recommended starting points per ADR-0008 §SLOs. Tune thresholds to match your traffic baseline.
+
+| SLI | SLO target | Source metric |
+|-----|------------|---------------|
+| Tool call latency p95 (cache-warm) | < 500 ms | `histogram_quantile(0.95, rate(gmcp_tool_call_duration_seconds_bucket[5m]))` |
+| Token refresh failure rate (24h rolling) | < 0.1% | `rate(gmcp_token_refreshes_total{outcome!="success"}[24h]) / rate(gmcp_token_refreshes_total[24h])` |
+| Cache hit rate (steady-state, after 1h warmup) | > 60% | `rate(gmcp_cache_hits_total[1h]) / (rate(gmcp_cache_hits_total[1h]) + rate(gmcp_cache_misses_total[1h]))` |
+| Accounts with auth_state != "ok" | < 10% of total | `(gmcp_active_accounts - sum(account_auth_ok)) / gmcp_active_accounts` |
+| Hot-reload failure rate (24h) | < 1% | `rate(gmcp_hot_reload_total{outcome!="success"}[24h]) / rate(gmcp_hot_reload_total[24h])` |
+| `/healthz` availability | > 99.9% | external probe |
+| Memory growth (24h trailing) | < 10% | `process_resident_memory_bytes / process_resident_memory_bytes offset 24h - 1` |
+
+To enable alerting, copy `deploy/alerts.yml` into your Prometheus/Alertmanager rules directory and reload:
+
+```bash
+cp deploy/alerts.yml /etc/prometheus/rules/google-personal-mcp.yml
+promtool check rules /etc/prometheus/rules/google-personal-mcp.yml
+systemctl reload prometheus
+```
+
 ## Hardening notes
 
 The unit's hardening flags come from ADR-0008 §VPS lines 188-202 and ADR-0017

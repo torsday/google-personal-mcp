@@ -1,0 +1,117 @@
+# Prometheus alerting rules for google-personal-mcp
+#
+# Per ADR-0008: these rules assume a Prometheus job scraping
+# http://127.0.0.1:9100/metrics from the daemon (the [metrics] listener).
+# Drop this file into your alertmanager rules directory and tune the
+# thresholds to match your traffic baseline.
+#
+# Validate with: promtool check rules deploy/alerts.yml
+
+groups:
+- name: google-personal-mcp
+  rules:
+
+  # ── Error rate ─────────────────────────────────────────────────────────────
+
+  - alert: GoogleMcpHighErrorRate
+    expr: rate(gmcp_tool_calls_total{outcome!="success"}[5m]) / rate(gmcp_tool_calls_total[5m]) > 0.05
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "google-personal-mcp tool error rate > 5% on {{ $labels.instance }}"
+      description: >
+        More than 5% of tool calls are failing. Check the daemon logs for
+        upstream Gmail errors, rate-limit denials, or auth failures.
+        Next step: `journalctl -u google-personal-mcp -n 200 --no-pager`
+
+  # ── Token refresh ───────────────────────────────────────────────────────────
+
+  - alert: GoogleMcpRefreshFailures
+    expr: rate(gmcp_token_refreshes_total{outcome!="success"}[1h]) > 0.01
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: "google-personal-mcp token refresh failing on {{ $labels.instance }}"
+      description: >
+        OAuth token refresh is failing — the most common cause is a revoked
+        token (user revoked access in Google Account settings) or an expired
+        client credential. Next step: run
+        `google-personal-mcp auth refresh <alias>` for each affected account.
+
+  # ── Account health ──────────────────────────────────────────────────────────
+
+  - alert: GoogleMcpAccountStuck
+    expr: gmcp_active_accounts - sum(account_auth_ok) > 0
+    for: 1h
+    labels:
+      severity: warning
+    annotations:
+      summary: "{{ $value }} account(s) in non-ok auth state for >1h on {{ $labels.instance }}"
+      description: >
+        One or more accounts have been in a non-ok auth state for more than
+        an hour. Tool calls for those accounts will fail until resolved.
+        Next step: `google-personal-mcp auth status` to identify stuck accounts,
+        then `google-personal-mcp auth refresh <alias>` to re-authorize.
+
+  # ── Cache health ────────────────────────────────────────────────────────────
+
+  - alert: GoogleMcpCacheRaceSpiking
+    expr: rate(gmcp_cache_write_discarded_total[5m]) > 0.5
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Cache write discards spiking on {{ $labels.instance }}"
+      description: >
+        History-sync cache writes are being discarded at a high rate, which
+        indicates a concurrent cache-update race. This is usually benign
+        (idempotent reseed on 404), but a sustained spike suggests the
+        history anchor is being invalidated repeatedly. Next step: check
+        Gmail history-list quota usage and daemon logs for 404 reseeds.
+
+  # ── Memory ──────────────────────────────────────────────────────────────────
+
+  - alert: GoogleMcpMemoryDrift
+    expr: process_resident_memory_bytes / process_resident_memory_bytes offset 24h > 1.10
+    for: 6h
+    labels:
+      severity: warning
+    annotations:
+      summary: "RSS grew >10% in 24h on {{ $labels.instance }}"
+      description: >
+        Resident memory has grown more than 10% over the past 24 hours. For a
+        Rust process with no garbage collector this suggests a logical memory
+        leak (unbounded cache, growing history buffer). Next step: capture a
+        heap profile and inspect with `heaptrack` or `cargo-flamegraph`.
+
+  # ── Hot-reload ──────────────────────────────────────────────────────────────
+
+  - alert: GoogleMcpHotReloadFailing
+    expr: rate(gmcp_hot_reload_total{outcome!="success"}[1h]) > 0
+    for: 2h
+    labels:
+      severity: warning
+    annotations:
+      summary: "hot-reload failing at {{ $value }}/hr on {{ $labels.instance }}"
+      description: >
+        Reloads of accounts.toml are failing. New accounts added since the
+        last successful reload will not be visible to tool calls. Next step:
+        validate the file with `google-personal-mcp auth list` and check for
+        TOML parse errors in the daemon log.
+
+  # ── Daemon availability ─────────────────────────────────────────────────────
+
+  - alert: GoogleMcpDown
+    expr: up{job="google-personal-mcp"} == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "google-personal-mcp daemon is down on {{ $labels.instance }}"
+      description: >
+        The Prometheus scrape target for google-personal-mcp is unreachable.
+        The daemon may have crashed or the systemd unit may have stopped.
+        Next step: `systemctl status google-personal-mcp` and
+        `journalctl -u google-personal-mcp -n 50 --no-pager`
