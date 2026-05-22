@@ -99,7 +99,7 @@ pub(crate) async fn list_labels<T: RefreshTransport>(
 // ── Pure-logic unit tests (Layer 1 — no I/O) ─────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -155,5 +155,160 @@ mod tests {
         assert_eq!(json["items"][0]["kind"], "system");
         assert_eq!(json["items"][0]["messages_total"], 10);
         assert_eq!(json["items"][0]["messages_unread"], 2);
+    }
+
+    // ── Layer 2 fan-out integration test (#84) ────────────────────────────────
+    //
+    // Spin up wiremock, register three accounts in the TokenManager, call
+    // `run_fanout` with a closure that invokes `list_labels` for each
+    // account. Two accounts succeed (200 + JSON), one returns 503. Assert
+    // the resulting FanoutResponse has the right shape and partial-success
+    // semantics — failures surface as `outcome: "error"`, not top-level
+    // errors.
+
+    mod fanout_layer2 {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use chrono::{Duration as ChronoDuration, Utc};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use crate::auth::tokens::{RefreshTransport, TokenManager, TokenState};
+        use crate::error::Error;
+        use crate::gmail::client::GmailClient;
+        use crate::http::RetryPolicy;
+        use crate::tools::fanout::{self, FanoutOutcome};
+        use crate::tools::list_labels;
+
+        struct NoRefresh;
+        impl RefreshTransport for NoRefresh {
+            async fn post_form(
+                &self,
+                _token_uri: &str,
+                _body: String,
+            ) -> Result<(u16, String), Error> {
+                Ok((
+                    200,
+                    r#"{"access_token":"NEW","expires_in":3600}"#.to_owned(),
+                ))
+            }
+        }
+
+        fn state() -> TokenState {
+            TokenState {
+                access_token: "TOKEN".into(),
+                refresh_token: "R".into(),
+                expires_at: Utc::now() + ChronoDuration::seconds(3600),
+                scopes: vec![],
+                client_id: "cid".into(),
+                client_secret: "csec".into(),
+                failed_until: None,
+                consecutive_failures: 0,
+                last_refresh_at: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn three_account_fanout_one_failure() {
+            let server = MockServer::start().await;
+
+            // Two healthy accounts return one INBOX label each.
+            for acct in ["work", "personal"] {
+                Mock::given(method("GET"))
+                    .and(path(format!("/users/{acct}/labels")))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "labels": [
+                            {"id": "INBOX", "name": "INBOX", "type": "system"}
+                        ]
+                    })))
+                    .mount(&server)
+                    .await;
+            }
+
+            // Third account returns 503 — must surface as a per-account error
+            // entry, not a top-level failure.
+            Mock::given(method("GET"))
+                .and(path("/users/acme/labels"))
+                .respond_with(ResponseTemplate::new(503).set_body_string("unavailable"))
+                .mount(&server)
+                .await;
+
+            // Three-account TokenManager.
+            let tmpdir = std::env::temp_dir().join(format!(
+                "gpm-ll-fanout-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            ));
+            std::fs::create_dir_all(&tmpdir).unwrap();
+            let accounts = HashMap::from([
+                ("work".to_owned(), state()),
+                ("personal".to_owned(), state()),
+                ("acme".to_owned(), state()),
+            ]);
+            let tokens = Arc::new(TokenManager::new(
+                accounts,
+                NoRefresh,
+                "https://example/token",
+                tmpdir,
+            ));
+            let gmail = Arc::new(
+                GmailClient::new(server.uri(), tokens, reqwest::Client::new())
+                    .with_retry(RetryPolicy::for_tests()),
+            );
+
+            // Run fan-out: closure clones the Arc into each per-account future.
+            let resp = fanout::run_fanout(
+                vec!["work".into(), "personal".into(), "acme".into()],
+                fanout::FanoutConfig::default(),
+                move |acct| {
+                    let gmail = Arc::clone(&gmail);
+                    async move { list_labels::list_labels(&gmail, &acct).await }
+                },
+            )
+            .await;
+
+            // Envelope shape.
+            assert!(resp.fanout);
+            assert_eq!(resp.summary.total_accounts, 3);
+            assert_eq!(resp.summary.succeeded, 2);
+            assert_eq!(resp.summary.failed, 1);
+
+            // Per-account outcomes (sorted alphabetically by alias).
+            let aliases: Vec<&str> = resp.accounts.iter().map(|r| r.account.as_str()).collect();
+            assert_eq!(aliases, vec!["acme", "personal", "work"]);
+
+            // acme is the failure — outcome=error, kind=Upstream.
+            let acme = resp
+                .accounts
+                .iter()
+                .find(|r| r.account == "acme")
+                .expect("acme entry");
+            match &acme.outcome {
+                FanoutOutcome::Error { error } => {
+                    assert_eq!(error.kind, "Upstream");
+                    assert!(error.message.contains("503"), "got: {}", error.message);
+                }
+                FanoutOutcome::Success { .. } => panic!("expected error outcome for acme"),
+            }
+
+            // work + personal succeeded with one INBOX label each.
+            for healthy in ["work", "personal"] {
+                let entry = resp
+                    .accounts
+                    .iter()
+                    .find(|r| r.account == healthy)
+                    .expect("healthy entry");
+                match &entry.outcome {
+                    FanoutOutcome::Success { data } => {
+                        assert_eq!(data.items.len(), 1);
+                        assert_eq!(data.items[0].label_id, "INBOX");
+                    }
+                    FanoutOutcome::Error { .. } => panic!("expected success for {healthy}"),
+                }
+            }
+        }
     }
 }
