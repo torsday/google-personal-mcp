@@ -728,11 +728,7 @@ impl ServerHandler for GoogleServer {
                 self.write_destructive_intent(
                     &account,
                     "batch_archive",
-                    crate::audit::summarize_batch_archive(
-                        &thread_ids,
-                        self.verbosity,
-                        dry_run,
-                    ),
+                    crate::audit::summarize_batch_archive(&thread_ids, self.verbosity, dry_run),
                     dry_run,
                 )?;
                 let result = archive::batch_archive(
@@ -814,11 +810,7 @@ impl ServerHandler for GoogleServer {
                 self.write_destructive_intent(
                     &account,
                     "batch_trash",
-                    crate::audit::summarize_batch_trash(
-                        &thread_ids,
-                        self.verbosity,
-                        dry_run,
-                    ),
+                    crate::audit::summarize_batch_trash(&thread_ids, self.verbosity, dry_run),
                     dry_run,
                 )?;
                 let result = trash::batch_trash(
@@ -1147,7 +1139,13 @@ mod tests {
         let audit = AuditWriter::new(
             std::env::temp_dir().join(format!("gpm-srv-test-{}", std::process::id())),
         );
-        GoogleServer::new(Arc::new(accounts), tokens, gmail, audit, Verbosity::Redacted)
+        GoogleServer::new(
+            Arc::new(accounts),
+            tokens,
+            gmail,
+            audit,
+            Verbosity::Redacted,
+        )
     }
 
     #[test]

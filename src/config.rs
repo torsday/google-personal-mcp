@@ -1101,10 +1101,10 @@ mod tests {
         let path = write(
             &tmp,
             "config.toml",
-            r#"
+            "
             [audit]
             verbose = true
-            "#,
+            ",
         );
         let cfg = Config::load(&path).unwrap();
         assert!(cfg.audit.verbose);
@@ -1116,10 +1116,10 @@ mod tests {
         let path = write(
             &tmp,
             "config.toml",
-            r#"
+            "
             [audit]
             verbose = false
-            "#,
+            ",
         );
         let cfg = Config::load(&path).unwrap();
         assert!(!cfg.audit.verbose);
