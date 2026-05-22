@@ -185,6 +185,7 @@ mod tests {
             client_secret: format!("secret-{alias}"),
             failed_until: None,
             consecutive_failures: 0,
+            last_refresh_at: None,
         }
     }
 

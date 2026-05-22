@@ -358,6 +358,7 @@ fn run_refresh(alias: &str, config_dir: &Path) -> Result<(), Error> {
         client_secret: existing.client_secret,
         failed_until: None,
         consecutive_failures: 0,
+        last_refresh_at: None,
     };
     write_token_file(&tokens_dir, alias, &new_state)?;
     eprintln!("Access token for `{alias}` refreshed successfully.");
@@ -544,6 +545,7 @@ mod tests {
             client_secret: "csec".into(),
             failed_until: None,
             consecutive_failures: 0,
+            last_refresh_at: None,
         };
         write_token_file(&dir, "work", &state).expect("write ok");
         let path = dir.join("work.json");
