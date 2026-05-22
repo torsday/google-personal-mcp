@@ -1,12 +1,21 @@
 //! Append-only JSONL audit log per
-//! [ADR-0011](../docs/adr/0011-audit-log.md) v0.2 subset.
+//! [ADR-0011](../docs/adr/0011-audit-log.md).
 //!
-//! One JSONL record is written per destructive tool invocation (including
-//! `dry_run` calls). Audit writes are best-effort in v0.2 — a write failure
-//! logs a warning but does **not** block the operation. The v1.0 fail-closed
-//! and fsync-per-record semantics are deferred.
+//! ## Write modes
 //!
-//! # File layout
+//! Two write paths cover the v0.x audit needs:
+//!
+//! - [`AuditWriter::write`] — best-effort. Failures log a warning and the
+//!   caller continues. Used for read-only / non-destructive tools and for
+//!   the **outcome** record of destructive tools (after the API call).
+//! - [`AuditWriter::write_synced`] — fail-closed + `fsync`. Returns an
+//!   [`Error::Internal`] on any I/O failure. Used for the **intent**
+//!   record of destructive tools, written *before* the Gmail API call
+//!   per [ADR-0011 lines 83-86](../docs/adr/0011-audit-log.md) (#66) —
+//!   the trust property is that even if the daemon crashes during the
+//!   API call, the audit log shows the intent.
+//!
+//! ## File layout
 //!
 //! ```text
 //! <config_dir>/audit/<account>.jsonl
@@ -70,15 +79,40 @@ impl AuditWriter {
 
     /// Append `entry` to `<audit_dir>/<account>.jsonl`.
     ///
-    /// Write failures are logged as warnings; they never return an error so
-    /// callers don't need to handle them (v0.2 best-effort semantics).
+    /// Best-effort: failures log a warning and return without raising.
+    /// Used for outcome records and non-destructive tools, where a
+    /// lost audit line is regrettable but not a trust violation.
     pub(crate) fn write(&self, entry: &AuditEntry) {
-        if let Err(e) = self.try_write(entry) {
+        if let Err(e) = self.try_write(entry, /* sync = */ false) {
             tracing::warn!(error = %e, account = %entry.account, tool = %entry.tool, "audit write failed");
         }
     }
 
-    fn try_write(&self, entry: &AuditEntry) -> std::io::Result<()> {
+    /// Append `entry` to `<audit_dir>/<account>.jsonl` and `fsync` the
+    /// file before returning.
+    ///
+    /// On any I/O failure returns [`Error::Internal`] so callers can
+    /// **refuse the destructive op** rather than silently proceeding —
+    /// this is the fail-closed half of ADR-0011's intent-record trust
+    /// property (#66). The synced write happens *before* the Google
+    /// API call; if the daemon crashes between this fsync and the API
+    /// returning, the operator can reconcile from the durable intent.
+    pub(crate) fn write_synced(&self, entry: &AuditEntry) -> Result<(), crate::error::Error> {
+        self.try_write(entry, /* sync = */ true).map_err(|e| {
+            tracing::error!(
+                error = %e,
+                account = %entry.account,
+                tool = %entry.tool,
+                "audit fsync failed — refusing destructive op"
+            );
+            crate::error::Error::Internal {
+                context: format!("audit write_synced for tool `{}`", entry.tool),
+                source: anyhow::Error::new(e),
+            }
+        })
+    }
+
+    fn try_write(&self, entry: &AuditEntry, sync: bool) -> std::io::Result<()> {
         // Reject account values that could escape `audit_dir` via path traversal
         // or absolute-path replacement. The MCP layer should validate too, but
         // this is the last line of defense before disk I/O. See issue #101.
@@ -104,6 +138,14 @@ impl AuditWriter {
         // Open with append + create; set 0600 on first creation.
         let mut file = open_append(&path)?;
         writeln!(file, "{line}")?;
+        if sync {
+            // fsync the file descriptor so the intent record is on
+            // durable storage before we return — per ADR-0011 lines
+            // 83-86 (#66). `sync_data` skips the metadata flush that
+            // `sync_all` would do; append-only files don't carry
+            // metadata an operator would need across a crash.
+            file.sync_data()?;
+        }
         Ok(())
     }
 }
@@ -494,6 +536,91 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         // The file should have exactly one \n (the trailing newline from writeln!)
         assert_eq!(content.matches('\n').count(), 1);
+    }
+
+    // ── write_synced + fail-closed semantics (#66, ADR-0011) ──────────────────
+
+    #[test]
+    fn write_synced_persists_intent_record() {
+        let dir = TempDir::new().unwrap();
+        let writer = AuditWriter::new(dir.path());
+
+        let entry = AuditEntry {
+            timestamp: Utc::now(),
+            account: "personal".into(),
+            tool: "archive_thread".into(),
+            params_summary: serde_json::json!({"thread_id": "tid1", "dry_run": false}),
+            action: "intent".into(),
+            result: "pending".into(),
+        };
+        writer
+            .write_synced(&entry)
+            .expect("synced write should succeed");
+
+        // Intent record durable on disk before we return — that's the
+        // trust property under test.
+        let line = std::fs::read_to_string(dir.path().join("audit/personal.jsonl")).unwrap();
+        let parsed: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(parsed["action"], "intent");
+        assert_eq!(parsed["result"], "pending");
+        assert_eq!(parsed["tool"], "archive_thread");
+    }
+
+    #[test]
+    fn write_synced_returns_internal_error_on_unsafe_account() {
+        // Path-traversal-shaped alias triggers the is_safe_account_alias
+        // guard, which we treat as a synthetic I/O failure — the
+        // destructive op must refuse rather than swallow.
+        let dir = TempDir::new().unwrap();
+        let writer = AuditWriter::new(dir.path());
+        let entry = AuditEntry {
+            timestamp: Utc::now(),
+            account: "../escape".into(),
+            tool: "archive_thread".into(),
+            params_summary: serde_json::json!({}),
+            action: "intent".into(),
+            result: "pending".into(),
+        };
+        let err = writer.write_synced(&entry).expect_err("must fail closed");
+        assert!(matches!(err, crate::error::Error::Internal { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_synced_returns_internal_error_when_audit_dir_unwritable() {
+        // Simulate a real I/O failure: point the writer at a read-only
+        // directory and prove the synced write surfaces Error::Internal
+        // rather than silently dropping the intent record.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        // Pre-create the audit subdir as read-only so create_dir_all
+        // succeeds (idempotent) but the file open fails with EACCES.
+        let audit_dir = dir.path().join("audit");
+        std::fs::create_dir(&audit_dir).unwrap();
+        let mut perms = std::fs::metadata(&audit_dir).unwrap().permissions();
+        perms.set_mode(0o500); // r-x — no write
+        std::fs::set_permissions(&audit_dir, perms).unwrap();
+
+        let writer = AuditWriter::new(dir.path());
+        let entry = AuditEntry {
+            timestamp: Utc::now(),
+            account: "personal".into(),
+            tool: "archive_thread".into(),
+            params_summary: serde_json::json!({}),
+            action: "intent".into(),
+            result: "pending".into(),
+        };
+        let result = writer.write_synced(&entry);
+
+        // Restore perms so TempDir's Drop can clean up regardless.
+        let audit_dir = dir.path().join("audit");
+        let mut perms = std::fs::metadata(&audit_dir).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&audit_dir, perms).ok();
+
+        let err = result.expect_err("must fail closed on EACCES");
+        assert!(matches!(err, crate::error::Error::Internal { .. }));
     }
 
     #[test]
