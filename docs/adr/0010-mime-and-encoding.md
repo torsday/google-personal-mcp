@@ -210,6 +210,7 @@ This handles: ISO-8859-1, ISO-8859-15, Windows-1252, Shift_JIS, GB18030, EUC-KR,
 - [ADR-0006](0006-config.md) — `[messages]` section: `max_body_bytes`, `attachment_save_dir`, `max_attachment_inline_bytes`
 - [ADR-0009](0009-caching-with-sqlite-and-history-api.md) — parsed `body_text` / `body_html` cached in SQLite
 - [ADR-0011](0011-audit-log.md) — attachment downloads logged to audit
+- [ADR-0021](0021-attachment-download-policy.md) — path constraints, executable-extension blocklist, size limits, MIME-trust policy for `download_attachment`
 - [`mailparse`](https://docs.rs/mailparse) — RFC 822/2822/5322 parser
 - [`html2text`](https://docs.rs/html2text) — HTML → plain-text rendering
 - [`encoding_rs`](https://docs.rs/encoding_rs) — charset conversion (transitive via `mailparse`)

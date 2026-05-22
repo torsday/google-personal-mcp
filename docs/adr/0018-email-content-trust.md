@@ -130,4 +130,5 @@ We choose (b). It is the highest signal-to-complexity option, it composes with t
 - [ADR-0012](0012-idempotency-and-dry-run.md) — `dry_run` as the in-loop confirmation mechanism
 - [ADR-0014](0014-status-introspection-tool.md) — when implemented, exposes the delimiter strings via `mcp_status`
 - [ADR-0016](0016-tool-surface-and-conventions.md) — disclaimer convention #4; field-naming rule for `_untrusted` suffix
+- [ADR-0021](0021-attachment-download-policy.md) — resolves §5's forward reference (path constraints, executable-extension blocklist, size limits, MIME trust)
 - Greshake et al., *Not what you've signed up for: Compromising Real-World LLM-Integrated Applications with Indirect Prompt Injection* (2023) — the threat model this ADR addresses
