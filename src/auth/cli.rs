@@ -332,12 +332,26 @@ fn run_refresh(alias: &str, config_dir: &Path) -> Result<(), Error> {
 
     if !(200..300).contains(&status) {
         if text.contains("invalid_grant") {
+            // ADR-0017 §"Logging hygiene" (#103): never splice the raw
+            // response body into the error — a partial-refresh response
+            // can carry a fresh `access_token`. Parse out the
+            // structured `error_description` if present and reference
+            // *that*.
+            let detail: Option<String> = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| {
+                    v.get("error_description")
+                        .and_then(|d| d.as_str().map(str::to_owned))
+                });
+            let server = detail
+                .map(|d| format!(" (server: {d})"))
+                .unwrap_or_default();
             return Err(Error::AuthRequired {
                 account: alias.to_owned(),
                 reason: format!(
-                    "refresh_token rejected (invalid_grant) — run \
+                    "refresh_token rejected (invalid_grant){server} — run \
                      `auth add --alias {alias}` to re-authorize, or \
-                     `auth remove --alias {alias} --revoke` then re-add.\nServer: {text}"
+                     `auth remove --alias {alias} --revoke` then re-add."
                 ),
             });
         }
