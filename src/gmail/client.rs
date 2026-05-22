@@ -697,7 +697,7 @@ mod tests {
             )
             .expect("mkdir");
             Arc::new(
-                GmailClient::new(&server.uri(), tokens, reqwest::Client::new())
+                GmailClient::new(server.uri(), tokens, reqwest::Client::new())
                     .with_retry(RetryPolicy::for_tests())
                     .with_rate_limiter(Arc::clone(&limiter))
                     .with_project_quota(Arc::new(ProjectQuotaRegistry::new(3))),
