@@ -83,6 +83,19 @@ jobs:
             exit 1
           fi
 
+  promtool:
+    name: promtool check rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install prometheus
+        run: |
+          PROM_VERSION=2.53.4
+          curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz" \
+            | tar xz --strip-components=1 -C /usr/local/bin "prometheus-${PROM_VERSION}.linux-amd64/promtool"
+      - name: validate alert rules
+        run: promtool check rules deploy/alerts.yml
+
   deny:
     name: cargo deny
     runs-on: ubuntu-latest
