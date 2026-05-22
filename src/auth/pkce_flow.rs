@@ -20,7 +20,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, Utc};
 use oauth2::{CsrfToken, PkceCodeChallenge, PkceCodeVerifier};
@@ -236,21 +236,52 @@ fn bind_listener(port: u16) -> Result<TcpListener, Error> {
     Ok(listener)
 }
 
+/// Poll interval used between non-blocking `accept()` attempts.
+const ACCEPT_POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
+
 fn wait_for_redirect(
     listener: &TcpListener,
     timeout: StdDuration,
 ) -> Result<RedirectResult, Error> {
+    // Set the listener non-blocking so `accept()` returns `WouldBlock`
+    // immediately rather than hanging indefinitely. We poll until the deadline
+    // and then return a typed error, honouring the `LISTENER_TIMEOUT` promise.
     listener
-        .set_nonblocking(false)
+        .set_nonblocking(true)
         .map_err(|e| Error::Internal {
-            context: "set_nonblocking".into(),
+            context: "set_nonblocking(true)".into(),
             source: anyhow::Error::new(e),
         })?;
-    let (mut stream, _) = listener.accept().map_err(|e| Error::Internal {
-        context: "accept redirect".into(),
-        source: anyhow::Error::new(e),
-    })?;
-    stream.set_read_timeout(Some(timeout)).map_err(Error::Io)?;
+
+    let deadline = Instant::now() + timeout;
+    let (mut stream, _) = loop {
+        match listener.accept() {
+            Ok(pair) => break pair,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(Error::AuthRequired {
+                        account: "(pre-auth)".into(),
+                        reason: "timed out waiting for OAuth redirect — \
+                                 no browser connection received within the timeout"
+                            .into(),
+                    });
+                }
+                std::thread::sleep(ACCEPT_POLL_INTERVAL);
+            }
+            Err(e) => {
+                return Err(Error::Internal {
+                    context: "accept redirect".into(),
+                    source: anyhow::Error::new(e),
+                });
+            }
+        }
+    };
+
+    // Bound the subsequent read so a slow/partial HTTP request can't stall us.
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    stream
+        .set_read_timeout(Some(remaining.max(StdDuration::from_millis(500))))
+        .map_err(Error::Io)?;
 
     let request_line = read_request_line(&stream)?;
     let path = extract_request_path(&request_line)?;
@@ -594,5 +625,39 @@ mod tests {
         assert_eq!(decoded.scopes, original.scopes);
         assert_eq!(decoded.client_id, original.client_id);
         assert_eq!(decoded.client_secret, original.client_secret);
+    }
+
+    // ── accept timeout (Layer 1) ─────────────────────────────────────────────
+
+    /// Bind a listener on an ephemeral port, send no connections, and assert
+    /// that `wait_for_redirect` returns `Error::AuthRequired` within a short
+    /// deadline (the test uses 300 ms to keep the suite fast).
+    #[test]
+    fn accept_times_out_with_no_connection() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let timeout = StdDuration::from_millis(300);
+        let start = Instant::now();
+        let result = wait_for_redirect(&listener, timeout);
+        let elapsed = start.elapsed();
+
+        // Should have returned an error.
+        assert!(
+            result.is_err(),
+            "expected timeout error, got Ok: {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::AuthRequired { .. }),
+            "expected AuthRequired, got {err:?}"
+        );
+
+        // Should have returned in no more than 2× the timeout.
+        assert!(
+            elapsed <= timeout * 2,
+            "took {elapsed:?}, expected ≤ {}ms",
+            timeout.as_millis() * 2
+        );
     }
 }
