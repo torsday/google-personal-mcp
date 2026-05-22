@@ -59,7 +59,7 @@ The daemon is designed to run forever. Rust's lack of a GC means memory stays fl
 
 | Phase | What it covers | State |
 | --- | --- | --- |
-| **Design** | 19 ADRs in [`docs/adr/`](docs/adr/). Architecture, tool surface, auth, error model, security, testing strategy. | ✅ Complete |
+| **Design** | 20 ADRs in [`docs/adr/`](docs/adr/). Architecture, tool surface, auth, error model, security, testing strategy. | ✅ Complete |
 | **v0.2** | Gmail tools (`list_accounts`, `list_labels`, `search_threads`, `get_thread`, `archive_thread`, `batch_archive`, `trash_thread`, `batch_trash`, `modify_thread_labels`, `batch_modify_thread_labels`, `send_email`), multi-account OAuth with hot-reload, `dry_run` + send-dedup, per-account rate limiter, minimal JSONL audit log, macOS Keychain backend, read-only operator profile, Layer 1–4 tests. | ✅ Released |
 | **v0.3** | Full audit surface ([ADR-0011](docs/adr/0011-audit-log.md)) — per-tool redaction rules, `audit_summary`, fsync-before-destructive, configurable rotation. Deferred tools: `mcp_status`, `list_attachments`, `download_attachment`. Observability v0.x subset: structured tracing spans, `/healthz`, systemd unit + INSTALL.md. | 🔜 In planning |
 | **v1.0** | First public release. Streamable HTTP transport with session lifecycle ([ADR-0003](docs/adr/0003-transport-stdio-and-streamable-http.md)). Observability v1.0: Prometheus exporter + alertmanager rules + nginx template ([ADR-0008](docs/adr/0008-observability-and-deployment.md)). SQLite caching with Gmail History API invalidation ([ADR-0009](docs/adr/0009-caching-with-sqlite-and-history-api.md)). Cross-account fan-out for read tools ([ADR-0013](docs/adr/0013-cross-account-fan-out.md)). Tool versioning policy enforcement ([ADR-0015](docs/adr/0015-tool-versioning-policy.md)). | 🔮 Future |
@@ -68,7 +68,7 @@ The cut between v0.x and v1.0 is deliberate: features only earn their keep when 
 
 ## Architecture
 
-The design lives in 19 ADRs. The load-bearing ones:
+The design lives in 20 ADRs. The load-bearing ones:
 
 - [ADR-0001](docs/adr/0001-monolithic-google-personal-mcp-architecture.md) — monolithic single-binary architecture, Google personal-data scope only
 - [ADR-0002](docs/adr/0002-multi-account-architecture.md) — multi-account registry, `account` parameter on every tool

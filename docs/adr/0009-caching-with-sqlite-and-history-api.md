@@ -327,6 +327,7 @@ We choose (c). The combination of immutable bodies + History API is exactly what
 - [ADR-0008](0008-observability-and-deployment.md) — `gmcp_cache_hits_total`, `gmcp_cache_misses_total`, `gmcp_cache_size_bytes` metrics
 - [ADR-0010](0010-mime-and-encoding.md) — body parsing whose output we cache
 - [ADR-0014](0014-status-introspection-tool.md) — `mcp_status` surfaces cache stats
+- [ADR-0019](0019-data-retention-and-purge.md) — adds the `purged_at` column, time-based body-purge phase to the eviction task, and `cache_status` body-purge counters
 - Gmail [`users.history.list` reference](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list) — the invalidation primitive
 - Gmail [API quotas](https://developers.google.com/workspace/gmail/api/reference/quota) — per-method costs that this ADR amortizes
 - [`rusqlite`](https://docs.rs/rusqlite), [`tokio_rusqlite`](https://docs.rs/tokio_rusqlite) — implementation

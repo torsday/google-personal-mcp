@@ -235,4 +235,5 @@ We choose (h). The verbose toggle is a one-line config change for the personal-u
 - [ADR-0008](0008-observability-and-deployment.md) — distinguishes audit (this) from tracing (debug logs); audit log is NOT subject to `RUST_LOG`
 - [ADR-0012](0012-idempotency-and-dry-run.md) — `dry_run` flag on destructive ops; audit records `dry_run` outcome distinctly
 - [ADR-0014](0014-status-introspection-tool.md) — `mcp_status` reports audit log size
+- [ADR-0019](0019-data-retention-and-purge.md) — adds opt-in `[audit] delete_after_days` retention; preserves the "no default automatic deletion" promise; `purge_account` writes one audit record but does **not** modify audit files
 - POSIX `O_APPEND` semantics — atomic small writes that this model relies on
