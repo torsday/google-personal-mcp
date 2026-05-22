@@ -21,6 +21,36 @@ use tokio::time::sleep;
 
 use crate::error::Error;
 
+/// Percent-encode a single URL path segment per RFC 3986 §2.3 / §3.3. Every
+/// byte outside the unreserved set (`A-Z a-z 0-9 - _ . ~`) is replaced with
+/// `%XX`. Critically, `/`, `?`, `#`, `%` are all encoded — preventing
+/// untrusted segment values (`thread_id`, `account` alias) from reshaping the
+/// API path or smuggling a query string.
+///
+/// Use for every caller-controlled component interpolated into a Gmail URL
+/// path. Query-string values use the same encoding rules and may also call
+/// this helper.
+///
+/// Implemented inline (~10 `LoC`) rather than pulling in `percent-encoding` —
+/// the unreserved set is small and stable.
+pub(crate) fn percent_encode_path_segment(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0xF) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RetryPolicy {
     pub(crate) max_retries: u32,
@@ -172,5 +202,50 @@ mod tests {
             let j = jitter_under(bound);
             assert!(j < bound, "jitter {j:?} >= bound {bound:?}");
         }
+    }
+
+    // ── percent_encode_path_segment ──────────────────────────────────────────
+
+    #[test]
+    fn percent_encode_passes_unreserved_through() {
+        // Per RFC 3986: `A-Z a-z 0-9 - _ . ~` are unreserved.
+        let s = "Abc-XYZ_123.tilde~";
+        assert_eq!(percent_encode_path_segment(s), s);
+    }
+
+    #[test]
+    fn percent_encode_escapes_path_separator() {
+        // The whole point of the helper: `/` must not survive into a path segment.
+        assert_eq!(percent_encode_path_segment("foo/bar"), "foo%2Fbar");
+    }
+
+    #[test]
+    fn percent_encode_escapes_query_and_fragment_delimiters() {
+        // `?` would truncate the URL Gmail sees; `#` would slice off a fragment.
+        assert_eq!(percent_encode_path_segment("foo?bar"), "foo%3Fbar");
+        assert_eq!(percent_encode_path_segment("foo#bar"), "foo%23bar");
+    }
+
+    #[test]
+    fn percent_encode_escapes_percent_itself() {
+        // Pre-encoded `%2f` must be double-encoded so it can't smuggle a `/`.
+        assert_eq!(percent_encode_path_segment("foo%2fbar"), "foo%252fbar");
+    }
+
+    #[test]
+    fn percent_encode_escapes_whitespace_and_specials() {
+        assert_eq!(percent_encode_path_segment("a b"), "a%20b");
+        assert_eq!(percent_encode_path_segment("a&b=c"), "a%26b%3Dc");
+    }
+
+    #[test]
+    fn percent_encode_handles_multibyte_utf8() {
+        // 好 = E5 A5 BD (3 bytes); each must be encoded.
+        assert_eq!(percent_encode_path_segment("好"), "%E5%A5%BD");
+    }
+
+    #[test]
+    fn percent_encode_empty_string_yields_empty() {
+        assert_eq!(percent_encode_path_segment(""), "");
     }
 }
