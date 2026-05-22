@@ -1,0 +1,66 @@
+# nginx reverse-proxy template for google-personal-mcp (Streamable HTTP transport)
+#
+# Copy to /etc/nginx/sites-available/google-personal-mcp, edit the domain and
+# cert paths, then run `nginx -t && systemctl reload nginx`.
+#
+# Per ADR-0008: nginx handles TLS termination; the daemon listens on loopback
+# (127.0.0.1:8765 by default, configurable via [http].bind in config.toml).
+#
+# Prerequisites:
+#   - certbot / acme.sh certficate in /etc/letsencrypt/live/<your-domain.tld>/
+#   - nginx ≥ 1.18 (ships with Ubuntu 20.04+)
+
+server {
+    listen 443 ssl http2;
+    server_name google-personal-mcp.your-domain.tld;
+
+    ssl_certificate     /etc/letsencrypt/live/your-domain.tld/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-domain.tld/privkey.pem;
+
+    # MCP traffic — Streamable HTTP with Server-Sent Events (SSE) support
+    location / {
+        proxy_pass http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+
+        # SSE requires clearing the Connection header so nginx does not
+        # close the connection after each chunk.
+        proxy_set_header Connection '';
+
+        # Forward the MCP session-ID header so the daemon can associate
+        # each request with the correct in-flight session.
+        proxy_set_header Mcp-Session-Id $http_mcp_session_id;
+
+        # CRITICAL: proxy_buffering must be off for SSE to work correctly.
+        # nginx's default buffering accumulates the response in memory
+        # before forwarding it to the client, which breaks the incremental
+        # SSE stream that Streamable HTTP depends on.
+        proxy_buffering off;
+
+        # Match the session_idle_timeout_secs value in config.toml (default 3600).
+        # Without this, nginx closes idle SSE connections before the daemon does,
+        # causing spurious disconnects during long-running tool calls.
+        proxy_read_timeout 1h;
+
+        # Do not buffer the request body; forward it to the upstream immediately.
+        proxy_request_buffering off;
+    }
+
+    # Optional: restrict access to known MCP clients via HTTP basic auth.
+    # Uncomment and create the password file with `htpasswd -c`.
+    # auth_basic "google-personal-mcp";
+    # auth_basic_user_file /etc/nginx/google-personal-mcp.htpasswd;
+}
+
+# Redirect plain HTTP to HTTPS.
+server {
+    listen 80;
+    server_name google-personal-mcp.your-domain.tld;
+    return 301 https://$host$request_uri;
+}
+
+# NOTE: The /healthz and (future) /metrics endpoints are served on
+# 127.0.0.1:9100 (configurable via [metrics].bind in config.toml) and are
+# intentionally NOT exposed here. They are for a local Prometheus scrape and
+# the systemd watchdog — exposing them publicly would leak internal state.
+# If you need remote Prometheus scraping, use an authenticated push gateway
+# or a VPN, not a public nginx vhost.
