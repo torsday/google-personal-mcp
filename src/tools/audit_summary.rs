@@ -111,7 +111,7 @@ fn read_all_entries(audit_dir: &Path) -> Result<Vec<AuditEntry>, Error> {
     for dir_entry in read_dir {
         let dir_entry = dir_entry?;
         let path = dir_entry.path();
-        if path.extension().is_some_and(|e| e == "jsonl") {
+        if path.extension().is_some_and(|e| e == "jsonl" || e == "log") {
             let content = fs::read_to_string(&path)?;
             for (lineno, line) in content.lines().enumerate() {
                 if line.trim().is_empty() {

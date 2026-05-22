@@ -26,9 +26,11 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, IsoWeek, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::config::RotateMode;
 
 // ── Entry ─────────────────────────────────────────────────────────────────────
 
@@ -57,39 +59,107 @@ pub(crate) struct AuditEntry {
 
 // ── Writer ────────────────────────────────────────────────────────────────────
 
-/// Best-effort audit log writer. `Clone` is cheap (path + flag only).
+/// Best-effort audit log writer. `Clone` is cheap (path + mode only).
 #[derive(Debug, Clone)]
 pub(crate) struct AuditWriter {
     audit_dir: PathBuf,
+    rotate: RotateMode,
 }
 
 impl AuditWriter {
-    /// Create a writer rooted at `<config_dir>/audit/`.
-    pub(crate) fn new(config_dir: impl Into<PathBuf>) -> Self {
+    /// Create a writer rooted at `<config_dir>/audit/` with the given
+    /// rotation mode. Use [`RotateMode::default()`] (`Monthly`) for the
+    /// operator default.
+    pub(crate) fn new(config_dir: impl Into<PathBuf>, rotate: RotateMode) -> Self {
         let mut audit_dir = config_dir.into();
         audit_dir.push("audit");
-        Self { audit_dir }
+        Self { audit_dir, rotate }
     }
 
-    /// Path the writer stores JSONL files under. Used by `audit_summary`
+    /// Path the writer stores log files under. Used by `audit_summary`
     /// (#65) to read back the same directory.
     pub(crate) fn audit_dir(&self) -> &std::path::Path {
         &self.audit_dir
     }
 
-    /// Append `entry` to `<audit_dir>/<account>.jsonl`.
+    /// Compute the filename (not path) for a write at `now`. This is the
+    /// time-based rotation lookup; for [`RotateMode::Size`] callers should
+    /// use [`Self::size_path`] which also needs the directory state.
+    ///
+    /// Exposed for tests; production code calls [`Self::write`] /
+    /// [`Self::write_synced`] which use `Utc::now()` internally.
+    pub(crate) fn filename_at(&self, now: DateTime<Utc>) -> String {
+        match &self.rotate {
+            RotateMode::Monthly => {
+                format!("audit-{}-{:02}.log", now.year(), now.month())
+            }
+            RotateMode::Weekly => {
+                let iso: IsoWeek = now.iso_week();
+                format!("audit-{}-W{:02}.log", iso.year(), iso.week())
+            }
+            RotateMode::Daily => {
+                format!(
+                    "audit-{}-{:02}-{:02}.log",
+                    now.year(),
+                    now.month(),
+                    now.day()
+                )
+            }
+            // Size mode uses sequential numbering; see `size_path`.
+            RotateMode::Size(_) => unreachable!("use size_path() for Size rotation"),
+        }
+    }
+
+    /// Resolve the target path for a [`RotateMode::Size`] write.
+    ///
+    /// Scans `audit_dir` for `audit-<N>.log` files, finds the highest `N`.
+    /// If that file is smaller than the limit, returns it; otherwise
+    /// returns the path for `N + 1`. If no file exists yet, uses seq 1.
+    fn size_path(&self, limit: u64) -> std::io::Result<PathBuf> {
+        std::fs::create_dir_all(&self.audit_dir)?;
+
+        // Collect all `audit-<N>.log` seq numbers present on disk.
+        let mut max_seq: u64 = 0;
+        let mut max_size: u64 = 0;
+        for dir_entry in std::fs::read_dir(&self.audit_dir)? {
+            let dir_entry = dir_entry?;
+            let fname = dir_entry.file_name();
+            let fname = fname.to_string_lossy();
+            if let Some(seq) = parse_seq_filename(&fname) {
+                if seq > max_seq {
+                    max_seq = seq;
+                    max_size = dir_entry.metadata().map_or(0, |m| m.len());
+                }
+            }
+        }
+
+        let seq = if max_seq == 0 || max_size >= limit {
+            max_seq + 1
+        } else {
+            max_seq
+        };
+        Ok(self.audit_dir.join(format!("audit-{seq}.log")))
+    }
+
+    /// Append `entry` to the current rotation file.
     ///
     /// Best-effort: failures log a warning and return without raising.
     /// Used for outcome records and non-destructive tools, where a
     /// lost audit line is regrettable but not a trust violation.
     pub(crate) fn write(&self, entry: &AuditEntry) {
-        if let Err(e) = self.try_write(entry, /* sync = */ false) {
+        self.write_at(entry, Utc::now());
+    }
+
+    /// Like [`Self::write`] but uses the supplied timestamp for rotation
+    /// decisions instead of `Utc::now()`. Intended for unit tests.
+    pub(crate) fn write_at(&self, entry: &AuditEntry, now: DateTime<Utc>) {
+        if let Err(e) = self.try_write(entry, /* sync = */ false, now) {
             tracing::warn!(error = %e, account = %entry.account, tool = %entry.tool, "audit write failed");
         }
     }
 
-    /// Append `entry` to `<audit_dir>/<account>.jsonl` and `fsync` the
-    /// file before returning.
+    /// Append `entry` to the current rotation file and `fsync` before
+    /// returning.
     ///
     /// On any I/O failure returns [`Error::Internal`] so callers can
     /// **refuse the destructive op** rather than silently proceeding —
@@ -98,7 +168,17 @@ impl AuditWriter {
     /// API call; if the daemon crashes between this fsync and the API
     /// returning, the operator can reconcile from the durable intent.
     pub(crate) fn write_synced(&self, entry: &AuditEntry) -> Result<(), crate::error::Error> {
-        self.try_write(entry, /* sync = */ true).map_err(|e| {
+        self.write_synced_at(entry, Utc::now())
+    }
+
+    /// Like [`Self::write_synced`] but uses the supplied timestamp for
+    /// rotation decisions. Intended for unit tests.
+    pub(crate) fn write_synced_at(
+        &self,
+        entry: &AuditEntry,
+        now: DateTime<Utc>,
+    ) -> Result<(), crate::error::Error> {
+        self.try_write(entry, /* sync = */ true, now).map_err(|e| {
             tracing::error!(
                 error = %e,
                 account = %entry.account,
@@ -112,7 +192,7 @@ impl AuditWriter {
         })
     }
 
-    fn try_write(&self, entry: &AuditEntry, sync: bool) -> std::io::Result<()> {
+    fn try_write(&self, entry: &AuditEntry, sync: bool, now: DateTime<Utc>) -> std::io::Result<()> {
         // Reject account values that could escape `audit_dir` via path traversal
         // or absolute-path replacement. The MCP layer should validate too, but
         // this is the last line of defense before disk I/O. See issue #101.
@@ -128,7 +208,10 @@ impl AuditWriter {
 
         std::fs::create_dir_all(&self.audit_dir)?;
 
-        let path = self.audit_dir.join(format!("{}.jsonl", entry.account));
+        let path = match &self.rotate {
+            RotateMode::Size(limit) => self.size_path(*limit)?,
+            _ => self.audit_dir.join(self.filename_at(now)),
+        };
 
         // Serialize to a single JSON line (no embedded newlines in values since
         // serde_json compact serialization never emits them).
@@ -147,6 +230,19 @@ impl AuditWriter {
             file.sync_data()?;
         }
         Ok(())
+    }
+}
+
+/// Parse an `audit-<N>.log` filename and return `N`, or `None` if the name
+/// doesn't match. Used by [`AuditWriter::size_path`].
+fn parse_seq_filename(fname: &str) -> Option<u64> {
+    let rest = fname.strip_prefix("audit-")?.strip_suffix(".log")?;
+    // Must be all digits (distinguishes seq files from time-based names
+    // like `audit-2026-04.log`).
+    if rest.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty() {
+        rest.parse().ok()
+    } else {
+        None
     }
 }
 
@@ -481,7 +577,20 @@ pub(crate) fn summarize_download_attachment(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use tempfile::TempDir;
+
+    /// Fixed timestamps for deterministic rotation tests.
+    fn ts_monthly() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap()
+    }
+    fn ts_weekly() -> DateTime<Utc> {
+        // 2026-04-25 is a Saturday in ISO week 17 of 2026.
+        Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap()
+    }
+    fn ts_daily() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap()
+    }
 
     fn make_entry(account: &str, tool: &str, action: &str) -> AuditEntry {
         AuditEntry {
@@ -494,15 +603,153 @@ mod tests {
         }
     }
 
+    fn monthly_writer(dir: &TempDir) -> AuditWriter {
+        AuditWriter::new(dir.path(), RotateMode::Monthly)
+    }
+
+    // ── Rotation filename tests (#67) ─────────────────────────────────────────
+
+    #[test]
+    fn filename_monthly_format() {
+        let dir = TempDir::new().unwrap();
+        let w = AuditWriter::new(dir.path(), RotateMode::Monthly);
+        assert_eq!(w.filename_at(ts_monthly()), "audit-2026-04.log");
+    }
+
+    #[test]
+    fn filename_weekly_format() {
+        let dir = TempDir::new().unwrap();
+        let w = AuditWriter::new(dir.path(), RotateMode::Weekly);
+        assert_eq!(w.filename_at(ts_weekly()), "audit-2026-W17.log");
+    }
+
+    #[test]
+    fn filename_daily_format() {
+        let dir = TempDir::new().unwrap();
+        let w = AuditWriter::new(dir.path(), RotateMode::Daily);
+        assert_eq!(w.filename_at(ts_daily()), "audit-2026-04-25.log");
+    }
+
+    #[test]
+    fn monthly_writes_to_period_file() {
+        let dir = TempDir::new().unwrap();
+        let w = AuditWriter::new(dir.path(), RotateMode::Monthly);
+        let now = ts_monthly();
+        w.write_at(&make_entry("personal", "archive_thread", "applied"), now);
+        let path = dir.path().join("audit/audit-2026-04.log");
+        assert!(path.exists(), "expected monthly file: {path:?}");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"archive_thread\""));
+    }
+
+    #[test]
+    fn weekly_writes_to_period_file() {
+        let dir = TempDir::new().unwrap();
+        let w = AuditWriter::new(dir.path(), RotateMode::Weekly);
+        let now = ts_weekly();
+        w.write_at(&make_entry("work", "trash_thread", "applied"), now);
+        let path = dir.path().join("audit/audit-2026-W17.log");
+        assert!(path.exists(), "expected weekly file: {path:?}");
+    }
+
+    #[test]
+    fn daily_writes_to_period_file() {
+        let dir = TempDir::new().unwrap();
+        let w = AuditWriter::new(dir.path(), RotateMode::Daily);
+        let now = ts_daily();
+        w.write_at(&make_entry("work", "archive_thread", "applied"), now);
+        let path = dir.path().join("audit/audit-2026-04-25.log");
+        assert!(path.exists(), "expected daily file: {path:?}");
+    }
+
+    #[test]
+    fn monthly_rotates_across_periods() {
+        let dir = TempDir::new().unwrap();
+        let w = AuditWriter::new(dir.path(), RotateMode::Monthly);
+        let april = Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let may = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+        w.write_at(&make_entry("personal", "archive_thread", "applied"), april);
+        w.write_at(&make_entry("personal", "trash_thread", "applied"), may);
+        assert!(dir.path().join("audit/audit-2026-04.log").exists());
+        assert!(dir.path().join("audit/audit-2026-05.log").exists());
+    }
+
+    #[test]
+    fn weekly_rotates_across_weeks() {
+        let dir = TempDir::new().unwrap();
+        let w = AuditWriter::new(dir.path(), RotateMode::Weekly);
+        // W17: 2026-04-20..2026-04-26
+        let w17 = Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        // W18: 2026-04-27..2026-05-03
+        let w18 = Utc.with_ymd_and_hms(2026, 4, 27, 0, 0, 0).unwrap();
+        w.write_at(&make_entry("a", "get_thread", "applied"), w17);
+        w.write_at(&make_entry("a", "get_thread", "applied"), w18);
+        assert!(dir.path().join("audit/audit-2026-W17.log").exists());
+        assert!(dir.path().join("audit/audit-2026-W18.log").exists());
+    }
+
+    #[test]
+    fn size_rotation_starts_at_seq_1() {
+        let dir = TempDir::new().unwrap();
+        // Use a large limit so no rotation happens in this test.
+        let w = AuditWriter::new(dir.path(), RotateMode::Size(1_000_000));
+        w.write(&make_entry("personal", "archive_thread", "applied"));
+        assert!(dir.path().join("audit/audit-1.log").exists());
+    }
+
+    #[test]
+    fn size_rotation_stays_in_same_file_until_limit() {
+        let dir = TempDir::new().unwrap();
+        // Limit of 1 MB — two writes won't trigger rotation.
+        let w = AuditWriter::new(dir.path(), RotateMode::Size(1_000_000));
+        w.write(&make_entry("a", "archive_thread", "applied"));
+        w.write(&make_entry("b", "trash_thread", "applied"));
+        assert!(dir.path().join("audit/audit-1.log").exists());
+        assert!(!dir.path().join("audit/audit-2.log").exists());
+        let content = std::fs::read_to_string(dir.path().join("audit/audit-1.log")).unwrap();
+        assert_eq!(content.lines().count(), 2);
+    }
+
+    #[test]
+    fn size_rotation_creates_next_file_when_limit_reached() {
+        let dir = TempDir::new().unwrap();
+        // Limit of 1 byte — any write triggers a new file next time.
+        let w = AuditWriter::new(dir.path(), RotateMode::Size(1));
+        w.write(&make_entry("a", "archive_thread", "applied"));
+        w.write(&make_entry("a", "trash_thread", "applied"));
+        assert!(dir.path().join("audit/audit-1.log").exists());
+        assert!(dir.path().join("audit/audit-2.log").exists());
+    }
+
+    #[test]
+    fn parse_seq_filename_accepts_well_formed() {
+        assert_eq!(parse_seq_filename("audit-1.log"), Some(1));
+        assert_eq!(parse_seq_filename("audit-42.log"), Some(42));
+        assert_eq!(parse_seq_filename("audit-100.log"), Some(100));
+    }
+
+    #[test]
+    fn parse_seq_filename_rejects_time_based_names() {
+        // Time-based names must NOT be mistaken for seq files.
+        assert_eq!(parse_seq_filename("audit-2026-04.log"), None);
+        assert_eq!(parse_seq_filename("audit-2026-W17.log"), None);
+        assert_eq!(parse_seq_filename("audit-2026-04-25.log"), None);
+        assert_eq!(parse_seq_filename("personal.jsonl"), None);
+        assert_eq!(parse_seq_filename("audit-.log"), None);
+    }
+
+    // ── write / write_synced + fail-closed semantics ──────────────────────────
+
     #[test]
     fn write_creates_file_and_appends() {
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
 
-        writer.write(&make_entry("personal", "archive_thread", "applied"));
-        writer.write(&make_entry("personal", "trash_thread", "applied"));
+        w.write_at(&make_entry("personal", "archive_thread", "applied"), now);
+        w.write_at(&make_entry("personal", "trash_thread", "applied"), now);
 
-        let path = dir.path().join("audit/personal.jsonl");
+        let path = dir.path().join("audit").join(w.filename_at(now));
         let content = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2);
@@ -513,11 +760,12 @@ mod tests {
     #[test]
     fn each_line_is_valid_json() {
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
 
-        writer.write(&make_entry("work", "modify_thread_labels", "applied"));
+        w.write_at(&make_entry("work", "modify_thread_labels", "applied"), now);
 
-        let path = dir.path().join("audit/work.jsonl");
+        let path = dir.path().join("audit").join(w.filename_at(now));
         let line = std::fs::read_to_string(&path).unwrap();
         let parsed: Value = serde_json::from_str(line.trim()).expect("valid JSON");
         assert_eq!(parsed["tool"], "modify_thread_labels");
@@ -529,10 +777,11 @@ mod tests {
     #[test]
     fn line_does_not_contain_embedded_newlines() {
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
-        writer.write(&make_entry("personal", "archive_thread", "applied"));
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
+        w.write_at(&make_entry("personal", "archive_thread", "applied"), now);
 
-        let path = dir.path().join("audit/personal.jsonl");
+        let path = dir.path().join("audit").join(w.filename_at(now));
         let content = std::fs::read_to_string(&path).unwrap();
         // The file should have exactly one \n (the trailing newline from writeln!)
         assert_eq!(content.matches('\n').count(), 1);
@@ -543,7 +792,8 @@ mod tests {
     #[test]
     fn write_synced_persists_intent_record() {
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
 
         let entry = AuditEntry {
             timestamp: Utc::now(),
@@ -553,13 +803,13 @@ mod tests {
             action: "intent".into(),
             result: "pending".into(),
         };
-        writer
-            .write_synced(&entry)
+        w.write_synced_at(&entry, now)
             .expect("synced write should succeed");
 
         // Intent record durable on disk before we return — that's the
         // trust property under test.
-        let line = std::fs::read_to_string(dir.path().join("audit/personal.jsonl")).unwrap();
+        let path = dir.path().join("audit").join(w.filename_at(now));
+        let line = std::fs::read_to_string(path).unwrap();
         let parsed: Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(parsed["action"], "intent");
         assert_eq!(parsed["result"], "pending");
@@ -572,7 +822,7 @@ mod tests {
         // guard, which we treat as a synthetic I/O failure — the
         // destructive op must refuse rather than swallow.
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
         let entry = AuditEntry {
             timestamp: Utc::now(),
             account: "../escape".into(),
@@ -581,7 +831,7 @@ mod tests {
             action: "intent".into(),
             result: "pending".into(),
         };
-        let err = writer.write_synced(&entry).expect_err("must fail closed");
+        let err = w.write_synced(&entry).expect_err("must fail closed");
         assert!(matches!(err, crate::error::Error::Internal { .. }));
     }
 
@@ -602,7 +852,7 @@ mod tests {
         perms.set_mode(0o500); // r-x — no write
         std::fs::set_permissions(&audit_dir, perms).unwrap();
 
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
         let entry = AuditEntry {
             timestamp: Utc::now(),
             account: "personal".into(),
@@ -611,7 +861,7 @@ mod tests {
             action: "intent".into(),
             result: "pending".into(),
         };
-        let result = writer.write_synced(&entry);
+        let result = w.write_synced(&entry);
 
         // Restore perms so TempDir's Drop can clean up regardless.
         let audit_dir = dir.path().join("audit");
@@ -624,21 +874,28 @@ mod tests {
     }
 
     #[test]
-    fn separate_accounts_use_separate_files() {
+    fn separate_accounts_go_to_same_rotation_file() {
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
 
-        writer.write(&make_entry("personal", "archive_thread", "applied"));
-        writer.write(&make_entry("work", "trash_thread", "applied"));
+        w.write_at(&make_entry("personal", "archive_thread", "applied"), now);
+        w.write_at(&make_entry("work", "trash_thread", "applied"), now);
 
-        assert!(dir.path().join("audit/personal.jsonl").exists());
-        assert!(dir.path().join("audit/work.jsonl").exists());
+        // Both accounts land in the same monthly file (account disambiguated
+        // by the `account` field in each JSONL line).
+        let path = dir.path().join("audit").join(w.filename_at(now));
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"personal\""));
+        assert!(content.contains("\"work\""));
     }
 
     #[test]
     fn dry_run_entries_recorded() {
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
 
         let entry = AuditEntry {
             timestamp: Utc::now(),
@@ -648,9 +905,9 @@ mod tests {
             action: "dry_run".into(),
             result: "ok".into(),
         };
-        writer.write(&entry);
+        w.write_at(&entry, now);
 
-        let path = dir.path().join("audit/personal.jsonl");
+        let path = dir.path().join("audit").join(w.filename_at(now));
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("\"dry_run\""));
         assert!(content.contains("\"action\":\"dry_run\""));
@@ -974,10 +1231,11 @@ mod tests {
     fn file_created_with_mode_0600() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
-        writer.write(&make_entry("personal", "archive_thread", "applied"));
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
+        w.write_at(&make_entry("personal", "archive_thread", "applied"), now);
 
-        let path = dir.path().join("audit/personal.jsonl");
+        let path = dir.path().join("audit").join(w.filename_at(now));
         let meta = std::fs::metadata(&path).unwrap();
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "audit file should be 0600, got {mode:o}");
@@ -1025,36 +1283,45 @@ mod tests {
     #[test]
     fn rejects_relative_traversal_no_file_created() {
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
 
-        writer.write(&make_entry("../etc/x", "archive_thread", "applied"));
+        w.write_at(&make_entry("../etc/x", "archive_thread", "applied"), now);
 
-        // Neither the bogus traversal path nor the audit_dir's own file should exist.
+        // The traversal attempt must not create any file outside audit_dir.
         assert!(
-            !dir.path().join("etc/x.jsonl").exists(),
+            !dir.path().join("etc/x.log").exists(),
             "traversal must not write outside audit_dir"
         );
-        assert!(
-            !dir.path().join("audit/../etc/x.jsonl").exists(),
-            "traversal must not resolve into audit_dir"
-        );
+        // And nothing in the audit dir either (validator fired before I/O).
+        let audit_dir = dir.path().join("audit");
+        if audit_dir.exists() {
+            let entries: Vec<_> = std::fs::read_dir(&audit_dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect();
+            assert!(
+                entries.is_empty(),
+                "traversal must not create any file in audit_dir; got {entries:?}"
+            );
+        }
     }
 
     #[test]
     fn rejects_absolute_path_no_file_created() {
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
 
         // The dangerous shape — `PathBuf::join("/tmp/x")` discards the base.
         // The validator must catch this before `join` is reached.
-        writer.write(&make_entry(
-            "/tmp/pwn-test-audit",
-            "archive_thread",
-            "applied",
-        ));
+        w.write_at(
+            &make_entry("/tmp/pwn-test-audit", "archive_thread", "applied"),
+            now,
+        );
 
         assert!(
-            !std::path::Path::new("/tmp/pwn-test-audit.jsonl").exists(),
+            !std::path::Path::new("/tmp/pwn-test-audit.log").exists(),
             "absolute-path account must not create a file outside audit_dir"
         );
     }
@@ -1062,11 +1329,13 @@ mod tests {
     #[test]
     fn rejects_empty_account_no_file_created() {
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
 
-        writer.write(&make_entry("", "archive_thread", "applied"));
+        w.write_at(&make_entry("", "archive_thread", "applied"), now);
 
-        // Audit dir may be created, but no `.jsonl` should land in it.
+        // Audit dir may be created (create_dir_all runs first), but no log
+        // file should be written — the validator fires before the file open.
         let audit_dir = dir.path().join("audit");
         if audit_dir.exists() {
             let entries: Vec<_> = std::fs::read_dir(&audit_dir)
@@ -1083,12 +1352,13 @@ mod tests {
     #[test]
     fn rejects_path_separator_no_file_created() {
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
 
-        writer.write(&make_entry("a/b", "archive_thread", "applied"));
+        w.write_at(&make_entry("a/b", "archive_thread", "applied"), now);
 
         assert!(
-            !dir.path().join("audit/a/b.jsonl").exists(),
+            !dir.path().join("audit/a/b.log").exists(),
             "path-separator account must not create nested file"
         );
     }
@@ -1096,9 +1366,10 @@ mod tests {
     #[test]
     fn rejects_null_byte_no_file_created() {
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
 
-        writer.write(&make_entry("a\x00b", "archive_thread", "applied"));
+        w.write_at(&make_entry("a\x00b", "archive_thread", "applied"), now);
 
         // Null byte would fail at the OS layer anyway, but the validator catches it first.
         let audit_dir = dir.path().join("audit");
@@ -1118,10 +1389,11 @@ mod tests {
     fn valid_account_still_writes_after_validator_added() {
         // Regression guard: the validator must not break the happy path.
         let dir = TempDir::new().unwrap();
-        let writer = AuditWriter::new(dir.path());
-        writer.write(&make_entry("work-1_personal", "send_email", "applied"));
+        let w = monthly_writer(&dir);
+        let now = ts_monthly();
+        w.write_at(&make_entry("work-1_personal", "send_email", "applied"), now);
 
-        let path = dir.path().join("audit/work-1_personal.jsonl");
+        let path = dir.path().join("audit").join(w.filename_at(now));
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("\"send_email\""));
