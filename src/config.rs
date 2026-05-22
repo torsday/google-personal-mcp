@@ -1246,7 +1246,7 @@ mod tests {
     #[test]
     fn rotate_mode_rejects_unknown_values() {
         assert!(RotateMode::try_from("hourly".to_owned()).is_err());
-        assert!(RotateMode::try_from("".to_owned()).is_err());
+        assert!(RotateMode::try_from(String::new()).is_err());
         assert!(RotateMode::try_from("size:abc".to_owned()).is_err());
         assert!(RotateMode::try_from("size:0".to_owned()).is_err());
         assert!(RotateMode::try_from("size:-1".to_owned()).is_err());
