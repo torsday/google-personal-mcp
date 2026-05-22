@@ -67,6 +67,11 @@ quota:
     @echo "Per-user-per-minute cap: 6,000 units"
     @echo "Per-project-per-minute cap: 1,200,000 units"
 
+# Run all criterion benchmarks (#90; ADR-0008 §SLOs)
+bench:
+    cargo bench --bench mime_parsing
+    cargo bench --bench tool_latency
+
 # Coverage (local only — no CI gate per ADR-0007)
 coverage:
     cargo llvm-cov --all-features --workspace
