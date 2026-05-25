@@ -1,3 +1,4 @@
+pub(crate) mod attachments;
 pub(crate) mod client;
 pub(crate) mod compose;
 pub(crate) mod history;

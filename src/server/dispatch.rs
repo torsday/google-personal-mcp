@@ -17,8 +17,9 @@ use rmcp::RoleServer;
 use crate::audit::AuditEntry;
 use crate::error;
 use crate::tools::{
-    archive, audit_summary, cache_invalidate, cache_status, fanout, get_thread, list_accounts,
-    list_attachments, list_labels, mcp_status, modify_labels, search_threads, trash,
+    archive, audit_summary, cache_invalidate, cache_status, download_attachment, fanout,
+    get_thread, list_accounts, list_attachments, list_labels, mcp_status, modify_labels,
+    search_threads, trash,
 };
 
 use super::args::{
@@ -222,6 +223,65 @@ impl GoogleServer {
                     .await
                     .map_err(|e| error::to_mcp_error(&e))
                     .and_then(|out| ok_result("list_attachments serialize", &out))
+            }
+
+            "download_attachment" => {
+                let account = extract_string_arg(&request, "account")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not supported for `download_attachment` \
+                         — attachment IDs are per-account; pass a single account alias",
+                        None,
+                    ));
+                }
+                let message_id = extract_string_arg(&request, "message_id")?;
+                let attachment_id = extract_string_arg(&request, "attachment_id")?;
+                let mime_type = extract_string_arg(&request, "mime_type")?;
+                let save_to = extract_optional_string_arg(&request, "save_to")
+                    .filter(|s| !s.is_empty())
+                    .map(std::path::PathBuf::from);
+                let save_to_for_audit = save_to
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+
+                let result = download_attachment::download_attachment(
+                    &self.gmail,
+                    download_attachment::DownloadAttachmentInput {
+                        account: account.clone(),
+                        message_id,
+                        attachment_id: attachment_id.clone(),
+                        mime_type: mime_type.clone(),
+                        save_to,
+                    },
+                )
+                .await;
+
+                // ADR-0011 lines 67 (redaction row) — emit one audit
+                // row per call. The Gmail-side operation is read-only,
+                // so no pre-call `intent`; the file write is local-only
+                // and best captured in the same `applied` row.
+                let size_bytes = result.as_ref().map_or(0, |o| o.size_bytes);
+                self.audit.write(&AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    account: account.clone(),
+                    tool: "download_attachment".into(),
+                    params_summary: crate::audit::summarize_download_attachment(
+                        &attachment_id,
+                        &mime_type,
+                        size_bytes,
+                        &save_to_for_audit,
+                    ),
+                    action: "applied".into(),
+                    result: match &result {
+                        Ok(_) => "ok".into(),
+                        Err(e) => format!("error: {e}"),
+                    },
+                });
+
+                result
+                    .map_err(|e| error::to_mcp_error(&e))
+                    .and_then(|out| ok_result("download_attachment serialize", &out))
             }
 
             "cache_status" => {

@@ -324,6 +324,50 @@ fn cache_invalidate_descriptor() -> Tool {
     t
 }
 
+fn download_attachment_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "download_attachment".into();
+    t.description = Some(
+        "Fetch the bytes of one Gmail attachment by `(message_id, attachment_id)`. \
+         Two delivery modes: \
+         (1) `save_to` set — writes the decoded bytes to that path (mode 0600); \
+         refuses to overwrite an existing file. \
+         (2) `save_to` omitted — returns `data_base64` (URL-safe, no padding). \
+         Use `list_attachments` (sibling tool) to discover the IDs and MIME type \
+         first. Cost: `attachments.get` = 5 quota units per call. \
+         The audit log records `attachment_id`, `mime_type`, `size_bytes`, and \
+         `save_to` per ADR-0011."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {
+                "type": "string",
+                "description": "The account alias from accounts.toml."
+            },
+            "message_id": {
+                "type": "string",
+                "description": "Gmail message ID hosting the attachment (NOT the thread ID)."
+            },
+            "attachment_id": {
+                "type": "string",
+                "description": "Gmail attachment ID, typically from `list_attachments`."
+            },
+            "mime_type": {
+                "type": "string",
+                "description": "MIME type from a prior `list_attachments` call. Recorded in the audit log; not validated."
+            },
+            "save_to": {
+                "type": "string",
+                "description": "Optional absolute path to write the bytes to (mode 0600). Refuses to overwrite. Omit to receive bytes as `data_base64` instead."
+            }
+        },
+        "required": ["account", "message_id", "attachment_id", "mime_type"]
+    }));
+    t
+}
+
 fn list_attachments_descriptor() -> Tool {
     let mut t = Tool::default();
     t.name = "list_attachments".into();
@@ -524,6 +568,7 @@ pub(crate) fn registered_tools() -> Vec<Tool> {
         search_threads_descriptor(),
         get_thread_descriptor(),
         list_attachments_descriptor(),
+        download_attachment_descriptor(),
         cache_status_descriptor(),
         cache_invalidate_descriptor(),
         archive_thread_descriptor(),
