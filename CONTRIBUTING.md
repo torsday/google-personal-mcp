@@ -38,6 +38,33 @@ just check
 This runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo nextest run`, and `cargo deny check` — same checks as CI.
 
+### Binary size (Streamable HTTP transport — #72)
+
+Per [ADR-0003](docs/adr/0003-transport-stdio-and-streamable-http.md), the
+default build links **both** `rmcp` `transport-io` and
+`transport-streamable-http-server`. Linking the HTTP server pulls in
+`axum`, `tower`, and a server-side `hyper` stack — roughly **+5 MiB** to
+the release binary on `aarch64-apple-darwin`. Reference figures
+(`cargo build --release`):
+
+| Build                                | Approx. size |
+|--------------------------------------|--------------|
+| Default (`transport-io` + HTTP)      | ~18 MiB      |
+| Pre-HTTP baseline (`transport-io`)   | ~13 MiB      |
+
+Operators who only need stdio (the local Claude-Desktop pattern) can
+shrink the binary by disabling the HTTP feature:
+
+```sh
+cargo build --release --no-default-features \
+  --features "rmcp/server,rmcp/macros,rmcp/transport-io,rmcp/schemars"
+```
+
+The CLI still accepts `--http <addr>` in such a build, but the call
+will fail at link time since the `streamable_http_server` module isn't
+compiled in. Most VPS deployments want the full default; this knob
+exists for size-sensitive distributions and CI smoke binaries.
+
 ---
 
 ## Per-contributor GCP setup
