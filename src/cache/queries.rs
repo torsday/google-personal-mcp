@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_rusqlite::Connection;
@@ -313,11 +314,20 @@ pub(super) async fn lookup_query(
     let hash = query_hash(query, max_results, page_token);
     let now = now_ms();
 
+    // ADR-0009 §"Race-prevention": a row is honored only if its
+    // `fetched_at_history_id` is not older than the current account
+    // watermark. NULL watermark (fresh account) compares as 0, so any
+    // row with fetched_at_history_id = 0 still hits — first-touch
+    // hasn't seeded a real watermark yet.
     let raw: Option<String> = conn
         .call(move |c| -> rusqlite::Result<Option<String>> {
             c.query_row(
-                "SELECT result_ids_json FROM query_cache \
-                 WHERE query_hash = ?1 AND expires_at > ?2",
+                "SELECT q.result_ids_json FROM query_cache q \
+                 WHERE q.query_hash = ?1 \
+                   AND q.expires_at > ?2 \
+                   AND q.fetched_at_history_id \
+                       >= COALESCE((SELECT last_history_id FROM account_state \
+                                    WHERE rowid = 1), 0)",
                 rusqlite::params![hash, now],
                 |row| row.get::<_, String>(0),
             )
@@ -349,6 +359,17 @@ pub(super) async fn lookup_query(
     }))
 }
 
+/// Outcome of an [`insert_query`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InsertQueryOutcome {
+    /// Row was persisted with the supplied snapshot watermark.
+    Persisted,
+    /// `last_history_id` advanced past `fetched_at_history_id` during the
+    /// API round-trip; the write was discarded to avoid serving stale
+    /// data. `gmcp_cache_write_discarded_total` should be bumped.
+    DiscardedStale,
+}
+
 pub(super) async fn insert_query(
     conn: &Arc<Connection>,
     query: &str,
@@ -356,7 +377,8 @@ pub(super) async fn insert_query(
     page_token: Option<&str>,
     result: &RawThreadsList,
     ttl: Duration,
-) -> Result<(), Error> {
+    fetched_at_history_id: i64,
+) -> Result<InsertQueryOutcome, Error> {
     let hash = query_hash(query, max_results, page_token);
     let payload = QueryResultJson {
         threads: result
@@ -380,16 +402,35 @@ pub(super) async fn insert_query(
     let token_owned = page_token.map(str::to_owned);
     let max_results_i64 = i64::from(max_results);
 
-    conn.call(move |c| -> rusqlite::Result<()> {
+    conn.call(move |c| -> rusqlite::Result<InsertQueryOutcome> {
+        // ADR-0009 §"Race-prevention": compare the snapshot watermark
+        // (captured before the upstream API call) against the
+        // current watermark (which a background sync may have advanced
+        // during the round-trip). If advanced, discard — the row would
+        // be serving data older than the cache already knows about.
+        let current: Option<i64> = c
+            .query_row(
+                "SELECT last_history_id FROM account_state WHERE rowid = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        if let Some(curr) = current {
+            if curr > fetched_at_history_id {
+                return Ok(InsertQueryOutcome::DiscardedStale);
+            }
+        }
         c.execute(
             "INSERT INTO query_cache \
                 (query_hash, query, max_results, page_token, result_ids_json, \
-                 cached_at, expires_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 cached_at, expires_at, fetched_at_history_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
              ON CONFLICT(query_hash) DO UPDATE SET \
                 result_ids_json = excluded.result_ids_json, \
                 cached_at = excluded.cached_at, \
-                expires_at = excluded.expires_at",
+                expires_at = excluded.expires_at, \
+                fetched_at_history_id = excluded.fetched_at_history_id",
             rusqlite::params![
                 hash,
                 query_owned,
@@ -397,14 +438,14 @@ pub(super) async fn insert_query(
                 token_owned,
                 json,
                 now,
-                expires_at
+                expires_at,
+                fetched_at_history_id,
             ],
         )?;
-        Ok(())
+        Ok(InsertQueryOutcome::Persisted)
     })
     .await
-    .map_err(map_tokio_err)?;
-    Ok(())
+    .map_err(map_tokio_err)
 }
 
 // ── history watermark + delta application (Phase 3) ───────────────────────────
@@ -1029,7 +1070,7 @@ mod tests {
             next_page_token: Some("pg2".into()),
         };
         cache
-            .insert_query("work", "from:alice", 10, None, &result)
+            .insert_query("work", "from:alice", 10, None, &result, 0)
             .await
             .expect("insert");
 
@@ -1054,7 +1095,7 @@ mod tests {
             next_page_token: None,
         };
         cache
-            .insert_query("work", "is:unread", 25, None, &result)
+            .insert_query("work", "is:unread", 25, None, &result, 0)
             .await
             .expect("insert");
 
@@ -1108,7 +1149,7 @@ mod tests {
             next_page_token: None,
         };
         cache
-            .insert_query("work", "stale", 5, None, &result)
+            .insert_query("work", "stale", 5, None, &result, 0)
             .await
             .expect("insert");
         let got = cache
@@ -1298,6 +1339,7 @@ mod tests {
                     threads: vec![],
                     next_page_token: None,
                 },
+                0,
             )
             .await
             .expect("insert");
@@ -1343,6 +1385,7 @@ mod tests {
                     threads: vec![],
                     next_page_token: None,
                 },
+                0,
             )
             .await
             .expect("seed query");
@@ -1390,5 +1433,130 @@ mod tests {
 
         let id = cache.last_history_id("work").await.expect("read");
         assert_eq!(id, Some(9999), "watermark advanced to the reseed value");
+    }
+
+    // ── Phase 4 race-prevention tests (#81) ──────────────────────────────────
+
+    fn empty_list() -> RawThreadsList {
+        RawThreadsList {
+            threads: vec![],
+            next_page_token: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn lookup_query_refuses_row_older_than_current_watermark() {
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        // Cache a row at watermark 100.
+        cache
+            .insert_query("work", "q", 10, None, &empty_list(), 100)
+            .await
+            .expect("insert");
+        assert!(
+            cache
+                .lookup_query("work", "q", 10, None)
+                .await
+                .expect("lookup")
+                .is_some(),
+            "row fresh against current watermark 0 → hit",
+        );
+        // Advance watermark past the row's snapshot — Gmail-side mutated.
+        cache.set_last_history_id("work", 200).await.expect("bump");
+        assert!(
+            cache
+                .lookup_query("work", "q", 10, None)
+                .await
+                .expect("lookup")
+                .is_none(),
+            "row at fetched_at_history_id=100 must not hit when watermark=200",
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_query_hits_when_row_equals_current_watermark() {
+        // Boundary check — equal-watermark rows are still fresh.
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        cache.set_last_history_id("work", 500).await.expect("seed");
+        cache
+            .insert_query("work", "q", 10, None, &empty_list(), 500)
+            .await
+            .expect("insert");
+        assert!(
+            cache
+                .lookup_query("work", "q", 10, None)
+                .await
+                .expect("lookup")
+                .is_some(),
+            "fetched_at_history_id == last_history_id must hit",
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_query_discards_when_watermark_advanced_during_fetch() {
+        // Concurrent advance race: GmailService snapshots the watermark at
+        // T0 (= 100). Before the upstream API returns, the background
+        // sync applies a delta and advances the watermark to 200. The
+        // insert at T1 must be discarded.
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        cache
+            .set_last_history_id("work", 100)
+            .await
+            .expect("seed initial");
+        // Snapshot = 100 (what GmailService would have captured).
+        // Simulate background sync advancing the watermark mid-flight.
+        cache
+            .set_last_history_id("work", 200)
+            .await
+            .expect("concurrent advance");
+        let outcome = cache
+            .insert_query("work", "q", 10, None, &empty_list(), 100)
+            .await
+            .expect("insert");
+        assert_eq!(outcome, InsertQueryOutcome::DiscardedStale);
+        assert_eq!(cache.metrics().write_discarded(), 1);
+        // No row was persisted.
+        assert!(cache
+            .lookup_query("work", "q", 10, None)
+            .await
+            .expect("lookup")
+            .is_none(),);
+    }
+
+    #[tokio::test]
+    async fn insert_query_persists_when_watermark_unchanged() {
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        cache.set_last_history_id("work", 100).await.expect("seed");
+        let outcome = cache
+            .insert_query("work", "q", 10, None, &empty_list(), 100)
+            .await
+            .expect("insert");
+        assert_eq!(outcome, InsertQueryOutcome::Persisted);
+        assert_eq!(cache.metrics().write_discarded(), 0);
+    }
+
+    #[tokio::test]
+    async fn insert_query_persists_when_no_watermark_yet() {
+        // First-touch hasn't run yet — last_history_id is NULL. Snapshot
+        // of 0 is valid; no advance is possible from NULL → discard
+        // would be wrong.
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        let outcome = cache
+            .insert_query("work", "q", 10, None, &empty_list(), 0)
+            .await
+            .expect("insert");
+        assert_eq!(outcome, InsertQueryOutcome::Persisted);
+        assert!(
+            cache
+                .lookup_query("work", "q", 10, None)
+                .await
+                .expect("lookup")
+                .is_some(),
+            "row inserted at watermark 0 hits when watermark is still NULL",
+        );
     }
 }
