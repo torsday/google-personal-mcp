@@ -1,6 +1,8 @@
 pub(crate) mod client;
 pub(crate) mod compose;
+pub(crate) mod history;
 pub(crate) mod mime;
+pub(crate) mod profile;
 pub(crate) mod quota;
 pub(crate) mod send_email;
 pub(crate) mod service;

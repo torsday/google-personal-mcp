@@ -27,6 +27,7 @@
 use std::sync::Arc;
 
 use crate::auth::tokens::RefreshTransport;
+use crate::cache::sync::HistorySync;
 use crate::cache::Cache;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
@@ -37,22 +38,60 @@ use crate::gmail::threads::{self as threads_api, ParsedThread, RawThreadsList, T
 pub(crate) struct GmailService<T: RefreshTransport> {
     client: Arc<GmailClient<T>>,
     cache: Option<Arc<Cache>>,
+    history_sync: Option<Arc<HistorySync<T>>>,
+    /// When `true`, every cacheable read calls `HistorySync::sync_account`
+    /// before consulting the cache. Cheap when caught up (one
+    /// `history.list` call returning empty `history[]`); expensive only
+    /// when a real backlog of events exists. Per [ADR-0009] §"Sync
+    /// protocol" and the `[cache] sync_on_read` config flag.
+    ///
+    /// [ADR-0009]: ../../docs/adr/0009-caching-with-sqlite-and-history-api.md
+    sync_on_read: bool,
 }
 
 impl<T: RefreshTransport> std::fmt::Debug for GmailService<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GmailService")
             .field("cache", &self.cache.as_ref().map(|_| "Some(Cache)"))
+            .field(
+                "history_sync",
+                &self.history_sync.as_ref().map(|_| "Some(HistorySync)"),
+            )
+            .field("sync_on_read", &self.sync_on_read)
             .finish_non_exhaustive()
     }
 }
 
+// Non-`'static` surface — constructor + passthrough accessors. Tools that
+// only consume `client()` / `client_arc()` keep their existing
+// `T: RefreshTransport` bounds and don't take on a `'static` bound.
 impl<T: RefreshTransport> GmailService<T> {
     /// Build a service wrapping `client`, optionally backed by `cache`.
-    /// `lib::run_server` supplies `Some(_)` when `[cache] enabled = true`
-    /// is set in `config.toml` (off by default through v0.x).
+    /// Use [`Self::with_history_sync`] to attach the Phase 3 sync driver
+    /// after construction. `lib::run_server` is the canonical caller;
+    /// tests typically pass `None`.
     pub(crate) const fn new(client: Arc<GmailClient<T>>, cache: Option<Arc<Cache>>) -> Self {
-        Self { client, cache }
+        Self {
+            client,
+            cache,
+            history_sync: None,
+            sync_on_read: false,
+        }
+    }
+
+    /// Attach the Phase 3 history-sync driver. When `sync_on_read` is
+    /// `true`, every cacheable read calls `HistorySync::sync_account`
+    /// before consulting the cache. Returns `self` so callers can chain
+    /// off `new(...)`.
+    #[must_use]
+    pub(crate) fn with_history_sync(
+        mut self,
+        history_sync: Arc<HistorySync<T>>,
+        sync_on_read: bool,
+    ) -> Self {
+        self.history_sync = Some(history_sync);
+        self.sync_on_read = sync_on_read;
+        self
     }
 
     /// Borrow the underlying HTTP client. Tools that hit endpoints with no
@@ -69,6 +108,35 @@ impl<T: RefreshTransport> GmailService<T> {
     pub(crate) fn client_arc(&self) -> Arc<GmailClient<T>> {
         Arc::clone(&self.client)
     }
+}
+
+// `'static` surface — the cache-aware reads. `tokio::spawn` inside
+// `HistorySync::sync_account`'s future requires `T: 'static`, and the
+// borrow checker propagates that to every method that awaits a future
+// referencing `self.history_sync`. Tools that call `get_thread`,
+// `list_threads`, or `get_thread_metadata` therefore carry
+// `T: RefreshTransport + 'static` themselves (most already do, since
+// they also need `Send + Sync` for fan-out).
+impl<T: RefreshTransport + 'static> GmailService<T> {
+    async fn maybe_sync(&self, account: &str) {
+        if !self.sync_on_read {
+            return;
+        }
+        let Some(sync) = self.history_sync.as_ref() else {
+            return;
+        };
+        if let Err(e) = sync.sync_account(account).await {
+            // sync_on_read is best-effort: a failed sync degrades to
+            // serving the (possibly stale) cached data rather than
+            // failing the user's tool call. The background loop will
+            // retry on its next tick.
+            tracing::warn!(
+                account = account,
+                error = %e,
+                "sync_on_read failed; proceeding with cached data",
+            );
+        }
+    }
 
     /// Fetch one thread (`threads.get(format=FULL)`, 40 quota units).
     ///
@@ -81,6 +149,7 @@ impl<T: RefreshTransport> GmailService<T> {
         account: &str,
         thread_id: &str,
     ) -> Result<ParsedThread, Error> {
+        self.maybe_sync(account).await;
         if let Some(cache) = &self.cache {
             if let Some(hit) = cache.lookup_thread(account, thread_id).await? {
                 cache.metrics().record_hit(account, "thread");
@@ -108,6 +177,7 @@ impl<T: RefreshTransport> GmailService<T> {
         max_results: u32,
         page_token: Option<&str>,
     ) -> Result<RawThreadsList, Error> {
+        self.maybe_sync(account).await;
         if let Some(cache) = &self.cache {
             if let Some(hit) = cache
                 .lookup_query(account, query, max_results, page_token)
@@ -141,6 +211,7 @@ impl<T: RefreshTransport> GmailService<T> {
         account: &str,
         thread_id: &str,
     ) -> Result<ThreadMetadata, Error> {
+        self.maybe_sync(account).await;
         if let Some(cache) = &self.cache {
             if let Some(hit) = cache.lookup_thread_metadata(account, thread_id).await? {
                 cache.metrics().record_hit(account, "thread_metadata");

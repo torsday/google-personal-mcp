@@ -244,32 +244,18 @@ fn run_serve_blocking() -> Result<(), Error> {
     let gmail_base = "https://gmail.googleapis.com/gmail/v1";
     let gmail_client = Arc::new(GmailClient::new(gmail_base, tokens.clone(), http_client));
 
-    // Phase 2 (#150): construct the per-account SQLite cache when the
-    // operator has opted in via `[cache] enabled = true`. The default is
-    // `false` through v0.x per docs/cache-implementation-plan.md;
-    // maintainer dogfooding is the only intended `true` use case until the
-    // history-sync loop (#80) and race prevention (#81) land.
-    let cache = if cfg.cache.enabled {
-        let account_aliases: Vec<String> = loaded_accounts
-            .accounts
-            .iter()
-            .map(|a| a.alias.clone())
-            .collect();
-        let cache = runtime.block_on(cache::Cache::new(
-            cfg.cache.dir.clone(),
-            &account_aliases,
-            std::time::Duration::from_secs(cfg.cache.query_ttl_seconds),
-        ))?;
-        tracing::info!(
-            accounts = account_aliases.len(),
-            dir = %cfg.cache.dir.display(),
-            "cache enabled — staged default during build-out; see docs/cache-implementation-plan.md",
-        );
-        Some(Arc::new(cache))
-    } else {
-        None
+    let CacheWiring {
+        cache,
+        history_sync,
+        sync_handles,
+    } = build_cache_wiring(&cfg, &loaded_accounts, &gmail_client, &runtime)?;
+    let gmail = {
+        let mut service = GmailService::new(gmail_client, cache);
+        if let Some(sync) = history_sync {
+            service = service.with_history_sync(sync, cfg.cache.sync_on_read);
+        }
+        Arc::new(service)
     };
-    let gmail = Arc::new(GmailService::new(gmail_client, cache));
 
     let accounts = Arc::new(loaded_accounts.accounts);
     let audit = AuditWriter::new(&dir, cfg.audit.rotate.clone());
@@ -314,7 +300,85 @@ fn run_serve_blocking() -> Result<(), Error> {
 
     let server = GoogleServer::new(accounts, tokens, gmail, audit, verbosity);
 
+    // Hold the cache-sync handles for the lifetime of the daemon — drop
+    // aborts the background tasks, which is what we want at shutdown.
+    let _sync_handles = sync_handles;
+
     runtime.block_on(run_stdio(server))
+}
+
+/// Bundle returned from [`build_cache_wiring`] — owns the cache and the
+/// sync driver (when enabled) plus the background-task handles. Keeps
+/// [`run_serve_blocking`] short enough to clear the clippy 100-line
+/// threshold; the wiring decisions live here instead.
+struct CacheWiring {
+    cache: Option<Arc<cache::Cache>>,
+    history_sync: Option<Arc<cache::sync::HistorySync<ReqwestRefreshTransport>>>,
+    sync_handles: Vec<cache::sync::SyncHandle>,
+}
+
+/// Construct the per-account `SQLite` cache (Phase 2 #150) and spawn the
+/// background history-sync tasks (Phase 3 #80) when the operator has
+/// opted in via `[cache] enabled = true`. Returns an empty wiring when
+/// the cache is disabled.
+fn build_cache_wiring(
+    cfg: &config::Config,
+    loaded_accounts: &config::Accounts,
+    gmail_client: &Arc<GmailClient<ReqwestRefreshTransport>>,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<CacheWiring, Error> {
+    if !cfg.cache.enabled {
+        return Ok(CacheWiring {
+            cache: None,
+            history_sync: None,
+            sync_handles: Vec::new(),
+        });
+    }
+    let account_aliases: Vec<String> = loaded_accounts
+        .accounts
+        .iter()
+        .map(|a| a.alias.clone())
+        .collect();
+    let cache = Arc::new(runtime.block_on(cache::Cache::new(
+        cfg.cache.dir.clone(),
+        &account_aliases,
+        std::time::Duration::from_secs(cfg.cache.query_ttl_seconds),
+    ))?);
+    tracing::info!(
+        accounts = account_aliases.len(),
+        dir = %cfg.cache.dir.display(),
+        "cache enabled — staged default during build-out; see docs/cache-implementation-plan.md",
+    );
+
+    let interval = std::time::Duration::from_secs(cfg.cache.background_sync_interval_seconds);
+    let history_sync = Arc::new(cache::sync::HistorySync::new(
+        Arc::clone(&cache),
+        Arc::clone(gmail_client),
+        interval,
+    ));
+    let mut sync_handles: Vec<cache::sync::SyncHandle> = Vec::new();
+    for alias in &account_aliases {
+        if let Some(h) = history_sync.spawn_for(alias.clone()) {
+            sync_handles.push(h);
+        }
+    }
+    if !sync_handles.is_empty() {
+        tracing::info!(
+            accounts = sync_handles.len(),
+            interval_secs = cfg.cache.background_sync_interval_seconds,
+            "spawned per-account history-sync tasks",
+        );
+    } else if cfg.cache.background_sync_interval_seconds == 0 {
+        tracing::info!(
+            "background_sync_interval_seconds = 0 — \
+             history sync runs only on-demand via sync_on_read",
+        );
+    }
+    Ok(CacheWiring {
+        cache: Some(cache),
+        history_sync: Some(history_sync),
+        sync_handles,
+    })
 }
 
 /// Read each registered account's persisted [`TokenState`] from `store`. Emits
