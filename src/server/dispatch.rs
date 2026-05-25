@@ -17,8 +17,8 @@ use rmcp::RoleServer;
 use crate::audit::AuditEntry;
 use crate::error;
 use crate::tools::{
-    archive, audit_summary, fanout, get_thread, list_accounts, list_labels, mcp_status,
-    modify_labels, search_threads, trash,
+    archive, audit_summary, fanout, get_thread, list_accounts, list_attachments, list_labels,
+    mcp_status, modify_labels, search_threads, trash,
 };
 
 use super::args::{
@@ -204,6 +204,24 @@ impl GoogleServer {
                     .await
                     .map_err(|e| error::to_mcp_error(&e))
                     .and_then(|out| ok_result("get_thread serialize", &out))
+            }
+
+            "list_attachments" => {
+                let account = extract_string_arg(&request, "account")?;
+                if account == fanout::FANOUT_MARKER {
+                    // Thread IDs are per-account (same constraint as
+                    // `get_thread`); cross-account fan-out is meaningless.
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not supported for `list_attachments` \
+                         — thread IDs are per-account; pass a single account alias",
+                        None,
+                    ));
+                }
+                let thread_id = extract_string_arg(&request, "thread_id")?;
+                list_attachments::list_attachments(&self.gmail, &account, &thread_id)
+                    .await
+                    .map_err(|e| error::to_mcp_error(&e))
+                    .and_then(|out| ok_result("list_attachments serialize", &out))
             }
 
             "archive_thread" => {
