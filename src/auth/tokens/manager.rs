@@ -184,7 +184,16 @@ impl<T: RefreshTransport> TokenManager<T> {
         let body = build_refresh_body(&s.refresh_token, &s.client_id, &s.client_secret);
         let result = self.transport.post_form(&self.token_uri, body).await;
 
-        match result.and_then(|(status, body)| apply_refresh_response(&s, status, &body, account)) {
+        let final_result =
+            result.and_then(|(status, body)| apply_refresh_response(&s, status, &body, account));
+        let outcome_label = refresh_outcome_label(&final_result);
+        metrics::counter!(
+            crate::observability::metrics::names::TOKEN_REFRESHES_TOTAL,
+            "account" => account.to_owned(),
+            "outcome" => outcome_label,
+        )
+        .increment(1);
+        match final_result {
             Ok(new_state) => {
                 self.persist_atomic(account, &new_state).await?;
                 let access = new_state.access_token.clone();
@@ -218,6 +227,20 @@ impl<T: RefreshTransport> TokenManager<T> {
             source: e,
         })?;
         write_atomic_0600(&tmp_path, &final_path, body.as_bytes()).await
+    }
+}
+
+/// Map a refresh attempt's outcome to the `outcome` label used by
+/// `gmcp_token_refreshes_total`. Per ADR-0008: `success` /
+/// `invalid_grant` (terminal — user must re-auth) / `network` /
+/// `upstream` (Google returned non-success that wasn't `invalid_grant`).
+const fn refresh_outcome_label(result: &Result<TokenState, Error>) -> &'static str {
+    match result {
+        Ok(_) => "success",
+        Err(Error::AuthRequired { .. }) => "invalid_grant",
+        Err(Error::Network(_)) => "network",
+        Err(Error::Upstream { .. }) => "upstream",
+        Err(_) => "other",
     }
 }
 

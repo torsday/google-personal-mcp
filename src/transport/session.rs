@@ -90,6 +90,13 @@ impl SessionStore {
         }
         let now = Instant::now();
         map.insert(id, Session::new(now));
+        let active = map.len();
+        drop(map);
+        metrics::gauge!(crate::observability::metrics::names::HTTP_SESSIONS_ACTIVE).set({
+            #[allow(clippy::cast_precision_loss)]
+            let n = active as f64;
+            n
+        });
         true
     }
 
@@ -112,7 +119,21 @@ impl SessionStore {
     /// Returns `true` if a session was removed.
     pub(crate) async fn remove(&self, id: &SessionId) -> bool {
         let mut map = self.inner.lock().await;
-        map.remove(id).is_some()
+        let removed = map.remove(id);
+        let active = map.len();
+        drop(map);
+        if let Some(session) = &removed {
+            metrics::histogram!(
+                crate::observability::metrics::names::HTTP_SESSION_DURATION_SECONDS
+            )
+            .record(session.created_at.elapsed().as_secs_f64());
+        }
+        metrics::gauge!(crate::observability::metrics::names::HTTP_SESSIONS_ACTIVE).set({
+            #[allow(clippy::cast_precision_loss)]
+            let n = active as f64;
+            n
+        });
+        removed.is_some()
     }
 
     /// Snapshot the current session count. Useful for the
@@ -140,8 +161,34 @@ impl SessionStore {
         };
         let mut map = self.inner.lock().await;
         let before = map.len();
-        map.retain(|_, s| s.last_active_at > cutoff);
-        before - map.len()
+        // Record per-session duration before drop so the histogram
+        // observes evicted-by-timeout lifespans the same as
+        // remove()-driven ones.
+        let mut evicted_durations: Vec<f64> = Vec::new();
+        map.retain(|_, s| {
+            let alive = s.last_active_at > cutoff;
+            if !alive {
+                evicted_durations.push(s.created_at.elapsed().as_secs_f64());
+            }
+            alive
+        });
+        let active = map.len();
+        let evicted = before - active;
+        drop(map);
+        for d in evicted_durations {
+            metrics::histogram!(
+                crate::observability::metrics::names::HTTP_SESSION_DURATION_SECONDS
+            )
+            .record(d);
+        }
+        if evicted > 0 {
+            metrics::gauge!(crate::observability::metrics::names::HTTP_SESSIONS_ACTIVE).set({
+                #[allow(clippy::cast_precision_loss)]
+                let n = active as f64;
+                n
+            });
+        }
+        evicted
     }
 
     /// Spawn the background sweeper. The returned [`SweeperHandle`]

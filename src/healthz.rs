@@ -56,9 +56,18 @@ impl HealthState {
 
     /// Reload outcomes flow through here. Unused today; wired so the
     /// reload work (no ticket yet) doesn't need to plumb a new path.
+    /// Also bumps `gmcp_hot_reload_total{outcome}` per ADR-0008 — when
+    /// the reload subsystem lands, callers should pass a more specific
+    /// outcome via [`Self::set_last_reload_outcome`].
     #[allow(dead_code)]
     pub(crate) fn set_last_reload_succeeded(&self, ok: bool) {
         self.last_reload_succeeded.store(ok, Ordering::Relaxed);
+        let outcome = if ok { "success" } else { "validation_error" };
+        metrics::counter!(
+            crate::observability::metrics::names::HOT_RELOAD_TOTAL,
+            "outcome" => outcome,
+        )
+        .increment(1);
     }
 
     /// Compute the response. Returns `(status_line, body)` so the
@@ -127,22 +136,55 @@ async fn handle(mut sock: TcpStream, state: &HealthState) -> io::Result<()> {
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("");
 
-    let (status, body) = if method == "GET" && path == "/healthz" {
-        state.evaluate()
-    } else {
-        ("HTTP/1.1 404 Not Found", "not found")
-    };
+    // ── Route ────────────────────────────────────────────────────────────────
+    // Single match because both routes need to ship a body and the
+    // metrics rendering is more than a const lookup. The owned-String
+    // branch carries through the response writer below.
+    let (status_line, content_type, body): (&str, &str, std::borrow::Cow<'_, str>) =
+        if method == "GET" && path == "/healthz" {
+            let (s, b) = state.evaluate();
+            (
+                s,
+                "text/plain; charset=utf-8",
+                std::borrow::Cow::Borrowed(b),
+            )
+        } else if method == "GET" && path == "/metrics" {
+            // Per Prometheus exposition format: text/plain; version=0.0.4.
+            // Returns 404 when no recorder was installed — the operator
+            // did not enable `[metrics]` in config.
+            crate::observability::metrics::handle().map_or(
+                (
+                    "HTTP/1.1 404 Not Found",
+                    "text/plain; charset=utf-8",
+                    std::borrow::Cow::Borrowed("metrics recorder not installed"),
+                ),
+                |h| {
+                    (
+                        "HTTP/1.1 200 OK",
+                        "text/plain; version=0.0.4; charset=utf-8",
+                        std::borrow::Cow::Owned(h.render()),
+                    )
+                },
+            )
+        } else {
+            (
+                "HTTP/1.1 404 Not Found",
+                "text/plain; charset=utf-8",
+                std::borrow::Cow::Borrowed("not found"),
+            )
+        };
 
-    let response = format!(
-        "{status}\r\n\
-         Content-Type: text/plain; charset=utf-8\r\n\
+    let body_bytes = body.as_bytes();
+    let header = format!(
+        "{status_line}\r\n\
+         Content-Type: {content_type}\r\n\
          Content-Length: {len}\r\n\
          Connection: close\r\n\
-         \r\n\
-         {body}",
-        len = body.len(),
+         \r\n",
+        len = body_bytes.len(),
     );
-    sock.write_all(response.as_bytes()).await?;
+    sock.write_all(header.as_bytes()).await?;
+    sock.write_all(body_bytes).await?;
     sock.shutdown().await?;
     Ok(())
 }
@@ -221,9 +263,77 @@ mod tests {
     async fn unknown_path_returns_404() {
         let state = Arc::new(HealthState::new(1));
         let (addr, _h) = spawn_server(state).await;
-        let (status, body) = fetch(addr, "/metrics").await;
+        let (status, body) = fetch(addr, "/banana").await;
         assert!(status.contains("404"), "status was: {status}");
         assert_eq!(body, "not found");
+    }
+
+    /// `/metrics` returns 404 with a distinct body when no recorder has
+    /// been installed. The exporter installation is process-global and
+    /// one-shot; we don't install it from this unit test (other tests
+    /// in `observability::metrics` exercise the install path).
+    #[tokio::test]
+    async fn metrics_returns_404_when_recorder_not_installed() {
+        let state = Arc::new(HealthState::new(1));
+        let (addr, _h) = spawn_server(state).await;
+        let (status, body) = fetch(addr, "/metrics").await;
+        if crate::observability::metrics::handle().is_some() {
+            // A previous test in this process installed the recorder —
+            // /metrics now serves 200. Skip the negative assertion.
+            assert!(status.contains("200"), "status was: {status}");
+            return;
+        }
+        assert!(status.contains("404"), "status was: {status}");
+        assert_eq!(body, "metrics recorder not installed");
+    }
+
+    /// Layer 2 integration test per the issue: install the recorder,
+    /// scrape `/metrics`, and assert at least `gmcp_tool_calls_total`
+    /// and `gmcp_build_info` appear. We also exercise a counter bump so
+    /// `gmcp_tool_calls_total` shows a sample series (not just the
+    /// `# TYPE` line from `describe_counter!`).
+    ///
+    /// The Prometheus exporter installs a process-global recorder; if a
+    /// concurrent test already installed it, our `install` call returns
+    /// the existing handle without re-registering — the assertions
+    /// below still hold.
+    #[tokio::test]
+    async fn metrics_endpoint_serves_inventory() {
+        crate::observability::metrics::install(
+            2,
+            crate::observability::metrics::BuildInfoLabels::from_env(),
+        )
+        .expect("install");
+        // Bump the counter so the series materializes in the scrape
+        // output, not just the type-description preamble.
+        metrics::counter!(
+            crate::observability::metrics::names::TOOL_CALLS_TOTAL,
+            "tool" => "list_accounts",
+            "outcome" => "success",
+        )
+        .increment(1);
+
+        let state = Arc::new(HealthState::new(2));
+        let (addr, _h) = spawn_server(state).await;
+        let (status, body) = fetch(addr, "/metrics").await;
+        assert!(status.contains("200"), "status was: {status}");
+        assert!(
+            body.contains("gmcp_tool_calls_total"),
+            "scrape missing gmcp_tool_calls_total: {body}",
+        );
+        assert!(
+            body.contains("gmcp_build_info"),
+            "scrape missing gmcp_build_info: {body}",
+        );
+        // The counter bump above must show up as a sample line.
+        assert!(
+            body.lines().any(|l| {
+                l.starts_with("gmcp_tool_calls_total")
+                    && l.contains("tool=\"list_accounts\"")
+                    && l.contains("outcome=\"success\"")
+            }),
+            "scrape missing the bumped counter line: {body}",
+        );
     }
 
     #[tokio::test]

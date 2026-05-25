@@ -260,12 +260,24 @@ fn run_serve_blocking() -> Result<(), Error> {
     let accounts = Arc::new(loaded_accounts.accounts);
     let audit = AuditWriter::new(&dir, cfg.audit.rotate.clone());
 
-    // Liveness `/healthz` listener per ADR-0008 (#70). Only spawned when
-    // the operator opted in by including `[metrics]` in config.toml. Bind
-    // happens on the runtime (eager, so a port collision fails the
-    // daemon at startup instead of silently a few seconds later); accept
-    // loop lives in a detached task and dies with the runtime.
+    // Liveness `/healthz` + Prometheus `/metrics` listener per ADR-0008
+    // (#70, #75). Only spawned when the operator opted in by including
+    // `[metrics]` in config.toml. Bind happens on the runtime (eager, so
+    // a port collision fails the daemon at startup instead of silently a
+    // few seconds later); accept loop lives in a detached task and dies
+    // with the runtime.
     if let Some(metrics_cfg) = cfg.metrics.as_ref() {
+        // Install the Prometheus recorder BEFORE the listener spawns —
+        // the listener serves `/metrics` by calling
+        // `observability::metrics::handle()`. If install fails, surface
+        // it (the recorder being already installed by some other test
+        // path is a developer-environment artifact, not a production
+        // condition).
+        observability::metrics::install(
+            accounts.len(),
+            observability::metrics::BuildInfoLabels::from_env(),
+        )?;
+
         let bind = metrics_cfg.bind.clone();
         let state = Arc::new(healthz::HealthState::new(accounts.len()));
         let listener = runtime

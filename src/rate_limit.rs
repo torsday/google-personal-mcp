@@ -136,12 +136,21 @@ impl KeyedRateLimiter {
         let bucket = buckets
             .entry(account.to_owned())
             .or_insert_with(|| TokenBucket::new(self.capacity, self.refill_per_sec));
-        bucket
-            .try_consume(cost, now)
-            .map_err(|secs| Error::RateLimited {
+        bucket.try_consume(cost, now).map_err(|secs| {
+            // ADR-0008 §Metrics — bump on actual block, not on every
+            // try_acquire. Service label is "gmail" today; future
+            // services widen this.
+            metrics::counter!(
+                crate::observability::metrics::names::RATE_LIMIT_BLOCKS_TOTAL,
+                "account" => account.to_owned(),
+                "service" => "gmail",
+            )
+            .increment(1);
+            Error::RateLimited {
                 account: account.to_owned(),
                 retry_after: Duration::from_secs(secs),
-            })
+            }
+        })
     }
 
     #[cfg(test)]

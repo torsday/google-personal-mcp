@@ -69,6 +69,12 @@ impl CacheMetrics {
             kind = kind,
             "cache write discarded (stale fetched_at_history_id)",
         );
+        metrics::counter!(
+            crate::observability::metrics::names::CACHE_WRITE_DISCARDED_TOTAL,
+            "account" => account.to_owned(),
+            "kind" => kind.to_owned(),
+        )
+        .increment(1);
     }
 
     /// Total hits since process start. Test-only; the Prometheus exporter

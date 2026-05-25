@@ -117,10 +117,12 @@ impl<T: RefreshTransport> GmailClient<T> {
     ) -> Result<R, Error> {
         self.quota_check(account, cost)?;
         let url = format!("{}{}", self.base_url, path);
+        let started = std::time::Instant::now();
         let resp = self
             .send_with_401_fallback(account, |token| self.http.get(&url).bearer_auth(token))
-            .await?;
-        parse_json(resp).await
+            .await;
+        record_api_call_metrics(path, "GET", started, resp.as_ref());
+        parse_json(resp?).await
     }
 
     /// Authenticated POST. See [`Self::authed_get`] for the `cost` contract.
@@ -144,12 +146,14 @@ impl<T: RefreshTransport> GmailClient<T> {
     ) -> Result<R, Error> {
         self.quota_check(account, cost)?;
         let url = format!("{}{}", self.base_url, path);
+        let started = std::time::Instant::now();
         let resp = self
             .send_with_401_fallback(account, |token| {
                 self.http.post(&url).bearer_auth(token).json(body)
             })
-            .await?;
-        parse_json(resp).await
+            .await;
+        record_api_call_metrics(path, "POST", started, resp.as_ref());
+        parse_json(resp?).await
     }
 
     /// Send a request, retrying once on a 401 after a forced token refresh.
@@ -199,6 +203,41 @@ impl<T: RefreshTransport> GmailClient<T> {
 /// only for the `google.endpoint` tracing field.
 fn endpoint_of(path: &str) -> &str {
     path.find('?').map_or(path, |i| &path[..i])
+}
+
+/// Bump `gmcp_google_api_calls_total` and record the duration histogram
+/// per ADR-0008 §Metrics. `resp` carries the result of
+/// `send_with_401_fallback`: on success we extract the HTTP status; on
+/// upstream error we read the status from the typed Error; on transport
+/// failure we record `status_class = "network"`.
+fn record_api_call_metrics(
+    path: &str,
+    method: &'static str,
+    started: std::time::Instant,
+    resp: Result<&reqwest::Response, &Error>,
+) {
+    let status: Option<u16> = match resp {
+        Ok(r) => Some(r.status().as_u16()),
+        Err(Error::Upstream { status: s, .. }) => Some(*s),
+        Err(Error::RateLimited { .. }) => Some(429),
+        Err(_) => None,
+    };
+    let endpoint = endpoint_of(path).to_owned();
+    metrics::counter!(
+        crate::observability::metrics::names::GOOGLE_API_CALLS_TOTAL,
+        "service" => "gmail",
+        "endpoint" => endpoint.clone(),
+        "method" => method,
+        "status_class" => crate::observability::metrics::status_class(status),
+    )
+    .increment(1);
+    metrics::histogram!(
+        crate::observability::metrics::names::GOOGLE_API_CALL_DURATION_SECONDS,
+        "service" => "gmail",
+        "endpoint" => endpoint,
+        "method" => method,
+    )
+    .record(started.elapsed().as_secs_f64());
 }
 
 async fn parse_json<R: DeserializeOwned>(resp: reqwest::Response) -> Result<R, Error> {
