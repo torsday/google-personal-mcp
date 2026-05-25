@@ -15,6 +15,7 @@ pub(crate) enum GmailMethod {
     ThreadsModify,
     ThreadsTrash,
     MessagesGet,
+    MessagesAttachmentsGet,
     MessagesSend,
     MessagesBatchModify,
     HistoryList,
@@ -32,6 +33,9 @@ impl GmailMethod {
             Self::ThreadsModify => 10,
             Self::ThreadsTrash => 20,
             Self::MessagesGet => 20,
+            // `users.messages.attachments.get` — Google's documented cost.
+            // Confirmed against the v1 reference 2026-05-25.
+            Self::MessagesAttachmentsGet => 5,
             Self::MessagesSend => 100,
             Self::MessagesBatchModify => 50,
             Self::HistoryList => 2,
@@ -54,6 +58,7 @@ mod tests {
         assert_eq!(GmailMethod::ThreadsModify.cost(), 10);
         assert_eq!(GmailMethod::ThreadsTrash.cost(), 20);
         assert_eq!(GmailMethod::MessagesGet.cost(), 20);
+        assert_eq!(GmailMethod::MessagesAttachmentsGet.cost(), 5);
         assert_eq!(GmailMethod::MessagesSend.cost(), 100);
         assert_eq!(GmailMethod::MessagesBatchModify.cost(), 50);
         assert_eq!(GmailMethod::HistoryList.cost(), 2);

@@ -1,6 +1,6 @@
 ---
 source: src/server/descriptors.rs
-assertion_line: 587
+assertion_line: 632
 expression: json
 ---
 [
@@ -138,6 +138,41 @@ expression: json
       "type": "object"
     },
     "name": "list_attachments"
+  },
+  {
+    "description": "Fetch the bytes of one Gmail attachment by `(message_id, attachment_id)`. Two delivery modes: (1) `save_to` set — writes the decoded bytes to that path (mode 0600); refuses to overwrite an existing file. (2) `save_to` omitted — returns `data_base64` (URL-safe, no padding). Use `list_attachments` (sibling tool) to discover the IDs and MIME type first. Cost: `attachments.get` = 5 quota units per call. The audit log records `attachment_id`, `mime_type`, `size_bytes`, and `save_to` per ADR-0011.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml.",
+          "type": "string"
+        },
+        "attachment_id": {
+          "description": "Gmail attachment ID, typically from `list_attachments`.",
+          "type": "string"
+        },
+        "message_id": {
+          "description": "Gmail message ID hosting the attachment (NOT the thread ID).",
+          "type": "string"
+        },
+        "mime_type": {
+          "description": "MIME type from a prior `list_attachments` call. Recorded in the audit log; not validated.",
+          "type": "string"
+        },
+        "save_to": {
+          "description": "Optional absolute path to write the bytes to (mode 0600). Refuses to overwrite. Omit to receive bytes as `data_base64` instead.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "message_id",
+        "attachment_id",
+        "mime_type"
+      ],
+      "type": "object"
+    },
+    "name": "download_attachment"
   },
   {
     "description": "Operator introspection for the per-account SQLite cache (ADR-0009). Returns one row per registered account: on-disk `size_bytes`, `last_history_id` (Gmail watermark), and `last_sync_at_ms` (last successful history sync). Top-level fields surface cumulative process-lifetime hit/miss counters and a derived `hit_rate_lifetime`. **Note:** `hit_rate_lifetime` is process-lifetime, not last-hour. A rolling-window breakdown ships with the Prometheus exporter (#75). When `[cache] enabled = false` in config.toml, returns `enabled = false` and zeroed counters.",
