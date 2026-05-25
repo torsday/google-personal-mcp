@@ -1,6 +1,6 @@
 ---
 source: src/server/descriptors.rs
-assertion_line: 524
+assertion_line: 587
 expression: json
 ---
 [
@@ -138,6 +138,46 @@ expression: json
       "type": "object"
     },
     "name": "list_attachments"
+  },
+  {
+    "description": "Operator introspection for the per-account SQLite cache (ADR-0009). Returns one row per registered account: on-disk `size_bytes`, `last_history_id` (Gmail watermark), and `last_sync_at_ms` (last successful history sync). Top-level fields surface cumulative process-lifetime hit/miss counters and a derived `hit_rate_lifetime`. **Note:** `hit_rate_lifetime` is process-lifetime, not last-hour. A rolling-window breakdown ships with the Prometheus exporter (#75). When `[cache] enabled = false` in config.toml, returns `enabled = false` and zeroed counters.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "Optional account alias filter. Omit to list all registered accounts.",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "cache_status"
+  },
+  {
+    "description": "Manually drop cached state for one account (ADR-0009 §New tools). Useful for debugging the cache layer when a stale read is suspected. Scopes: `queries` drops every `query_cache` row; `labels` drops the label catalog and every per-message `message_labels` row; `all` drops both. **Message bodies are immutable per ADR-0009 and are NEVER deleted by this tool, even with scope = \"all\". Operators wipe bodies with `rm` on the .db file directly.** Destructive: a fsync'd `intent` audit record is written before the call lands. When `[cache] enabled = false`, the call is a no-op (`applied = false`).",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml.",
+          "type": "string"
+        },
+        "scope": {
+          "description": "Which class of cached rows to drop. Bodies are never deleted.",
+          "enum": [
+            "all",
+            "queries",
+            "labels"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "scope"
+      ],
+      "type": "object"
+    },
+    "name": "cache_invalidate"
   },
   {
     "description": "Remove the INBOX label from a single thread (archive it). Does not delete. Applies threads.modify (10 quota units). dry_run: true returns the outcome without making any Gmail API call.",

@@ -318,6 +318,16 @@ pub(crate) fn summarize_trash_thread(thread_id: &str, dry_run: bool) -> Value {
     })
 }
 
+/// `cache_invalidate` params: `account` + `scope`. Destructive enough to
+/// warrant a fsync'd intent record per [ADR-0011](docs/adr/0011-audit-log.md)
+/// lines 83-86. Both fields are operator-controlled — no content to redact.
+pub(crate) fn summarize_cache_invalidate(account: &str, scope: &str) -> Value {
+    serde_json::json!({
+        "account": account,
+        "scope": scope,
+    })
+}
+
 /// `modify_thread_labels` params: thread + label IDs + `dry_run`. Label IDs
 /// are operator-assigned (system labels like `INBOX` or user-created); not
 /// considered content.

@@ -40,7 +40,7 @@ use tokio_rusqlite::Connection;
 use crate::error::Error;
 use crate::gmail::threads::{ParsedThread, RawThreadsList, ThreadMetadata};
 
-pub(crate) use self::metrics::CacheMetrics;
+pub(crate) use self::metrics::{CacheMetrics, CacheMetricsSnapshot};
 
 /// Filename mode applied to each per-account DB file at creation.
 const DB_FILE_MODE: u32 = 0o600;
@@ -291,6 +291,51 @@ impl Cache {
             return Ok(());
         };
         queries::invalidate_all_queries(conn).await
+    }
+
+    /// Drop the label catalog and every per-message label link. Bodies
+    /// and thread rows are preserved. Operator-facing
+    /// `cache_invalidate(scope=labels)` (#83) routes here.
+    pub(crate) async fn invalidate_all_labels(&self, account: &str) -> Result<(), Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(());
+        };
+        queries::invalidate_all_labels(conn).await
+    }
+
+    /// On-disk size of this account's `.db` file, in bytes. Returns
+    /// `Ok(None)` for unknown accounts so callers can short-circuit on
+    /// the account-filter case.
+    pub(crate) async fn db_size_bytes(&self, account: &str) -> Result<Option<u64>, Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(None);
+        };
+        queries::db_size_bytes(conn).await.map(Some)
+    }
+
+    /// `last_full_sync_at` timestamp (ms epoch) for `account`, or
+    /// `None` when the column is NULL or the account is unknown. The
+    /// column is bumped on every successful `set_last_history_id` call
+    /// (Phase 3), so it reflects the most recent history-sync tick.
+    pub(crate) async fn last_full_sync_at(&self, account: &str) -> Result<Option<i64>, Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(None);
+        };
+        queries::last_full_sync_at(conn).await
+    }
+
+    /// Snapshot of the cumulative process-lifetime hit/miss counters.
+    /// Surfaced by the operator-facing `cache_status` tool (#83). Per-
+    /// account / last-hour breakdowns ship with the Prometheus exporter
+    /// ([#75]) — this snapshot is intentionally coarse.
+    ///
+    /// [#75]: https://github.com/torsday/google-personal-mcp/issues/75
+    pub(crate) fn metrics_snapshot(&self) -> CacheMetricsSnapshot {
+        CacheMetricsSnapshot {
+            hits: self.metrics.hits_lifetime(),
+            misses: self.metrics.misses_lifetime(),
+            write_discarded: self.metrics.write_discarded_lifetime(),
+        }
     }
 
     /// Reseed path for the 404 `historyNotFound` case. Drops every
