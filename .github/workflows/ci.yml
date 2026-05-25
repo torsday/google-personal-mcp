@@ -108,7 +108,7 @@ jobs:
 
   macos:
     name: cargo test (macos-keychain)
-    runs-on: [self-hosted, macos]
+    runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
