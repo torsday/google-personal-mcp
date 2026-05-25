@@ -28,11 +28,18 @@ pub(crate) struct Migration {
 /// The full migration corpus. Append-only; each entry must be the strict
 /// successor of the previous (`to_version` of N must equal `from_version` of
 /// N+1).
-pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
-    from_version: 0,
-    to_version: 1,
-    sql: include_str!("migrations/001_initial.sql"),
-}];
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        from_version: 0,
+        to_version: 1,
+        sql: include_str!("migrations/001_initial.sql"),
+    },
+    Migration {
+        from_version: 1,
+        to_version: 2,
+        sql: include_str!("migrations/002_query_cache_history_watermark.sql"),
+    },
+];
 
 /// Highest known schema version. Used for the downgrade-refuse check.
 pub(crate) const MAX_KNOWN_VERSION: u32 = match MIGRATIONS.last() {
@@ -143,11 +150,11 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_initializes_to_v1() {
+    fn fresh_database_initializes_to_max_known_version() {
         let mut conn = in_memory();
         let v = apply_pending(&mut conn).expect("apply");
-        assert_eq!(v, 1);
-        assert_eq!(current_version(&conn).expect("read"), 1);
+        assert_eq!(v, MAX_KNOWN_VERSION);
+        assert_eq!(current_version(&conn).expect("read"), MAX_KNOWN_VERSION);
     }
 
     #[test]
@@ -180,7 +187,37 @@ mod tests {
         let mut conn = in_memory();
         apply_pending(&mut conn).expect("first apply");
         let v = apply_pending(&mut conn).expect("second apply");
-        assert_eq!(v, 1);
+        assert_eq!(v, MAX_KNOWN_VERSION);
+    }
+
+    /// A DB seeded at v1 is upgraded to `MAX_KNOWN_VERSION` on next open,
+    /// the way an operator's existing cache file behaves after a binary
+    /// upgrade.
+    #[test]
+    fn upgrades_v1_database_to_current() {
+        let mut conn = in_memory();
+        // Apply only the first migration to simulate a v1-era DB on disk.
+        let only_001 = &MIGRATIONS[0..1];
+        for m in only_001 {
+            let tx = conn.transaction().expect("tx");
+            tx.execute_batch(m.sql).expect("apply 001");
+            tx.commit().expect("commit");
+        }
+        assert_eq!(current_version(&conn).expect("read"), 1);
+        // Now apply the full corpus — should walk forward to MAX.
+        let v = apply_pending(&mut conn).expect("apply");
+        assert_eq!(v, MAX_KNOWN_VERSION);
+        // The v2 column must exist on query_cache.
+        let col: Option<String> = conn
+            .query_row(
+                "SELECT name FROM pragma_table_info('query_cache') \
+                 WHERE name = 'fetched_at_history_id'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("query");
+        assert_eq!(col.as_deref(), Some("fetched_at_history_id"));
     }
 
     #[test]
@@ -217,7 +254,7 @@ mod tests {
                 m.from_version + 1,
                 "migration {}→{} must advance by exactly one",
                 m.from_version,
-                m.to_version
+                m.to_version,
             );
             expected = m.to_version;
         }

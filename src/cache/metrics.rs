@@ -9,11 +9,13 @@
 //!
 //! - `gmcp_cache_hits_total{account, kind}`
 //! - `gmcp_cache_misses_total{account, kind}`
+//! - `gmcp_cache_write_discarded_total{account, kind}` (Phase 4 — [#81])
 //!
 //! where `kind` is one of `"thread"`, `"thread_metadata"`, `"query"`.
 //!
 //! [ADR-0009]: ../../docs/adr/0009-caching-with-sqlite-and-history-api.md
 //! [#75]: https://github.com/torsday/google-personal-mcp/issues/75
+//! [#81]: https://github.com/torsday/google-personal-mcp/issues/81
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -26,6 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) struct CacheMetrics {
     hits: AtomicU64,
     misses: AtomicU64,
+    write_discarded: AtomicU64,
 }
 
 impl CacheMetrics {
@@ -51,6 +54,23 @@ impl CacheMetrics {
         );
     }
 
+    /// Record a discarded write — Phase 4 (#81) race-prevention. The
+    /// upstream API result was correct at the moment it left Gmail, but
+    /// the cache's history watermark advanced past the fetch snapshot
+    /// before the write landed; persisting would serve data older than
+    /// the cache already knew about. Should be near zero in steady
+    /// state — a sustained nonzero rate suggests background sync is
+    /// outracing read-path API calls.
+    pub(crate) fn record_write_discarded(&self, account: &str, kind: &str) {
+        self.write_discarded.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(
+            metric.name = "gmcp_cache_write_discarded_total",
+            account = account,
+            kind = kind,
+            "cache write discarded (stale fetched_at_history_id)",
+        );
+    }
+
     /// Total hits since process start. Test-only; the Prometheus exporter
     /// will read the underlying atomic directly when it lands.
     #[cfg(test)]
@@ -62,6 +82,12 @@ impl CacheMetrics {
     #[cfg(test)]
     pub(crate) fn misses(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
+    }
+
+    /// Total discarded writes since process start. Test-only.
+    #[cfg(test)]
+    pub(crate) fn write_discarded(&self) -> u64 {
+        self.write_discarded.load(Ordering::Relaxed)
     }
 }
 
@@ -85,5 +111,14 @@ mod tests {
         m.record_miss("work", "query");
         assert_eq!(m.hits(), 0);
         assert_eq!(m.misses(), 1);
+    }
+
+    #[test]
+    fn record_write_discarded_bumps_only_discarded() {
+        let m = CacheMetrics::default();
+        m.record_write_discarded("work", "query");
+        assert_eq!(m.hits(), 0);
+        assert_eq!(m.misses(), 0);
+        assert_eq!(m.write_discarded(), 1);
     }
 }

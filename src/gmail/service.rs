@@ -187,11 +187,21 @@ impl<T: RefreshTransport + 'static> GmailService<T> {
                 return Ok(hit);
             }
             cache.metrics().record_miss(account, "query");
+            // ADR-0009 §"Race-prevention" (Phase 4, #81): snapshot the
+            // account watermark BEFORE issuing the upstream API call so
+            // `insert_query` can detect — and discard — a write whose
+            // watermark has been overtaken by the background sync during
+            // the round-trip.
+            let snapshot = cache.last_history_id(account).await?.unwrap_or(0);
             let fresh =
                 threads_api::list_threads(&self.client, account, query, max_results, page_token)
                     .await?;
+            // Discarded writes are not a tool-call failure; the caller
+            // still receives the fresh response. The `gmcp_cache_write_
+            // discarded_total` counter bumps inside `insert_query` so
+            // operators can spot sustained nonzero rates.
             cache
-                .insert_query(account, query, max_results, page_token, &fresh)
+                .insert_query(account, query, max_results, page_token, &fresh, snapshot)
                 .await?;
             return Ok(fresh);
         }

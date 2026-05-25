@@ -209,6 +209,13 @@ impl Cache {
 
     /// Cache a `threads.list` result for `query_ttl` (set at construction).
     /// Distinct `(query, max_results, page_token)` tuples cache independently.
+    ///
+    /// `fetched_at_history_id` is the account watermark captured *before*
+    /// the upstream `threads.list` call started. If the watermark has
+    /// advanced past the snapshot during the round-trip, the insert is
+    /// discarded (ADR-0009 §Race-prevention) and
+    /// `gmcp_cache_write_discarded_total` bumps. Unknown accounts return
+    /// `Persisted` (no-op) — the call site doesn't distinguish.
     pub(crate) async fn insert_query(
         &self,
         account: &str,
@@ -216,11 +223,25 @@ impl Cache {
         max_results: u32,
         page_token: Option<&str>,
         result: &RawThreadsList,
-    ) -> Result<(), Error> {
+        fetched_at_history_id: i64,
+    ) -> Result<queries::InsertQueryOutcome, Error> {
         let Some(conn) = self.connection(account) else {
-            return Ok(());
+            return Ok(queries::InsertQueryOutcome::Persisted);
         };
-        queries::insert_query(conn, query, max_results, page_token, result, self.query_ttl).await
+        let outcome = queries::insert_query(
+            conn,
+            query,
+            max_results,
+            page_token,
+            result,
+            self.query_ttl,
+            fetched_at_history_id,
+        )
+        .await?;
+        if outcome == queries::InsertQueryOutcome::DiscardedStale {
+            self.metrics.record_write_discarded(account, "query");
+        }
+        Ok(outcome)
     }
 
     // ── Phase 3: history watermark + delta application ───────────────────────
@@ -405,7 +426,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opens_fresh_db_at_v1_with_mode_600() {
+    async fn opens_fresh_db_at_current_schema_with_mode_600() {
         let dir = tmp();
         let cache = open(dir.path(), &["work"]).await.expect("open cache");
 
@@ -443,7 +464,7 @@ mod tests {
             })
             .await
             .expect("query version");
-        assert_eq!(version, 1);
+        assert_eq!(version, i64::from(migrations::MAX_KNOWN_VERSION));
     }
 
     #[tokio::test]
@@ -475,7 +496,7 @@ mod tests {
             })
             .await
             .expect("query version");
-        assert_eq!(version, 1);
+        assert_eq!(version, i64::from(migrations::MAX_KNOWN_VERSION));
     }
 
     #[tokio::test]
@@ -575,6 +596,6 @@ mod tests {
             })
             .await
             .expect("query schema");
-        insta::assert_snapshot!("cache_v1_schema", ddl);
+        insta::assert_snapshot!("cache_v2_schema", ddl);
     }
 }
