@@ -58,6 +58,38 @@ impl ServerHandler for GoogleServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // Metrics wrapper per ADR-0008 §Metrics / #75. Captures the tool
+        // name (low-cardinality — bounded by `registered_tools()`) and
+        // overall success / error outcome. Variant-level outcome labels
+        // would require threading the typed `Error` through every
+        // dispatch arm; that's a follow-up. Always-on: `metrics::*!` is
+        // a no-op when no recorder is installed.
+        let tool_name = request.name.to_string();
+        let started = std::time::Instant::now();
+        let result = self.dispatch_inner(request, context).await;
+        let outcome = if result.is_ok() { "success" } else { "error" };
+        metrics::counter!(
+            crate::observability::metrics::names::TOOL_CALLS_TOTAL,
+            "tool" => tool_name.clone(),
+            "outcome" => outcome,
+        )
+        .increment(1);
+        metrics::histogram!(
+            crate::observability::metrics::names::TOOL_CALL_DURATION_SECONDS,
+            "tool" => tool_name,
+        )
+        .record(started.elapsed().as_secs_f64());
+        result
+    }
+}
+
+impl GoogleServer {
+    #[allow(clippy::too_many_lines)]
+    async fn dispatch_inner(
+        &self,
+        request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         match request.name.as_ref() {

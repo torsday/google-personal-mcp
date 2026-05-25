@@ -1,9 +1,16 @@
-//! Tracing setup per [ADR-0008](../docs/adr/0008-observability-and-deployment.md).
+//! Observability per [ADR-0008](../docs/adr/0008-observability-and-deployment.md).
 //!
-//! v0.x ships the structured-spans subset — `tracing` + `tracing-subscriber`.
-//! All output is routed to **stderr** because stdout is reserved for the
-//! MCP wire protocol over stdio transport (ADR-0003). Log level is
-//! controlled by `RUST_LOG`; default is `google_personal_mcp=info,warn`.
+//! Two pillars in this crate:
+//!
+//! 1. **Tracing** ([`init`]) — structured `tracing` spans on stderr.
+//!    Always installed; controlled by `RUST_LOG`. Default
+//!    `google_personal_mcp=info,warn`.
+//! 2. **Metrics** ([`metrics`]) — Prometheus exporter and 12-metric
+//!    inventory per ADR-0008 §Metrics. Opt-in: `lib::run_server` only
+//!    calls [`metrics::install`] when `[metrics]` is set in
+//!    `config.toml`. With no recorder installed, every `metrics::*!`
+//!    bump elsewhere in the crate is a no-op (the facade's documented
+//!    behavior).
 //!
 //! Span coverage (per ADR-0008 §Logging):
 //! - One span per MCP tool call (`tool.name`, `tool.account`, etc.) —
@@ -14,9 +21,8 @@
 //!   — attached to `GmailClient::authed_get` / `authed_post`.
 //! - One span per OAuth refresh (`oauth.account`, `oauth.force`) —
 //!   attached to `TokenManager::refresh_locked`.
-//!
-//! No Prometheus, no `/healthz`, no OTLP exporter, no JSON log toggle in
-//! v0.x — those are v1.0 work tracked separately.
+
+pub(crate) mod metrics;
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
