@@ -108,6 +108,15 @@ impl<T: RefreshTransport> GmailService<T> {
     pub(crate) fn client_arc(&self) -> Arc<GmailClient<T>> {
         Arc::clone(&self.client)
     }
+
+    /// Borrow the optional `Arc<Cache>`. `None` when the operator has
+    /// `[cache] enabled = false`. Used by the operator-facing
+    /// `cache_status` and `cache_invalidate` tools (#83), which need the
+    /// cache handle directly rather than going through the read-path
+    /// methods.
+    pub(crate) const fn cache(&self) -> Option<&Arc<Cache>> {
+        self.cache.as_ref()
+    }
 }
 
 // `'static` surface — the cache-aware reads. `tokio::spawn` inside

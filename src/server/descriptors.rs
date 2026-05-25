@@ -263,6 +263,67 @@ fn get_thread_descriptor() -> Tool {
     t
 }
 
+fn cache_status_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "cache_status".into();
+    t.description = Some(
+        "Operator introspection for the per-account SQLite cache (ADR-0009). Returns \
+         one row per registered account: on-disk `size_bytes`, `last_history_id` \
+         (Gmail watermark), and `last_sync_at_ms` (last successful history sync). \
+         Top-level fields surface cumulative process-lifetime hit/miss counters and \
+         a derived `hit_rate_lifetime`. \
+         **Note:** `hit_rate_lifetime` is process-lifetime, not last-hour. A rolling-\
+         window breakdown ships with the Prometheus exporter (#75). \
+         When `[cache] enabled = false` in config.toml, returns `enabled = false` \
+         and zeroed counters."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {
+                "type": "string",
+                "description": "Optional account alias filter. Omit to list all registered accounts."
+            }
+        },
+        "required": []
+    }));
+    t
+}
+
+fn cache_invalidate_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "cache_invalidate".into();
+    t.description = Some(
+        "Manually drop cached state for one account (ADR-0009 §New tools). Useful for \
+         debugging the cache layer when a stale read is suspected. \
+         Scopes: `queries` drops every `query_cache` row; `labels` drops the label \
+         catalog and every per-message `message_labels` row; `all` drops both. \
+         **Message bodies are immutable per ADR-0009 and are NEVER deleted by this \
+         tool, even with scope = \"all\". Operators wipe bodies with `rm` on the .db \
+         file directly.** \
+         Destructive: a fsync'd `intent` audit record is written before the call \
+         lands. When `[cache] enabled = false`, the call is a no-op (`applied = false`)."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {
+                "type": "string",
+                "description": "The account alias from accounts.toml."
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["all", "queries", "labels"],
+                "description": "Which class of cached rows to drop. Bodies are never deleted."
+            }
+        },
+        "required": ["account", "scope"]
+    }));
+    t
+}
+
 fn list_attachments_descriptor() -> Tool {
     let mut t = Tool::default();
     t.name = "list_attachments".into();
@@ -463,6 +524,8 @@ pub(crate) fn registered_tools() -> Vec<Tool> {
         search_threads_descriptor(),
         get_thread_descriptor(),
         list_attachments_descriptor(),
+        cache_status_descriptor(),
+        cache_invalidate_descriptor(),
         archive_thread_descriptor(),
         batch_archive_descriptor(),
         trash_thread_descriptor(),

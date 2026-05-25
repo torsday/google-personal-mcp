@@ -17,8 +17,8 @@ use rmcp::RoleServer;
 use crate::audit::AuditEntry;
 use crate::error;
 use crate::tools::{
-    archive, audit_summary, fanout, get_thread, list_accounts, list_attachments, list_labels,
-    mcp_status, modify_labels, search_threads, trash,
+    archive, audit_summary, cache_invalidate, cache_status, fanout, get_thread, list_accounts,
+    list_attachments, list_labels, mcp_status, modify_labels, search_threads, trash,
 };
 
 use super::args::{
@@ -222,6 +222,52 @@ impl GoogleServer {
                     .await
                     .map_err(|e| error::to_mcp_error(&e))
                     .and_then(|out| ok_result("list_attachments serialize", &out))
+            }
+
+            "cache_status" => {
+                // `account` is optional (filter). Reuse `extract_optional_string_arg`
+                // and treat empty as "no filter" so an over-eager host LLM passing
+                // `"account": ""` doesn't get a confusing empty result set.
+                let account_opt = extract_optional_string_arg(&request, "account");
+                let filter = account_opt.as_deref().filter(|s| !s.is_empty());
+                cache_status::cache_status(&self.gmail, filter)
+                    .await
+                    .map_err(|e| error::to_mcp_error(&e))
+                    .and_then(|out| ok_result("cache_status serialize", &out))
+            }
+
+            "cache_invalidate" => {
+                let account = extract_string_arg(&request, "account")?;
+                let scope_str = extract_string_arg(&request, "scope")?;
+                let scope = cache_invalidate::InvalidateScope::parse(&scope_str)
+                    .map_err(|e| error::to_mcp_error(&e))?;
+                // Per ADR-0011 lines 83-86, destructive tools record a
+                // fsync'd `intent` audit row before the call lands so a
+                // crash mid-operation leaves an attributable record.
+                // `cache_invalidate` has no `dry_run` knob — every call
+                // is "real" (or a cache-disabled no-op).
+                self.write_destructive_intent(
+                    &account,
+                    "cache_invalidate",
+                    crate::audit::summarize_cache_invalidate(&account, &scope_str),
+                    false,
+                )?;
+                let result = cache_invalidate::cache_invalidate(&self.gmail, &account, scope).await;
+                self.audit.write(&AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    account: account.clone(),
+                    tool: "cache_invalidate".into(),
+                    params_summary: crate::audit::summarize_cache_invalidate(&account, &scope_str),
+                    action: "applied".into(),
+                    result: match &result {
+                        Ok(out) if out.applied => "ok".into(),
+                        Ok(_) => "ok:cache_disabled".into(),
+                        Err(e) => format!("error: {e}"),
+                    },
+                });
+                result
+                    .map_err(|e| error::to_mcp_error(&e))
+                    .and_then(|out| ok_result("cache_invalidate serialize", &out))
             }
 
             "archive_thread" => {

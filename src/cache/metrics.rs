@@ -95,6 +95,48 @@ impl CacheMetrics {
     pub(crate) fn write_discarded(&self) -> u64 {
         self.write_discarded.load(Ordering::Relaxed)
     }
+
+    /// Lifetime cumulative hit counter — used by `cache_status` (#83).
+    pub(crate) fn hits_lifetime(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    /// Lifetime cumulative miss counter — used by `cache_status` (#83).
+    pub(crate) fn misses_lifetime(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
+    }
+
+    /// Lifetime cumulative write-discarded counter — used by `cache_status` (#83).
+    pub(crate) fn write_discarded_lifetime(&self) -> u64 {
+        self.write_discarded.load(Ordering::Relaxed)
+    }
+}
+
+/// Coarse process-lifetime snapshot. Built by [`super::Cache::metrics_snapshot`]
+/// and surfaced by the operator-facing `cache_status` tool (#83). Per-account
+/// and time-windowed shapes ship with the Prometheus exporter (#75).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CacheMetricsSnapshot {
+    pub(crate) hits: u64,
+    pub(crate) misses: u64,
+    pub(crate) write_discarded: u64,
+}
+
+impl CacheMetricsSnapshot {
+    /// Cumulative hit rate `hits / (hits + misses)`. Returns `None` when
+    /// no lookups have happened yet — distinct from `Some(0.0)`, which
+    /// means lookups happened and all missed.
+    pub(crate) fn hit_rate(&self) -> Option<f64> {
+        let total = self.hits.checked_add(self.misses)?;
+        if total == 0 {
+            return None;
+        }
+        // Loss of precision at total > 2^53 is acceptable for a rate; the
+        // counter would have to overflow within a single process for that
+        // to matter.
+        #[allow(clippy::cast_precision_loss)]
+        Some(self.hits as f64 / total as f64)
+    }
 }
 
 #[cfg(test)]

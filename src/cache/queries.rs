@@ -609,6 +609,50 @@ pub(super) async fn invalidate_all_queries(conn: &Arc<Connection>) -> Result<(),
     Ok(())
 }
 
+/// Drop the label catalog and every per-message label link. Bodies and
+/// thread rows are preserved — re-fetching a thread will re-populate the
+/// label state via the FULL-format response. Operator-facing
+/// `cache_invalidate(scope=labels)` (#83) routes here.
+pub(super) async fn invalidate_all_labels(conn: &Arc<Connection>) -> Result<(), Error> {
+    conn.call(|c| -> rusqlite::Result<()> {
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM message_labels", [])?;
+        tx.execute("DELETE FROM labels", [])?;
+        tx.commit()
+    })
+    .await
+    .map_err(map_tokio_err)?;
+    Ok(())
+}
+
+/// Read the `last_full_sync_at` watermark from `account_state.rowid = 1`.
+/// `Ok(None)` when the column is NULL (account never synced).
+pub(super) async fn last_full_sync_at(conn: &Arc<Connection>) -> Result<Option<i64>, Error> {
+    conn.call(|c| -> rusqlite::Result<Option<i64>> {
+        c.query_row(
+            "SELECT last_full_sync_at FROM account_state WHERE rowid = 1",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+    })
+    .await
+    .map_err(map_tokio_err)
+}
+
+/// `(PRAGMA page_count) * (PRAGMA page_size)` — the on-disk size of this
+/// account's `.db` file, before any `VACUUM`. Used by the operator-facing
+/// `cache_status` tool (#83).
+pub(super) async fn db_size_bytes(conn: &Arc<Connection>) -> Result<u64, Error> {
+    conn.call(|c| -> rusqlite::Result<u64> {
+        let page_size: i64 = c.query_row("SELECT * FROM pragma_page_size()", [], |r| r.get(0))?;
+        let page_count: i64 = c.query_row("SELECT * FROM pragma_page_count()", [], |r| r.get(0))?;
+        let bytes = page_count.saturating_mul(page_size);
+        Ok(u64::try_from(bytes).unwrap_or(0))
+    })
+    .await
+    .map_err(map_tokio_err)
+}
+
 /// Reseed path for the 404 `historyNotFound` case. Drops every
 /// message/thread/label-link/query-result row for this account and
 /// installs a fresh watermark. The `labels` table is preserved (it's
