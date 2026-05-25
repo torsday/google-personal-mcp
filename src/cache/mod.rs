@@ -23,6 +23,7 @@
 //! Per-account file: `<dir>/<account>.db`. Created mode `0600` per
 //! [ADR-0017](../../docs/adr/0017-secrets-at-rest.md).
 
+pub(crate) mod eviction;
 pub(crate) mod metrics;
 pub(crate) mod migrations;
 pub(crate) mod queries;
