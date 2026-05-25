@@ -525,6 +525,15 @@ pub(crate) struct CacheConfig {
     /// a lookup. (Phase 2 ignores this; the field is wired for Phase 3.)
     #[serde(default = "default_sync_on_read")]
     pub(crate) sync_on_read: bool,
+    /// Per-account soft size cap. When a `<account>.db` file exceeds this
+    /// value, the next eviction tick deletes LRU rows and `VACUUM`s the
+    /// file back below 90 % of the cap. Default 500 MiB per ADR-0009.
+    #[serde(default = "default_max_size_bytes_per_account")]
+    pub(crate) max_size_bytes_per_account: u64,
+    /// Per-account eviction-task cadence in seconds. `0` disables the
+    /// background eviction task. Default 300 s (5 min) per ADR-0009.
+    #[serde(default = "default_eviction_interval")]
+    pub(crate) eviction_interval_seconds: u64,
 }
 
 impl Default for CacheConfig {
@@ -536,6 +545,8 @@ impl Default for CacheConfig {
             labels_ttl_seconds: default_labels_ttl(),
             background_sync_interval_seconds: default_bg_sync_interval(),
             sync_on_read: default_sync_on_read(),
+            max_size_bytes_per_account: default_max_size_bytes_per_account(),
+            eviction_interval_seconds: default_eviction_interval(),
         }
     }
 }
@@ -559,6 +570,16 @@ const fn default_bg_sync_interval() -> u64 {
 
 const fn default_sync_on_read() -> bool {
     true
+}
+
+/// 500 MiB per ADR-0009 §"Config additions".
+const fn default_max_size_bytes_per_account() -> u64 {
+    524_288_000
+}
+
+/// 5 minutes per ADR-0009 §"TTLs and eviction".
+const fn default_eviction_interval() -> u64 {
+    300
 }
 
 #[cfg(test)]

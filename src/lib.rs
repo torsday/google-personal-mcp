@@ -248,6 +248,7 @@ fn run_serve_blocking() -> Result<(), Error> {
         cache,
         history_sync,
         sync_handles,
+        eviction_handles,
     } = build_cache_wiring(&cfg, &loaded_accounts, &gmail_client, &runtime)?;
     let gmail = {
         let mut service = GmailService::new(gmail_client, cache);
@@ -300,9 +301,11 @@ fn run_serve_blocking() -> Result<(), Error> {
 
     let server = GoogleServer::new(accounts, tokens, gmail, audit, verbosity);
 
-    // Hold the cache-sync handles for the lifetime of the daemon — drop
-    // aborts the background tasks, which is what we want at shutdown.
+    // Hold the cache-sync and eviction handles for the lifetime of the
+    // daemon — drop aborts the background tasks, which is what we want
+    // at shutdown.
     let _sync_handles = sync_handles;
+    let _eviction_handles = eviction_handles;
 
     runtime.block_on(run_stdio(server))
 }
@@ -315,6 +318,7 @@ struct CacheWiring {
     cache: Option<Arc<cache::Cache>>,
     history_sync: Option<Arc<cache::sync::HistorySync<ReqwestRefreshTransport>>>,
     sync_handles: Vec<cache::sync::SyncHandle>,
+    eviction_handles: Vec<cache::eviction::EvictionHandle>,
 }
 
 /// Construct the per-account `SQLite` cache (Phase 2 #150) and spawn the
@@ -332,6 +336,7 @@ fn build_cache_wiring(
             cache: None,
             history_sync: None,
             sync_handles: Vec::new(),
+            eviction_handles: Vec::new(),
         });
     }
     let account_aliases: Vec<String> = loaded_accounts
@@ -374,10 +379,42 @@ fn build_cache_wiring(
              history sync runs only on-demand via sync_on_read",
         );
     }
+    // Per-account LRU eviction (Phase 5 #82). Mirrors the sync-task
+    // spawn pattern: build one `Evictor` shared across accounts; each
+    // account gets its own `tokio::task` that ticks every
+    // `eviction_interval_seconds`. Eviction is a no-op when the DB is
+    // under `max_size_bytes_per_account`.
+    let eviction_interval = std::time::Duration::from_secs(cfg.cache.eviction_interval_seconds);
+    let evictor = Arc::new(cache::eviction::Evictor::new(
+        Arc::clone(&cache),
+        eviction_interval,
+        cfg.cache.max_size_bytes_per_account,
+    ));
+    let mut eviction_handles: Vec<cache::eviction::EvictionHandle> = Vec::new();
+    for alias in &account_aliases {
+        if let Some(h) = evictor.spawn_for(alias.clone()) {
+            eviction_handles.push(h);
+        }
+    }
+    if !eviction_handles.is_empty() {
+        tracing::info!(
+            accounts = eviction_handles.len(),
+            interval_secs = cfg.cache.eviction_interval_seconds,
+            max_size_bytes_per_account = cfg.cache.max_size_bytes_per_account,
+            "spawned per-account cache eviction tasks",
+        );
+    } else if cfg.cache.eviction_interval_seconds == 0 {
+        tracing::info!(
+            "eviction_interval_seconds = 0 — cache eviction disabled \
+             (operator must monitor disk usage manually)",
+        );
+    }
+
     Ok(CacheWiring {
         cache: Some(cache),
         history_sync: Some(history_sync),
         sync_handles,
+        eviction_handles,
     })
 }
 
