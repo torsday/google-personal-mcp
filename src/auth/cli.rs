@@ -1,9 +1,13 @@
 //! `auth` subcommand surface — adds an account, lists known accounts, switches
 //! the default, and performs incremental scope grant / force-refresh / removal.
 //! CLI shape from [ADR-0002] and [ADR-0004].
+//!
+//! Also hosts bearer-token generation for the HTTP-transport auth layer
+//! (ADR-0020 / issue #163).
 
 use std::path::Path;
 
+use base64::Engine as _;
 use clap::Subcommand;
 
 use crate::auth::credentials::Credentials;
@@ -65,6 +69,33 @@ pub(crate) enum AuthCommand {
         #[arg(long)]
         revoke: bool,
     },
+    /// Bearer-token utilities for the HTTP-transport auth layer (ADR-0020).
+    ///
+    /// HTTP transport is a v1.0 feature; bearer tokens guard the daemon
+    /// endpoint against unauthenticated access when it is exposed beyond
+    /// the loopback interface.
+    Bearer {
+        #[command(subcommand)]
+        command: BearerCommand,
+    },
+}
+
+/// Subcommands under `google-personal-mcp auth bearer`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum BearerCommand {
+    /// Generate a cryptographically random bearer token and print it to stdout.
+    ///
+    /// Produces 32 bytes (256 bits) from the OS CSPRNG encoded as URL-safe
+    /// base64 without padding — a 43-character opaque string. Suitable for
+    /// pasting into the `tokens = [...]` array in
+    /// `~/.config/google-personal-mcp/http_auth.toml`.
+    ///
+    /// The subcommand does **not** read or modify `http_auth.toml`;
+    /// the operator pastes the token deliberately. During rotation, add the
+    /// new token to the file alongside the old one, reload the daemon
+    /// (`systemctl reload google-personal-mcp` or `SIGHUP`), then remove the
+    /// old token once all clients have migrated.
+    Generate,
 }
 
 impl AuthCommand {
@@ -79,6 +110,9 @@ impl AuthCommand {
             } => run_grant(&alias, &extra_scopes, config_dir),
             Self::Refresh { alias } => run_refresh(&alias, config_dir),
             Self::Remove { alias, yes, revoke } => run_remove(&alias, yes, revoke, config_dir),
+            Self::Bearer { command } => match command {
+                BearerCommand::Generate => run_bearer_generate(),
+            },
         }
     }
 }
@@ -440,6 +474,38 @@ fn run_remove(alias: &str, yes: bool, revoke: bool, config_dir: &Path) -> Result
     Ok(())
 }
 
+// ── auth bearer generate ─────────────────────────────────────────────────────
+
+/// Number of random bytes to generate. 32 bytes = 256 bits of entropy.
+/// URL-safe base64 (no padding) of 32 bytes is exactly 43 characters.
+const BEARER_TOKEN_BYTES: usize = 32;
+
+/// Generate a random bearer token from the OS CSPRNG and print it to stdout.
+///
+/// This is a pure output operation — it does **not** read or modify
+/// `http_auth.toml`. The operator is responsible for pasting the output into
+/// the config file (see ADR-0020 §Daemon-side bearer token).
+///
+/// Exposed as `pub(crate)` so unit tests can call it directly.
+pub(crate) fn run_bearer_generate() -> Result<(), Error> {
+    let token = generate_bearer_token()?;
+    println!("{token}");
+    Ok(())
+}
+
+/// Generate a fresh bearer token: 32 CSPRNG bytes → URL-safe base64 (no padding).
+///
+/// Separated from `run_bearer_generate` so tests can inspect the token value
+/// rather than capturing stdout.
+pub(crate) fn generate_bearer_token() -> Result<String, Error> {
+    let mut bytes = [0u8; BEARER_TOKEN_BYTES];
+    getrandom::fill(&mut bytes).map_err(|e| Error::Internal {
+        context: "CSPRNG failed — cannot generate bearer token".into(),
+        source: anyhow::anyhow!("getrandom: {e}"),
+    })?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
 const GOOGLE_REVOKE_URI: &str = "https://oauth2.googleapis.com/revoke";
 
 /// POST `token=<refresh_token>` to `revoke_uri` in the **request body**
@@ -730,6 +796,57 @@ mod tests {
         assert!(result.is_ok(), "revoke should succeed: {result:?}");
         // MockServer::verify() is called automatically on drop — the `.expect(1)`
         // assertion fires if the POST was never received.
+    }
+
+    // ── auth bearer generate (#163, ADR-0020) ─────────────────────────────────
+
+    #[test]
+    fn bearer_token_has_correct_length() {
+        // 32 bytes URL-safe base64 (no padding) is exactly 43 characters.
+        let token = generate_bearer_token().expect("CSPRNG should not fail");
+        assert_eq!(
+            token.len(),
+            43,
+            "expected 43-char token, got {len}: {token}",
+            len = token.len()
+        );
+    }
+
+    #[test]
+    fn bearer_token_uses_url_safe_base64_alphabet() {
+        let token = generate_bearer_token().expect("CSPRNG should not fail");
+        for ch in token.chars() {
+            assert!(
+                ch.is_ascii_alphanumeric() || ch == '-' || ch == '_',
+                "non-URL-safe character {ch:?} in token: {token}"
+            );
+        }
+        // URL-safe base64 without padding has no '+', '/', or '='.
+        assert!(!token.contains('+'), "token must not contain '+'");
+        assert!(!token.contains('/'), "token must not contain '/'");
+        assert!(!token.contains('='), "token must not contain '=' (padding)");
+    }
+
+    #[test]
+    fn bearer_token_is_unique_across_invocations() {
+        // Two consecutive calls must produce different tokens.
+        // Probability of collision: 1/2^256 — effectively zero.
+        let t1 = generate_bearer_token().expect("first call");
+        let t2 = generate_bearer_token().expect("second call");
+        assert_ne!(t1, t2, "two consecutive tokens must differ");
+    }
+
+    #[test]
+    fn bearer_token_decodes_to_32_bytes() {
+        let token = generate_bearer_token().expect("CSPRNG should not fail");
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&token)
+            .expect("token should be valid base64");
+        assert_eq!(
+            decoded.len(),
+            32,
+            "decoded token must be exactly 32 bytes (256 bits)"
+        );
     }
 
     /// Token must NOT appear in the URL path or query string.

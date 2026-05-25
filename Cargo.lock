@@ -909,6 +909,7 @@ dependencies = [
  "criterion",
  "dirs",
  "encoding_rs",
+ "getrandom 0.3.4",
  "hex",
  "html2text",
  "insta",
