@@ -51,7 +51,7 @@ pub(crate) struct GetThreadOutput {
     err(Display),
     fields(tool.name = "get_thread", tool.account = %account, tool.thread_id = %thread_id),
 )]
-pub(crate) async fn get_thread<T: RefreshTransport>(
+pub(crate) async fn get_thread<T: RefreshTransport + 'static>(
     gmail: &GmailService<T>,
     account: &str,
     thread_id: &str,

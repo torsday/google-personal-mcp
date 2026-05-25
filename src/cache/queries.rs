@@ -407,6 +407,226 @@ pub(super) async fn insert_query(
     Ok(())
 }
 
+// ── history watermark + delta application (Phase 3) ───────────────────────────
+
+/// Read the `last_history_id` watermark from `account_state.rowid = 1`.
+/// Returns `Ok(None)` on a fresh account (column NULL) or when the row
+/// hasn't been seeded.
+pub(super) async fn last_history_id(conn: &Arc<Connection>) -> Result<Option<i64>, Error> {
+    conn.call(|c| -> rusqlite::Result<Option<i64>> {
+        c.query_row(
+            "SELECT last_history_id FROM account_state WHERE rowid = 1",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+    })
+    .await
+    .map_err(map_tokio_err)
+}
+
+/// Write the `last_history_id` watermark plus `last_full_sync_at = now`.
+pub(super) async fn set_last_history_id(
+    conn: &Arc<Connection>,
+    history_id: i64,
+) -> Result<(), Error> {
+    let now = now_ms();
+    conn.call(move |c| -> rusqlite::Result<()> {
+        c.execute(
+            "UPDATE account_state \
+             SET last_history_id = ?1, last_full_sync_at = ?2 \
+             WHERE rowid = 1",
+            rusqlite::params![history_id, now],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(map_tokio_err)?;
+    Ok(())
+}
+
+/// Apply one decoded `history.list` record to the cache. All four
+/// event-class arrays are processed in one transaction so partial
+/// application doesn't leave the cache half-mutated.
+///
+/// Semantics:
+/// - `messages_added`: stub thread + (zeroed) message row so `lookup_thread`
+///   misses on this message until a real fetch fills it in. Body is **not**
+///   speculatively fetched (per ADR-0009 §"Sync protocol" line 2).
+/// - `messages_deleted`: `messages.deleted_at = now`; row is excluded from
+///   future `lookup_thread` / `lookup_thread_metadata` results.
+/// - `labels_added`: `INSERT OR IGNORE` into `message_labels`.
+/// - `labels_removed`: `DELETE FROM message_labels WHERE message_id = ?
+///   AND label_id = ?` for each id in the change.
+pub(super) async fn apply_history_record(
+    conn: &Arc<Connection>,
+    record: HistoryDelta,
+) -> Result<(), Error> {
+    conn.call(move |c| -> rusqlite::Result<()> {
+        let tx = c.transaction()?;
+        let now = now_ms();
+        for m in record.messages_added {
+            // Touch the thread so its fetched_at advances even when no
+            // message body has been fetched yet. `INSERT OR IGNORE` for
+            // the message creates a metadata-style stub if the row is
+            // entirely absent — otherwise leave existing body data alone.
+            tx.execute(
+                "INSERT INTO threads (id, snippet, history_id, fetched_at) \
+                 VALUES (?1, NULL, NULL, ?2) \
+                 ON CONFLICT(id) DO UPDATE SET fetched_at = excluded.fetched_at",
+                rusqlite::params![m.thread_id, now],
+            )?;
+            if !m.message_id.is_empty() {
+                tx.execute(
+                    "INSERT INTO messages \
+                     (id, thread_id, internal_date, headers_json, body_text, body_html, \
+                      snippet, has_attachments, attachments_json, raw_size, fetched_at, deleted_at) \
+                     VALUES (?1, ?2, 0, '{}', NULL, NULL, NULL, 0, NULL, 0, ?3, NULL) \
+                     ON CONFLICT(id) DO NOTHING",
+                    rusqlite::params![m.message_id, m.thread_id, now],
+                )?;
+            }
+        }
+        for m in record.messages_deleted {
+            tx.execute(
+                "UPDATE messages SET deleted_at = ?1 WHERE id = ?2",
+                rusqlite::params![now, m.message_id],
+            )?;
+        }
+        for ch in record.labels_added {
+            ensure_message_stub(&tx, &ch.message_id, &ch.thread_id, now)?;
+            for label in &ch.label_ids {
+                tx.execute(
+                    "INSERT INTO message_labels (message_id, label_id) VALUES (?1, ?2) \
+                     ON CONFLICT(message_id, label_id) DO NOTHING",
+                    rusqlite::params![ch.message_id, label],
+                )?;
+            }
+        }
+        for ch in record.labels_removed {
+            // `labels_removed` doesn't need a stub: if the message
+            // isn't cached, there's nothing to unlink. DELETE is a no-op.
+            for label in &ch.label_ids {
+                tx.execute(
+                    "DELETE FROM message_labels WHERE message_id = ?1 AND label_id = ?2",
+                    rusqlite::params![ch.message_id, label],
+                )?;
+            }
+        }
+        tx.commit()
+    })
+    .await
+    .map_err(map_tokio_err)?;
+    Ok(())
+}
+
+/// Synthesize a metadata-style stub `messages` row when the `message_id`
+/// isn't yet cached. Required before inserting into `message_labels`
+/// because the foreign-key constraint refuses orphan label links.
+/// `INSERT OR IGNORE` leaves any existing FULL or metadata row untouched.
+fn ensure_message_stub(
+    tx: &rusqlite::Transaction<'_>,
+    message_id: &str,
+    thread_id: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    if message_id.is_empty() {
+        return Ok(());
+    }
+    // The thread row must exist too — schema doesn't enforce a FK from
+    // messages.thread_id to threads.id, but downstream lookup_thread_metadata
+    // joins through threads in future phases; create the parent stub here
+    // so the row set is self-consistent.
+    if !thread_id.is_empty() {
+        tx.execute(
+            "INSERT INTO threads (id, snippet, history_id, fetched_at) \
+             VALUES (?1, NULL, NULL, ?2) \
+             ON CONFLICT(id) DO NOTHING",
+            rusqlite::params![thread_id, now],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO messages \
+         (id, thread_id, internal_date, headers_json, body_text, body_html, \
+          snippet, has_attachments, attachments_json, raw_size, fetched_at, deleted_at) \
+         VALUES (?1, ?2, 0, '{}', NULL, NULL, NULL, 0, NULL, 0, ?3, NULL) \
+         ON CONFLICT(id) DO NOTHING",
+        rusqlite::params![message_id, thread_id, now],
+    )?;
+    Ok(())
+}
+
+/// Drop every `query_cache` row. The conservative choice while the
+/// finer-grained per-thread invalidation lands in Phase 4 (#81): any
+/// history mutation might affect any cached `threads.list` answer.
+pub(super) async fn invalidate_all_queries(conn: &Arc<Connection>) -> Result<(), Error> {
+    conn.call(|c| -> rusqlite::Result<()> {
+        c.execute("DELETE FROM query_cache", [])?;
+        Ok(())
+    })
+    .await
+    .map_err(map_tokio_err)?;
+    Ok(())
+}
+
+/// Reseed path for the 404 `historyNotFound` case. Drops every
+/// message/thread/label-link/query-result row for this account and
+/// installs a fresh watermark. The `labels` table is preserved (it's
+/// account-wide and cheap to keep). Per ADR-0009 §"History gap".
+pub(super) async fn reseed_account(
+    conn: &Arc<Connection>,
+    new_history_id: i64,
+) -> Result<(), Error> {
+    let now = now_ms();
+    conn.call(move |c| -> rusqlite::Result<()> {
+        let tx = c.transaction()?;
+        // message_labels has FK ON DELETE CASCADE on messages, but the v1
+        // schema doesn't enable foreign_keys by default on every
+        // connection — be explicit so the cascade fires reliably.
+        tx.pragma_update(None, "foreign_keys", "ON")?;
+        tx.execute("DELETE FROM messages", [])?;
+        // Belt-and-braces: clear message_labels in case the FK pragma
+        // wasn't on for prior writes.
+        tx.execute("DELETE FROM message_labels", [])?;
+        tx.execute("DELETE FROM threads", [])?;
+        tx.execute("DELETE FROM query_cache", [])?;
+        tx.execute(
+            "UPDATE account_state \
+             SET last_history_id = ?1, last_full_sync_at = ?2 \
+             WHERE rowid = 1",
+            rusqlite::params![new_history_id, now],
+        )?;
+        tx.commit()
+    })
+    .await
+    .map_err(map_tokio_err)?;
+    Ok(())
+}
+
+/// Shape passed from `Cache::apply_history_record` into the SQL layer.
+/// Decoupled from `gmail::history::HistoryRecord` so the SQL helpers
+/// don't drag the wire types into their signatures.
+pub(crate) struct HistoryDelta {
+    pub messages_added: Vec<MessageRefDelta>,
+    pub messages_deleted: Vec<MessageRefDelta>,
+    pub labels_added: Vec<LabelChangeDelta>,
+    pub labels_removed: Vec<LabelChangeDelta>,
+}
+
+pub(crate) struct MessageRefDelta {
+    pub message_id: String,
+    pub thread_id: String,
+}
+
+pub(crate) struct LabelChangeDelta {
+    pub message_id: String,
+    /// Gmail's history record carries the thread id alongside the message
+    /// id; we preserve it so a label event for a not-yet-cached message
+    /// can synthesize a metadata stub row instead of tripping the
+    /// `message_labels.message_id` foreign-key constraint.
+    pub thread_id: String,
+    pub label_ids: Vec<String>,
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 struct MessageRow {
@@ -896,5 +1116,279 @@ mod tests {
             .await
             .expect("lookup");
         assert!(got.is_none(), "expired row should not be returned");
+    }
+
+    // ── Phase 3 history-sync tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn watermark_round_trips() {
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        assert!(
+            cache.last_history_id("work").await.expect("read").is_none(),
+            "fresh account starts with NULL last_history_id",
+        );
+        cache
+            .set_last_history_id("work", 42_424)
+            .await
+            .expect("set");
+        let got = cache.last_history_id("work").await.expect("read");
+        assert_eq!(got, Some(42_424));
+    }
+
+    #[tokio::test]
+    async fn apply_record_messages_added_creates_thread_stub() {
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        let delta = HistoryDelta {
+            messages_added: vec![MessageRefDelta {
+                message_id: "m1".into(),
+                thread_id: "t-new".into(),
+            }],
+            messages_deleted: vec![],
+            labels_added: vec![],
+            labels_removed: vec![],
+        };
+        cache
+            .apply_history_record("work", delta)
+            .await
+            .expect("apply");
+        // Stub message exists but `lookup_thread` refuses it because
+        // body_text is NULL — the on-demand fetcher must fill it in.
+        assert!(
+            cache
+                .lookup_thread("work", "t-new")
+                .await
+                .expect("lookup")
+                .is_none(),
+            "metadata-only stub must not satisfy a FULL lookup",
+        );
+        // But the metadata-shaped lookup hits.
+        let meta = cache
+            .lookup_thread_metadata("work", "t-new")
+            .await
+            .expect("lookup")
+            .expect("hit");
+        assert_eq!(meta.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_record_messages_deleted_sets_deleted_at() {
+        // Seed a FULL thread, then mark its only message deleted via a
+        // history record. lookup_thread must now miss because the
+        // deleted_at filter excludes the row.
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        cache
+            .insert_thread("work", &sample_thread())
+            .await
+            .expect("seed");
+        assert!(
+            cache
+                .lookup_thread("work", "tid-1")
+                .await
+                .expect("lookup")
+                .is_some(),
+            "FULL thread is cached",
+        );
+        let delta = HistoryDelta {
+            messages_added: vec![],
+            messages_deleted: vec![MessageRefDelta {
+                message_id: "m1".into(),
+                thread_id: "tid-1".into(),
+            }],
+            labels_added: vec![],
+            labels_removed: vec![],
+        };
+        cache
+            .apply_history_record("work", delta)
+            .await
+            .expect("apply");
+        assert!(
+            cache
+                .lookup_thread("work", "tid-1")
+                .await
+                .expect("lookup")
+                .is_none(),
+            "deleted_at filter must hide the message from FULL lookups",
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_record_labels_added_and_removed_round_trips() {
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        cache
+            .insert_thread("work", &sample_thread())
+            .await
+            .expect("seed"); // m1 starts with [INBOX, UNREAD]
+
+        // Add STARRED.
+        cache
+            .apply_history_record(
+                "work",
+                HistoryDelta {
+                    messages_added: vec![],
+                    messages_deleted: vec![],
+                    labels_added: vec![LabelChangeDelta {
+                        message_id: "m1".into(),
+                        thread_id: "tid-1".into(),
+                        label_ids: vec!["STARRED".into()],
+                    }],
+                    labels_removed: vec![],
+                },
+            )
+            .await
+            .expect("apply add");
+        let t = cache
+            .lookup_thread("work", "tid-1")
+            .await
+            .expect("lookup")
+            .expect("hit");
+        assert_eq!(
+            t.messages[0].label_ids,
+            vec![
+                "INBOX".to_owned(),
+                "STARRED".to_owned(),
+                "UNREAD".to_owned()
+            ],
+            "STARRED added, INBOX+UNREAD preserved",
+        );
+
+        // Remove UNREAD.
+        cache
+            .apply_history_record(
+                "work",
+                HistoryDelta {
+                    messages_added: vec![],
+                    messages_deleted: vec![],
+                    labels_added: vec![],
+                    labels_removed: vec![LabelChangeDelta {
+                        message_id: "m1".into(),
+                        thread_id: "tid-1".into(),
+                        label_ids: vec!["UNREAD".into()],
+                    }],
+                },
+            )
+            .await
+            .expect("apply remove");
+        let t = cache
+            .lookup_thread("work", "tid-1")
+            .await
+            .expect("lookup")
+            .expect("hit");
+        assert_eq!(
+            t.messages[0].label_ids,
+            vec!["INBOX".to_owned(), "STARRED".to_owned()],
+            "UNREAD removed",
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidate_all_queries_drops_every_row() {
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        cache
+            .insert_query(
+                "work",
+                "is:unread",
+                10,
+                None,
+                &RawThreadsList {
+                    threads: vec![],
+                    next_page_token: None,
+                },
+            )
+            .await
+            .expect("insert");
+        assert!(cache
+            .lookup_query("work", "is:unread", 10, None)
+            .await
+            .expect("lookup")
+            .is_some(),);
+        cache
+            .invalidate_all_queries("work")
+            .await
+            .expect("invalidate");
+        assert!(
+            cache
+                .lookup_query("work", "is:unread", 10, None)
+                .await
+                .expect("lookup")
+                .is_none(),
+            "query_cache must be empty after invalidate",
+        );
+    }
+
+    #[tokio::test]
+    async fn reseed_account_drops_threads_and_messages_and_queries_but_keeps_labels() {
+        // Seed: insert a FULL thread (writes messages + message_labels +
+        // threads), seed a query row, then reseed and verify only the
+        // labels table survives. The labels table is account-wide
+        // catalog (separate from message_labels) and is intentionally
+        // preserved per ADR-0009.
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        cache
+            .insert_thread("work", &sample_thread())
+            .await
+            .expect("seed thread");
+        cache
+            .insert_query(
+                "work",
+                "x",
+                5,
+                None,
+                &RawThreadsList {
+                    threads: vec![],
+                    next_page_token: None,
+                },
+            )
+            .await
+            .expect("seed query");
+        cache
+            .set_last_history_id("work", 1000)
+            .await
+            .expect("seed watermark");
+
+        // Pre-condition: data exists.
+        let conn = cache.connection("work").expect("conn").clone();
+        let pre_counts: (i64, i64, i64, i64) = conn
+            .call(|c| -> rusqlite::Result<(i64, i64, i64, i64)> {
+                let m: i64 = c.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
+                let t: i64 = c.query_row("SELECT COUNT(*) FROM threads", [], |r| r.get(0))?;
+                let q: i64 = c.query_row("SELECT COUNT(*) FROM query_cache", [], |r| r.get(0))?;
+                let ml: i64 =
+                    c.query_row("SELECT COUNT(*) FROM message_labels", [], |r| r.get(0))?;
+                Ok((m, t, q, ml))
+            })
+            .await
+            .expect("counts");
+        assert!(
+            pre_counts.0 > 0 && pre_counts.1 > 0 && pre_counts.2 > 0 && pre_counts.3 > 0,
+            "pre-reseed: all four tables non-empty (got {pre_counts:?})",
+        );
+
+        cache.reseed_account("work", 9999).await.expect("reseed");
+
+        let post_counts: (i64, i64, i64, i64) = conn
+            .call(|c| -> rusqlite::Result<(i64, i64, i64, i64)> {
+                let m: i64 = c.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
+                let t: i64 = c.query_row("SELECT COUNT(*) FROM threads", [], |r| r.get(0))?;
+                let q: i64 = c.query_row("SELECT COUNT(*) FROM query_cache", [], |r| r.get(0))?;
+                let ml: i64 =
+                    c.query_row("SELECT COUNT(*) FROM message_labels", [], |r| r.get(0))?;
+                Ok((m, t, q, ml))
+            })
+            .await
+            .expect("counts");
+        assert_eq!(
+            post_counts,
+            (0, 0, 0, 0),
+            "post-reseed: messages/threads/query_cache/message_labels all empty",
+        );
+
+        let id = cache.last_history_id("work").await.expect("read");
+        assert_eq!(id, Some(9999), "watermark advanced to the reseed value");
     }
 }

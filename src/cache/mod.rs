@@ -26,6 +26,7 @@
 pub(crate) mod metrics;
 pub(crate) mod migrations;
 pub(crate) mod queries;
+pub(crate) mod sync;
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -220,6 +221,69 @@ impl Cache {
             return Ok(());
         };
         queries::insert_query(conn, query, max_results, page_token, result, self.query_ttl).await
+    }
+
+    // ── Phase 3: history watermark + delta application ───────────────────────
+
+    /// Read the `last_history_id` watermark for `account`. Returns
+    /// `Ok(None)` when the account has never been seeded (fresh install)
+    /// or when the account is unknown to this cache.
+    pub(crate) async fn last_history_id(&self, account: &str) -> Result<Option<i64>, Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(None);
+        };
+        queries::last_history_id(conn).await
+    }
+
+    /// Persist a new `last_history_id` watermark. No-op for unknown
+    /// accounts.
+    pub(crate) async fn set_last_history_id(
+        &self,
+        account: &str,
+        history_id: i64,
+    ) -> Result<(), Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(());
+        };
+        queries::set_last_history_id(conn, history_id).await
+    }
+
+    /// Apply one decoded `history.list` record to the cache. Caller
+    /// converts the wire shape into a [`queries::HistoryDelta`].
+    pub(crate) async fn apply_history_record(
+        &self,
+        account: &str,
+        delta: queries::HistoryDelta,
+    ) -> Result<(), Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(());
+        };
+        queries::apply_history_record(conn, delta).await
+    }
+
+    /// Drop every `query_cache` row for this account. Called after a
+    /// history page mutates any messages or labels (Phase 4 will replace
+    /// this with finer-grained per-thread invalidation).
+    pub(crate) async fn invalidate_all_queries(&self, account: &str) -> Result<(), Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(());
+        };
+        queries::invalidate_all_queries(conn).await
+    }
+
+    /// Reseed path for the 404 `historyNotFound` case. Drops every
+    /// cached message / thread / label-link / query-result row for this
+    /// account and installs `new_history_id`. The `labels` table
+    /// (account-wide catalog) is preserved.
+    pub(crate) async fn reseed_account(
+        &self,
+        account: &str,
+        new_history_id: i64,
+    ) -> Result<(), Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(());
+        };
+        queries::reseed_account(conn, new_history_id).await
     }
 }
 
