@@ -1,12 +1,16 @@
 //! Per-account `SQLite` cache scaffolding per [ADR-0009](../../docs/adr/0009-caching-with-sqlite-and-history-api.md).
 //!
-//! Phase 1 of the cache implementation plan ([docs/cache-implementation-plan.md](../../docs/cache-implementation-plan.md)):
-//! this module owns the `SQLite` connections (one per account), the migration
-//! framework, and the file-permission enforcement. It does **not** yet expose
-//! `lookup_*` / `insert_*` methods — those land with Phase 2 (the on-demand
-//! read seam) and Phase 3 (history-sync). After [`Cache::new`] returns
+//! Phases 1–2 of the cache implementation plan
+//! ([docs/cache-implementation-plan.md](../../docs/cache-implementation-plan.md)).
+//! This module owns the `SQLite` connections (one per account), the migration
+//! framework, file-permission enforcement, and the `lookup_*` / `insert_*`
+//! methods that [`crate::gmail::service::GmailService`] calls on each
+//! cacheable read. Phase 3 (history-sync, [#80]) will add a background sync
+//! loop alongside these primitives. After [`Cache::new`] returns
 //! successfully, every per-account DB file exists on disk, has WAL mode
 //! enabled, and is at [`migrations::MAX_KNOWN_VERSION`].
+//!
+//! [#80]: https://github.com/torsday/google-personal-mcp/issues/80
 //!
 //! Concurrency model: one [`tokio_rusqlite::Connection`] per account. Each
 //! `Connection` serializes its SQL through a dedicated background thread, so
@@ -19,16 +23,22 @@
 //! Per-account file: `<dir>/<account>.db`. Created mode `0600` per
 //! [ADR-0017](../../docs/adr/0017-secrets-at-rest.md).
 
+pub(crate) mod metrics;
 pub(crate) mod migrations;
+pub(crate) mod queries;
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio_rusqlite::Connection;
 
 use crate::error::Error;
+use crate::gmail::threads::{ParsedThread, RawThreadsList, ThreadMetadata};
+
+pub(crate) use self::metrics::CacheMetrics;
 
 /// Filename mode applied to each per-account DB file at creation.
 const DB_FILE_MODE: u32 = 0o600;
@@ -44,6 +54,8 @@ const DB_DIR_MODE: u32 = 0o700;
 pub(crate) struct Cache {
     dir: PathBuf,
     connections: HashMap<String, Arc<Connection>>,
+    query_ttl: Duration,
+    metrics: CacheMetrics,
 }
 
 impl Cache {
@@ -54,6 +66,10 @@ impl Cache {
     /// install, each DB is opened, pending migrations are applied in a
     /// transaction, and the file mode is verified.
     ///
+    /// `query_ttl` is applied to `query_cache` rows (`list_threads` results).
+    /// Lookups discard expired rows; inserts use the TTL to compute
+    /// `expires_at`.
+    ///
     /// Errors:
     /// - [`Error::Io`] if `dir` cannot be created.
     /// - [`Error::InsecurePermissions`] if an existing DB file is wider than
@@ -61,7 +77,11 @@ impl Cache {
     /// - [`Error::Internal`] for `SQLite` open or migration failures, or when
     ///   the on-disk schema version exceeds [`migrations::MAX_KNOWN_VERSION`]
     ///   (downgrade refusal per ADR-0009).
-    pub(crate) async fn new(dir: PathBuf, accounts: &[String]) -> Result<Self, Error> {
+    pub(crate) async fn new(
+        dir: PathBuf,
+        accounts: &[String],
+        query_ttl: Duration,
+    ) -> Result<Self, Error> {
         ensure_cache_dir(&dir)?;
 
         let mut connections = HashMap::with_capacity(accounts.len());
@@ -71,7 +91,12 @@ impl Cache {
             connections.insert(alias.clone(), Arc::new(conn));
         }
 
-        Ok(Self { dir, connections })
+        Ok(Self {
+            dir,
+            connections,
+            query_ttl,
+            metrics: CacheMetrics::default(),
+        })
     }
 
     /// Directory the per-account DBs live under. Stable for the Cache's
@@ -89,14 +114,112 @@ impl Cache {
         out
     }
 
-    /// Borrow the async connection for `account`, if known.
+    /// Hit/miss counters. Read by tests and (when it lands) the Prometheus
+    /// exporter from [#75].
     ///
-    /// Phase 1 has no callers — the method exists so that snapshot tests and
-    /// the Phase 2 `GmailService` seam have a stable handle. Hidden behind
-    /// `pub(crate)` so the public surface area stays empty until needed.
-    #[allow(dead_code)] // Unused until Phase 2.
+    /// [#75]: https://github.com/torsday/google-personal-mcp/issues/75
+    pub(crate) const fn metrics(&self) -> &CacheMetrics {
+        &self.metrics
+    }
+
+    /// Borrow the async connection for `account`, if known. Internal
+    /// helper for the `lookup_*` / `insert_*` methods; also exposed for
+    /// the Phase 3 history-sync loop ([#80]) and the Layer-4 schema
+    /// snapshot tests.
+    ///
+    /// [#80]: https://github.com/torsday/google-personal-mcp/issues/80
     pub(crate) fn connection(&self, account: &str) -> Option<&Arc<Connection>> {
         self.connections.get(account)
+    }
+
+    /// Look up a full thread (body text + attachment metadata + per-message
+    /// labels). Returns `Ok(None)` when the thread is absent, when only
+    /// metadata-format rows are cached (i.e. `body_text IS NULL`), or when
+    /// the account is unknown to this cache. See module docs for the
+    /// metadata-vs-full discriminator.
+    pub(crate) async fn lookup_thread(
+        &self,
+        account: &str,
+        thread_id: &str,
+    ) -> Result<Option<ParsedThread>, Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(None);
+        };
+        queries::lookup_thread(conn, thread_id).await
+    }
+
+    /// Insert (or replace) a full thread. Stores one row per message in
+    /// `messages`, links each message's labels in `message_labels`, and
+    /// writes a `threads` row for the parent.
+    pub(crate) async fn insert_thread(
+        &self,
+        account: &str,
+        thread: &ParsedThread,
+    ) -> Result<(), Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(());
+        };
+        queries::insert_thread(conn, thread).await
+    }
+
+    /// Look up metadata-shaped thread data (headers + label ids + size
+    /// estimates, no bodies). Returns `Ok(None)` when the thread is absent
+    /// or the account is unknown.
+    pub(crate) async fn lookup_thread_metadata(
+        &self,
+        account: &str,
+        thread_id: &str,
+    ) -> Result<Option<ThreadMetadata>, Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(None);
+        };
+        queries::lookup_thread_metadata(conn, thread_id).await
+    }
+
+    /// Insert (or replace) metadata-shaped thread data. Writes one row per
+    /// message to `messages` with `body_text = NULL` (the metadata-only
+    /// sentinel) and links labels in `message_labels`. A subsequent
+    /// `insert_thread` upgrades these rows in place.
+    pub(crate) async fn insert_thread_metadata(
+        &self,
+        account: &str,
+        meta: &ThreadMetadata,
+    ) -> Result<(), Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(());
+        };
+        queries::insert_thread_metadata(conn, meta).await
+    }
+
+    /// Look up a memoized `threads.list` result. Returns `Ok(None)` when
+    /// the row is absent, expired, or the account is unknown.
+    pub(crate) async fn lookup_query(
+        &self,
+        account: &str,
+        query: &str,
+        max_results: u32,
+        page_token: Option<&str>,
+    ) -> Result<Option<RawThreadsList>, Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(None);
+        };
+        queries::lookup_query(conn, query, max_results, page_token).await
+    }
+
+    /// Cache a `threads.list` result for `query_ttl` (set at construction).
+    /// Distinct `(query, max_results, page_token)` tuples cache independently.
+    pub(crate) async fn insert_query(
+        &self,
+        account: &str,
+        query: &str,
+        max_results: u32,
+        page_token: Option<&str>,
+        result: &RawThreadsList,
+    ) -> Result<(), Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(());
+        };
+        queries::insert_query(conn, query, max_results, page_token, result, self.query_ttl).await
     }
 }
 
@@ -208,12 +331,19 @@ mod tests {
         dir
     }
 
+    /// 5-minute TTL — matches the ADR-0009 default — used by tests that
+    /// don't care about expiry behavior.
+    const TEST_QUERY_TTL: Duration = Duration::from_mins(5);
+
+    async fn open(dir: &Path, accounts: &[&str]) -> Result<Cache, Error> {
+        let accounts: Vec<String> = accounts.iter().map(|s| (*s).to_owned()).collect();
+        Cache::new(dir.to_owned(), &accounts, TEST_QUERY_TTL).await
+    }
+
     #[tokio::test]
     async fn opens_fresh_db_at_v1_with_mode_600() {
         let dir = tmp();
-        let cache = Cache::new(dir.path().to_owned(), &["work".to_owned()])
-            .await
-            .expect("open cache");
+        let cache = open(dir.path(), &["work"]).await.expect("open cache");
 
         // DB file exists, mode 600.
         let db_path = dir.path().join("work.db");
@@ -255,12 +385,9 @@ mod tests {
     #[tokio::test]
     async fn opens_multiple_accounts() {
         let dir = tmp();
-        let cache = Cache::new(
-            dir.path().to_owned(),
-            &["work".to_owned(), "personal".to_owned()],
-        )
-        .await
-        .expect("open cache");
+        let cache = open(dir.path(), &["work", "personal"])
+            .await
+            .expect("open cache");
         assert_eq!(cache.account_aliases(), vec!["personal", "work"]);
         assert!(dir.path().join("work.db").exists());
         assert!(dir.path().join("personal.db").exists());
@@ -270,13 +397,9 @@ mod tests {
     async fn reopen_existing_database_is_idempotent() {
         let dir = tmp();
         // First open creates the DB.
-        Cache::new(dir.path().to_owned(), &["work".to_owned()])
-            .await
-            .expect("first open");
+        open(dir.path(), &["work"]).await.expect("first open");
         // Second open finds the DB, applies zero pending migrations, succeeds.
-        let cache = Cache::new(dir.path().to_owned(), &["work".to_owned()])
-            .await
-            .expect("second open");
+        let cache = open(dir.path(), &["work"]).await.expect("second open");
         let conn = cache.connection("work").unwrap().clone();
         let version: i64 = conn
             .call(|c| -> rusqlite::Result<i64> {
@@ -295,13 +418,11 @@ mod tests {
     async fn rejects_db_file_wider_than_0600() {
         let dir = tmp();
         // Pre-create the DB at mode 0o644 so the second open fails the check.
-        Cache::new(dir.path().to_owned(), &["work".to_owned()])
-            .await
-            .expect("seed");
+        open(dir.path(), &["work"]).await.expect("seed");
         let db_path = dir.path().join("work.db");
         std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
 
-        let err = Cache::new(dir.path().to_owned(), &["work".to_owned()])
+        let err = open(dir.path(), &["work"])
             .await
             .expect_err("expected mode rejection");
         match err {
@@ -318,7 +439,7 @@ mod tests {
         let dir = tmp(); // 0o700 by default per `tmp()`
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
             .expect("chmod to 0755");
-        let err = Cache::new(dir.path().to_owned(), &["work".to_owned()])
+        let err = open(dir.path(), &["work"])
             .await
             .expect_err("expected dir mode rejection");
         assert!(matches!(err, Error::InsecurePermissions { .. }));
@@ -328,9 +449,7 @@ mod tests {
     async fn refuses_to_open_db_with_newer_schema() {
         let dir = tmp();
         // Seed a normal v1 DB first.
-        Cache::new(dir.path().to_owned(), &["work".to_owned()])
-            .await
-            .expect("seed");
+        open(dir.path(), &["work"]).await.expect("seed");
         // Manually bump schema_version to one beyond what we know.
         let db_path = dir.path().join("work.db");
         let raw = rusqlite::Connection::open(&db_path).expect("raw open");
@@ -341,7 +460,7 @@ mod tests {
         .expect("bump");
         drop(raw);
 
-        let err = Cache::new(dir.path().to_owned(), &["work".to_owned()])
+        let err = open(dir.path(), &["work"])
             .await
             .expect_err("expected downgrade refusal");
         let msg = err.to_string();
@@ -357,7 +476,7 @@ mod tests {
         // Remove the auto-created tempdir so we exercise the create-dir path.
         std::fs::remove_dir(dir.path()).expect("rmdir tempdir");
 
-        let cache = Cache::new(dir.path().to_owned(), &[])
+        let cache = open(dir.path(), &[])
             .await
             .expect("open cache with no accounts");
         assert!(cache.account_aliases().is_empty());
@@ -371,9 +490,7 @@ mod tests {
     #[tokio::test]
     async fn schema_ddl_snapshot() {
         let dir = tmp();
-        let cache = Cache::new(dir.path().to_owned(), &["snap".to_owned()])
-            .await
-            .expect("open cache");
+        let cache = open(dir.path(), &["snap"]).await.expect("open cache");
         let conn = cache.connection("snap").unwrap().clone();
         let ddl: String = conn
             .call(|c| -> rusqlite::Result<String> {

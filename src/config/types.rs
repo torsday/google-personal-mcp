@@ -42,6 +42,14 @@ pub(crate) struct Config {
     /// `[audit]` section per [ADR-0011](../docs/adr/0011-audit-log.md).
     #[serde(default)]
     pub(crate) audit: AuditConfig,
+    /// `[cache]` section per [ADR-0009](../docs/adr/0009-caching-with-sqlite-and-history-api.md).
+    ///
+    /// Default is `enabled = false` during Phases 1–6 of the cache rollout
+    /// (see [docs/cache-implementation-plan.md](../docs/cache-implementation-plan.md));
+    /// Phase 7 (v1.0) flips it to `true`. Maintainer dogfooding before then is
+    /// the only intended `enabled = true` use case.
+    #[serde(default)]
+    pub(crate) cache: CacheConfig,
 }
 
 /// Controls when the audit-log file is rotated per
@@ -475,6 +483,82 @@ const fn default_backoff_cap() -> u64 {
 
 const fn default_max_total() -> u64 {
     30
+}
+
+/// `[cache]` section per [ADR-0009 §Config additions](../docs/adr/0009-caching-with-sqlite-and-history-api.md).
+///
+/// `enabled` defaults to `false` during the staged rollout
+/// ([docs/cache-implementation-plan.md](../docs/cache-implementation-plan.md)).
+/// ADR-0009 documents `enabled = true` as the long-term default; v1.0 flips it
+/// in Phase 7. Until then, operators wanting to dogfood the cache must opt in
+/// explicitly. With `enabled = false`, [`crate::gmail::service::GmailService`]
+/// is constructed with `cache = None` and every read passes through to Gmail.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CacheConfig {
+    /// Master switch. `false` (default) bypasses the cache entirely;
+    /// `Cache::new` is never called and no per-account `.db` files are
+    /// created. `true` constructs the cache during startup.
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// Directory holding per-account `<alias>.db` files. Created at mode
+    /// `0700`; each DB at mode `0600` per [ADR-0017](../docs/adr/0017-secrets-at-rest.md).
+    #[serde(
+        default = "default_cache_dir",
+        deserialize_with = "crate::config::deser_tilde_path"
+    )]
+    pub(crate) dir: PathBuf,
+    /// TTL applied to `query_cache` rows (`list_threads` results). Default
+    /// 300 s per ADR-0009.
+    #[serde(default = "default_query_ttl")]
+    pub(crate) query_ttl_seconds: u64,
+    /// TTL applied to label-catalog rows. Default 3600 s per ADR-0009.
+    /// (Phase 2 does not yet cache the label catalog; the knob is wired so
+    /// Phase 3/4 can use it without a config change.)
+    #[serde(default = "default_labels_ttl")]
+    pub(crate) labels_ttl_seconds: u64,
+    /// Background sync interval per ADR-0009. `0` disables the background
+    /// task. (Phase 2 spawns no task; Phase 3 is the consumer.)
+    #[serde(default = "default_bg_sync_interval")]
+    pub(crate) background_sync_interval_seconds: u64,
+    /// When `true`, the background sync runs a catch-up pass before serving
+    /// a lookup. (Phase 2 ignores this; the field is wired for Phase 3.)
+    #[serde(default = "default_sync_on_read")]
+    pub(crate) sync_on_read: bool,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: default_cache_dir(),
+            query_ttl_seconds: default_query_ttl(),
+            labels_ttl_seconds: default_labels_ttl(),
+            background_sync_interval_seconds: default_bg_sync_interval(),
+            sync_on_read: default_sync_on_read(),
+        }
+    }
+}
+
+fn default_cache_dir() -> PathBuf {
+    super::expand_tilde("~/.config/google-personal-mcp/cache")
+        .unwrap_or_else(|_| PathBuf::from("cache"))
+}
+
+const fn default_query_ttl() -> u64 {
+    300
+}
+
+const fn default_labels_ttl() -> u64 {
+    3600
+}
+
+const fn default_bg_sync_interval() -> u64 {
+    60
+}
+
+const fn default_sync_on_read() -> bool {
+    true
 }
 
 #[cfg(test)]

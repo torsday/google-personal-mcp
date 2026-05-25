@@ -1,10 +1,10 @@
 //! `GmailService` — the seam at which cache lookup happens.
 //!
-//! Phase 0 of the cache implementation plan
+//! Phases 0–2 of the cache implementation plan
 //! ([docs/cache-implementation-plan.md](../../../docs/cache-implementation-plan.md)).
-//! Today this is a pure delegate around [`GmailClient`]; in Phase 2 the
-//! load-bearing read methods grow cache-hit / cache-miss logic without
-//! touching any of their call sites.
+//! Phase 0 introduced this wrapper as a pure delegate; Phase 2 ([#150])
+//! grew the load-bearing read methods into cache-aware code paths
+//! without touching any of their call sites.
 //!
 //! Tools that perform **cacheable reads** (`get_thread`, `list_threads`,
 //! `get_thread_metadata`) call the corresponding `GmailService` method. Tools
@@ -15,12 +15,13 @@
 //! `&GmailClient<T>` signatures so every existing wiremock test stays valid
 //! without modification.
 //!
-//! The cache slot is intentionally `Option<Arc<Cache>>`: in Phase 1 ([#79])
-//! the `Cache` type exists but isn't yet wired into `lib::run_server`. Phase 2
-//! ([#150]) flips the wiring and gives this struct a `Some(_)` cache to
-//! consult.
+//! The cache slot is `Option<Arc<Cache>>`: when `None`, every method
+//! falls straight through to the HTTP client and no `gmcp_cache_*`
+//! metrics fire. `lib::run_server` constructs `Some(_)` only when
+//! `[cache] enabled = true` in `config.toml` — the default through the
+//! v0.x line is `false` per the implementation plan's "Feature-flag
+//! decision".
 //!
-//! [#79]: https://github.com/torsday/google-personal-mcp/issues/79
 //! [#150]: https://github.com/torsday/google-personal-mcp/issues/150
 
 use std::sync::Arc;
@@ -35,7 +36,6 @@ use crate::gmail::threads::{self as threads_api, ParsedThread, RawThreadsList, T
 /// raw client so cacheable reads route through one place.
 pub(crate) struct GmailService<T: RefreshTransport> {
     client: Arc<GmailClient<T>>,
-    #[allow(dead_code)] // Wired in Phase 2 (#150); Phase 0 stores `None`.
     cache: Option<Arc<Cache>>,
 }
 
@@ -49,8 +49,8 @@ impl<T: RefreshTransport> std::fmt::Debug for GmailService<T> {
 
 impl<T: RefreshTransport> GmailService<T> {
     /// Build a service wrapping `client`, optionally backed by `cache`.
-    /// During Phase 0 (#149) `cache` is always `None`; Phase 2 (#150) wires
-    /// it.
+    /// `lib::run_server` supplies `Some(_)` when `[cache] enabled = true`
+    /// is set in `config.toml` (off by default through v0.x).
     pub(crate) const fn new(client: Arc<GmailClient<T>>, cache: Option<Arc<Cache>>) -> Self {
         Self { client, cache }
     }
@@ -72,21 +72,35 @@ impl<T: RefreshTransport> GmailService<T> {
 
     /// Fetch one thread (`threads.get(format=FULL)`, 40 quota units).
     ///
-    /// Phase 0: pure delegate. Phase 2 (#150) adds cache lookup → fall
-    /// through to API on miss → write back the result.
+    /// With a cache: hit → return cached `ParsedThread`. Miss → fetch from
+    /// Gmail, write back, return. Both branches bump
+    /// `gmcp_cache_{hits,misses}_total{kind="thread"}`. With no cache:
+    /// passthrough to the free function.
     pub(crate) async fn get_thread(
         &self,
         account: &str,
         thread_id: &str,
     ) -> Result<ParsedThread, Error> {
+        if let Some(cache) = &self.cache {
+            if let Some(hit) = cache.lookup_thread(account, thread_id).await? {
+                cache.metrics().record_hit(account, "thread");
+                return Ok(hit);
+            }
+            cache.metrics().record_miss(account, "thread");
+            let fresh = threads_api::get_thread(&self.client, account, thread_id).await?;
+            cache.insert_thread(account, &fresh).await?;
+            return Ok(fresh);
+        }
         threads_api::get_thread(&self.client, account, thread_id).await
     }
 
     /// `threads.list` (10 quota units) — returns Gmail's raw envelope so the
     /// caller can hydrate per-thread metadata separately.
     ///
-    /// Phase 0: pure delegate. Phase 2 (#150) will memoize via `query_cache`
-    /// keyed on `sha256(query || max_results)`.
+    /// With a cache: memoize per `(query, max_results, page_token)` tuple
+    /// for the configured `query_ttl`. Both branches bump
+    /// `gmcp_cache_{hits,misses}_total{kind="query"}`. With no cache:
+    /// passthrough.
     pub(crate) async fn list_threads(
         &self,
         account: &str,
@@ -94,6 +108,23 @@ impl<T: RefreshTransport> GmailService<T> {
         max_results: u32,
         page_token: Option<&str>,
     ) -> Result<RawThreadsList, Error> {
+        if let Some(cache) = &self.cache {
+            if let Some(hit) = cache
+                .lookup_query(account, query, max_results, page_token)
+                .await?
+            {
+                cache.metrics().record_hit(account, "query");
+                return Ok(hit);
+            }
+            cache.metrics().record_miss(account, "query");
+            let fresh =
+                threads_api::list_threads(&self.client, account, query, max_results, page_token)
+                    .await?;
+            cache
+                .insert_query(account, query, max_results, page_token, &fresh)
+                .await?;
+            return Ok(fresh);
+        }
         threads_api::list_threads(&self.client, account, query, max_results, page_token).await
     }
 
@@ -101,13 +132,25 @@ impl<T: RefreshTransport> GmailService<T> {
     /// only, no bodies. Used by `search_threads` to hydrate per-result
     /// metadata.
     ///
-    /// Phase 0: pure delegate. Phase 2 (#150) adds per-thread metadata
-    /// caching alongside the body cache.
+    /// With a cache: hit → return cached `ThreadMetadata`. Miss → fetch,
+    /// write back, return. Both branches bump
+    /// `gmcp_cache_{hits,misses}_total{kind="thread_metadata"}`. With no
+    /// cache: passthrough.
     pub(crate) async fn get_thread_metadata(
         &self,
         account: &str,
         thread_id: &str,
     ) -> Result<ThreadMetadata, Error> {
+        if let Some(cache) = &self.cache {
+            if let Some(hit) = cache.lookup_thread_metadata(account, thread_id).await? {
+                cache.metrics().record_hit(account, "thread_metadata");
+                return Ok(hit);
+            }
+            cache.metrics().record_miss(account, "thread_metadata");
+            let fresh = threads_api::get_thread_metadata(&self.client, account, thread_id).await?;
+            cache.insert_thread_metadata(account, &fresh).await?;
+            return Ok(fresh);
+        }
         threads_api::get_thread_metadata(&self.client, account, thread_id).await
     }
 }
@@ -228,5 +271,188 @@ mod tests {
         assert!(std::ptr::eq(borrowed, &raw const *arc_before));
         let cloned = service.client_arc();
         assert!(Arc::ptr_eq(&cloned, &arc_before));
+    }
+
+    // ── Phase-2 cache integration tests ──────────────────────────────────────
+
+    use crate::cache::Cache;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    /// 5-minute TTL, matches the ADR-0009 default.
+    const TEST_TTL: Duration = Duration::from_mins(5);
+
+    async fn make_cache(accounts: &[&str]) -> Arc<Cache> {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("chmod 0700");
+        // Leak the tempdir into a stable path so the cache outlives this
+        // helper. Each test gets a fresh tmp dir per `tempdir()`; cleanup
+        // happens at process exit which is acceptable for a fast test
+        // suite.
+        let path = tmp.keep();
+        let aliases: Vec<String> = accounts.iter().map(|a| (*a).to_owned()).collect();
+        Arc::new(
+            Cache::new(path, &aliases, TEST_TTL)
+                .await
+                .expect("cache open"),
+        )
+    }
+
+    fn thread_body(thread_id: &str) -> serde_json::Value {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let body_b64 = URL_SAFE_NO_PAD.encode(b"the body");
+        serde_json::json!({
+            "id": thread_id,
+            "messages": [{
+                "id": "m1",
+                "threadId": thread_id,
+                "labelIds": ["INBOX"],
+                "internalDate": "1717200000000",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [
+                        {"name": "Subject", "value": "hello"},
+                        {"name": "From", "value": "alice@example.com"}
+                    ],
+                    "body": {"data": body_b64, "size": 8},
+                    "parts": []
+                }
+            }]
+        })
+    }
+
+    /// Cold cache → exactly one HTTP call, miss counter bumps, hit counter
+    /// stays at zero, and the returned thread matches the upstream body.
+    #[tokio::test]
+    async fn get_thread_cache_miss_fetches_and_records_miss() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/threads/t-miss"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(thread_body("t-miss")))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let cache = make_cache(&["work"]).await;
+        let service = GmailService::new(client, Some(Arc::clone(&cache)));
+
+        let thread = service.get_thread("work", "t-miss").await.expect("first");
+        assert_eq!(thread.thread_id, "t-miss");
+        assert_eq!(cache.metrics().misses(), 1);
+        assert_eq!(cache.metrics().hits(), 0);
+    }
+
+    /// Layer-2 invariant: with the cache primed, a second `get_thread` for
+    /// the same thread MUST NOT issue an HTTP request. The wiremock
+    /// `.expect(1)` will panic at server drop time if a second request
+    /// arrives.
+    #[tokio::test]
+    async fn get_thread_warm_cache_does_not_call_api() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/threads/t-warm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(thread_body("t-warm")))
+            .expect(1) // <-- exactly one upstream call across both reads
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let cache = make_cache(&["work"]).await;
+        let service = GmailService::new(client, Some(Arc::clone(&cache)));
+
+        let first = service.get_thread("work", "t-warm").await.expect("first");
+        let second = service.get_thread("work", "t-warm").await.expect("second");
+        assert_eq!(first.thread_id, second.thread_id);
+        assert_eq!(first.messages.len(), second.messages.len());
+        assert_eq!(cache.metrics().misses(), 1);
+        assert_eq!(cache.metrics().hits(), 1);
+    }
+
+    /// `list_threads` warm-cache path: distinct `(query, max_results,
+    /// page_token)` tuples cache independently. One upstream hit for one
+    /// tuple even when called twice.
+    #[tokio::test]
+    async fn list_threads_warm_cache_does_not_call_api() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/threads$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "threads": [
+                    {"id": "tid-1", "snippet": "snip", "historyId": "100"}
+                ],
+                "nextPageToken": null,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let cache = make_cache(&["work"]).await;
+        let service = GmailService::new(client, Some(Arc::clone(&cache)));
+
+        let r1 = service
+            .list_threads("work", "from:alice", 10, None)
+            .await
+            .expect("first");
+        let r2 = service
+            .list_threads("work", "from:alice", 10, None)
+            .await
+            .expect("second");
+        assert_eq!(r1.threads.len(), 1);
+        assert_eq!(r2.threads.len(), 1);
+        assert_eq!(r2.threads[0].id, "tid-1");
+        assert_eq!(r2.threads[0].snippet, "snip");
+        assert_eq!(r2.threads[0].history_id, "100");
+        assert_eq!(cache.metrics().misses(), 1);
+        assert_eq!(cache.metrics().hits(), 1);
+    }
+
+    /// `get_thread_metadata` warm-cache path: same shape as `get_thread`,
+    /// keyed on `(account, thread_id)`.
+    #[tokio::test]
+    async fn get_thread_metadata_warm_cache_does_not_call_api() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/threads/t-meta"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "t-meta",
+                "messages": [{
+                    "id": "m1",
+                    "threadId": "t-meta",
+                    "labelIds": ["INBOX"],
+                    "internalDate": "1717200000000",
+                    "sizeEstimate": 2048,
+                    "payload": {
+                        "mimeType": "text/plain",
+                        "headers": [
+                            {"name": "Subject", "value": "meta"},
+                            {"name": "From", "value": "alice@example.com"}
+                        ]
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let cache = make_cache(&["work"]).await;
+        let service = GmailService::new(client, Some(Arc::clone(&cache)));
+
+        let m1 = service
+            .get_thread_metadata("work", "t-meta")
+            .await
+            .expect("first");
+        let m2 = service
+            .get_thread_metadata("work", "t-meta")
+            .await
+            .expect("second");
+        assert_eq!(m1.thread_id, m2.thread_id);
+        assert_eq!(m2.messages[0].subject, "meta");
+        assert_eq!(cache.metrics().misses(), 1);
+        assert_eq!(cache.metrics().hits(), 1);
     }
 }
