@@ -53,7 +53,13 @@ mem_forget = "deny"
 redundant_pub_crate = "allow"
 
 [dependencies]
-rmcp = { version = "1.5", features = ["server", "macros", "transport-io", "schemars"] }
+rmcp = { version = "1.5", features = ["server", "macros", "transport-io", "transport-streamable-http-server", "schemars"] }
+
+# Streamable HTTP transport per ADR-0003 (#72). `axum` hosts the rmcp
+# `StreamableHttpService` as a `tower` service; `tokio-util` supplies the
+# `CancellationToken` used for graceful shutdown.
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "net", "fs", "sync"] }
 

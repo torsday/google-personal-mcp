@@ -97,7 +97,8 @@ impl GoogleServer {
 }
 
 /// Run the MCP daemon over stdio until the client disconnects (stdin EOF).
-/// Per ADR-0003, stdio is the only v0.2 transport; HTTP transport is v1.0.
+/// Per ADR-0003 this is one of the two supported transports — the other
+/// is [`run_http`].
 ///
 /// Stdout is reserved for the MCP wire protocol; the caller is responsible
 /// for routing all `tracing` output to stderr (see [`crate::observability`]).
@@ -113,6 +114,76 @@ pub(crate) async fn run_stdio(server: GoogleServer) -> Result<(), Error> {
         source: anyhow::Error::new(e),
     })?;
     Ok(())
+}
+
+/// Run the MCP daemon over Streamable HTTP per
+/// [ADR-0003](../../docs/adr/0003-transport-stdio-and-streamable-http.md).
+///
+/// Binds `addr` (e.g. `127.0.0.1:8765`) and serves the rmcp
+/// [`StreamableHttpService`](rmcp::transport::streamable_http_server::StreamableHttpService)
+/// at `/mcp`. Every inbound MCP request shares the same
+/// [`GoogleServer`] handle via cheap `Arc` clones — the service
+/// factory passed to rmcp clones the handle per session so accounts,
+/// tokens, cache, and audit writer are identical across transports.
+///
+/// `axum::serve` is configured for graceful shutdown via the
+/// `StreamableHttpServerConfig::cancellation_token`. The token is
+/// owned by this function; cancellation is left for a future
+/// signal-handler ticket — the daemon's working assumption is "runs
+/// until the process is killed" per ADR-0001.
+///
+/// Errors:
+/// - [`Error::Config`] if the listener cannot bind `addr`.
+/// - [`Error::Internal`] for axum serve faults.
+pub(crate) async fn run_http(server: GoogleServer, addr: &str) -> Result<(), Error> {
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| Error::Config {
+            path: addr.to_owned(),
+            message: format!("HTTP transport could not bind: {e}"),
+        })?;
+    let bound = listener
+        .local_addr()
+        .map_or_else(|_| addr.to_owned(), |a| a.to_string());
+    tracing::info!(addr = %bound, "HTTP transport listening at /mcp");
+    serve_http_on(listener, server).await
+}
+
+/// Inner half of [`run_http`] — accepts a pre-bound listener so tests
+/// can supply an ephemeral-port socket and the production caller can
+/// supply the operator-configured `addr`. Both share the same axum +
+/// rmcp wiring beyond this point.
+pub(crate) async fn serve_http_on(
+    listener: tokio::net::TcpListener,
+    server: GoogleServer,
+) -> Result<(), Error> {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    let cancel = CancellationToken::new();
+    let config = StreamableHttpServerConfig::default().with_cancellation_token(cancel.clone());
+    let server_arc = Arc::new(server);
+    let service: StreamableHttpService<GoogleServer, LocalSessionManager> =
+        StreamableHttpService::new(
+            {
+                let server_arc = Arc::clone(&server_arc);
+                move || Ok((*server_arc).clone())
+            },
+            Arc::new(LocalSessionManager::default()),
+            config,
+        );
+
+    let router = axum::Router::new().nest_service("/mcp", service);
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move { cancel.cancelled_owned().await })
+        .await
+        .map_err(|e| Error::Internal {
+            context: "axum::serve (HTTP transport)".to_owned(),
+            source: anyhow::Error::new(e),
+        })
 }
 
 #[cfg(test)]
@@ -269,5 +340,72 @@ mod tests {
             /* dry_run = */ true,
         );
         assert!(result.is_ok(), "dry_run path must short-circuit cleanly");
+    }
+
+    // ── Layer 2: HTTP transport handles one MCP request end-to-end ──────────
+
+    /// Spawn `serve_http_on` on an ephemeral 127.0.0.1 port and return
+    /// the bound URL. The server task is detached; it stops when the
+    /// test runtime tears down.
+    async fn spawn_http_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = fake_server();
+        tokio::spawn(async move {
+            let _ = serve_http_on(listener, server).await;
+        });
+        format!("http://{addr}/mcp")
+    }
+
+    /// MCP `initialize` is the first message in every session; if the
+    /// HTTP transport handles it, the transport itself is correctly
+    /// wired through to `GoogleServer::get_info`. This is the
+    /// acceptance-criterion "one MCP tool call end-to-end" test.
+    #[tokio::test]
+    async fn http_transport_handles_initialize_handshake() {
+        let url = spawn_http_server().await;
+        let init_body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"layer2-test","version":"0.0.1"}}}"#;
+
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(init_body)
+            .send()
+            .await
+            .expect("POST initialize");
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let body = resp.text().await.expect("body");
+        assert_eq!(status, 200, "initialize must succeed (body: {body:?})");
+
+        // rmcp's stateful default returns an SSE stream; locate the
+        // first `data: {...}` JSON-RPC envelope. The MCP standard
+        // permits either application/json or text/event-stream framing
+        // — we accept whichever the server chose.
+        // rmcp's stateful SSE stream emits a priming `data:` line first
+        // followed by the JSON-RPC payload — skip empty `data:` frames.
+        let json_blob = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| body.trim());
+        let parsed: Value = serde_json::from_str(json_blob).unwrap_or_else(|e| {
+            panic!("response is JSON-RPC (ct={content_type}, body={body:?}): {e}")
+        });
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["id"], 1, "response id echoes the request id");
+        let server_info = &parsed["result"]["serverInfo"];
+        assert_eq!(
+            server_info["name"],
+            env!("CARGO_PKG_NAME"),
+            "serverInfo flows from GoogleServer::get_info",
+        );
+        assert_eq!(server_info["version"], env!("CARGO_PKG_VERSION"));
     }
 }

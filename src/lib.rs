@@ -153,8 +153,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run the MCP daemon over stdio (default if no subcommand given).
-    Serve,
+    /// Run the MCP daemon over stdio or Streamable HTTP per ADR-0003.
+    /// Exactly one of `--stdio` / `--http` is permitted; when neither is
+    /// specified the daemon defaults to stdio (least-surprise for
+    /// interactive `serve` invocations).
+    Serve(ServeArgs),
     /// OAuth account management.
     Auth {
         #[command(subcommand)]
@@ -162,12 +165,48 @@ enum Command {
     },
 }
 
+/// `serve` subcommand arguments. `--stdio` and `--http` are mutually
+/// exclusive (clap enforces this via `conflicts_with`). When both are
+/// omitted, stdio is selected — see [`ServeArgs::transport`].
+#[derive(clap::Args, Debug)]
+struct ServeArgs {
+    /// Run the MCP daemon over stdio. Default when no transport flag is
+    /// supplied.
+    #[arg(long, conflicts_with = "http")]
+    stdio: bool,
+    /// Run the MCP daemon over Streamable HTTP on the supplied address
+    /// (e.g. `127.0.0.1:8765`). Per ADR-0003: bind loopback locally;
+    /// front with nginx + TLS for production. The non-loopback warning
+    /// fires at startup when applicable.
+    #[arg(long, value_name = "ADDR", conflicts_with = "stdio")]
+    http: Option<String>,
+}
+
+/// Resolved transport choice — what `serve` will actually start.
+#[derive(Debug)]
+pub(crate) enum Transport {
+    Stdio,
+    Http(String),
+}
+
+impl ServeArgs {
+    /// Map the clap-validated flags into the resolved transport. clap's
+    /// `conflicts_with` rejects `--stdio --http` before we get here.
+    fn transport(self) -> Transport {
+        self.http.map_or(Transport::Stdio, Transport::Http)
+    }
+}
+
 pub fn main_entry() -> ExitCode {
     observability::init();
 
     let cli = Cli::parse();
-    let result = match cli.command.unwrap_or(Command::Serve) {
-        Command::Serve => run_serve_blocking(),
+    let default_serve = Command::Serve(ServeArgs {
+        stdio: true,
+        http: None,
+    });
+    let result = match cli.command.unwrap_or(default_serve) {
+        Command::Serve(args) => run_serve_blocking(args.transport()),
         Command::Auth { sub } => sub.run(&config::config_dir()),
     };
 
@@ -187,7 +226,8 @@ pub fn main_entry() -> ExitCode {
 /// Returns `Ok(())` on clean client disconnect; surfaces structured errors
 /// for startup-posture failures (`InsecurePermissions`, `Config`) and runtime
 /// faults (`Internal`).
-fn run_serve_blocking() -> Result<(), Error> {
+#[allow(clippy::too_many_lines)] // sequential startup orchestration; splitting would just rename the chunks
+fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
     let dir = config::config_dir();
     perm_check::check(&perm_check::default_subjects(&dir))?;
     let loaded_accounts = config::Accounts::load(&config::accounts_path(&dir))?;
@@ -316,7 +356,27 @@ fn run_serve_blocking() -> Result<(), Error> {
     // aborts the background tasks, which is what we want at shutdown.
     let _sync_handles = sync_handles;
 
-    runtime.block_on(run_stdio(server))
+    match transport {
+        Transport::Stdio => runtime.block_on(run_stdio(server)),
+        Transport::Http(addr) => {
+            // ADR-0003 §Risks: warn when serving HTTP on a non-loopback
+            // address without TLS. Same shape as the existing
+            // `cfg.http.bind` warning a few lines above; the CLI flag
+            // takes precedence over config (operator chose this binding
+            // explicitly).
+            if !config::is_loopback_bind(&addr) {
+                tracing::warn!(
+                    bind = %addr,
+                    "HTTP transport bound to a non-loopback address without TLS — \
+                     auth tokens are sent in cleartext on every tool call; \
+                     place nginx (or another TLS-terminating reverse proxy) in \
+                     front of this listener; see \
+                     docs/adr/0003-transport-stdio-and-streamable-http.md"
+                );
+            }
+            runtime.block_on(server::run_http(server, &addr))
+        }
+    }
 }
 
 /// Bundle returned from [`build_cache_wiring`] — owns the cache and the
