@@ -243,10 +243,33 @@ fn run_serve_blocking() -> Result<(), Error> {
     ));
     let gmail_base = "https://gmail.googleapis.com/gmail/v1";
     let gmail_client = Arc::new(GmailClient::new(gmail_base, tokens.clone(), http_client));
-    // Phase 0 (#149) of the cache plan: the GmailService wrapper is the seam
-    // future cache reads route through. `cache = None` here until Phase 2
-    // (#150) wires the Cache constructor into this same path.
-    let gmail = Arc::new(GmailService::new(gmail_client, None));
+
+    // Phase 2 (#150): construct the per-account SQLite cache when the
+    // operator has opted in via `[cache] enabled = true`. The default is
+    // `false` through v0.x per docs/cache-implementation-plan.md;
+    // maintainer dogfooding is the only intended `true` use case until the
+    // history-sync loop (#80) and race prevention (#81) land.
+    let cache = if cfg.cache.enabled {
+        let account_aliases: Vec<String> = loaded_accounts
+            .accounts
+            .iter()
+            .map(|a| a.alias.clone())
+            .collect();
+        let cache = runtime.block_on(cache::Cache::new(
+            cfg.cache.dir.clone(),
+            &account_aliases,
+            std::time::Duration::from_secs(cfg.cache.query_ttl_seconds),
+        ))?;
+        tracing::info!(
+            accounts = account_aliases.len(),
+            dir = %cfg.cache.dir.display(),
+            "cache enabled — staged default during build-out; see docs/cache-implementation-plan.md",
+        );
+        Some(Arc::new(cache))
+    } else {
+        None
+    };
+    let gmail = Arc::new(GmailService::new(gmail_client, cache));
 
     let accounts = Arc::new(loaded_accounts.accounts);
     let audit = AuditWriter::new(&dir, cfg.audit.rotate.clone());
