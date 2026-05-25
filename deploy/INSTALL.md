@@ -120,11 +120,52 @@ Verify the unit parses cleanly:
 systemd-analyze verify /etc/systemd/system/google-personal-mcp.service
 ```
 
-### 8. (HTTP-transport deploys only) Configure nginx
+### 8. (HTTP-transport deploys only) Configure bearer auth + nginx
 
-Skip until [#77](https://github.com/torsday/google-personal-mcp/issues/77)
-ships the `nginx.conf.example`. For stdio-only or dev installs, drop the
-`--http ...` flag from `ExecStart` first.
+**Bearer token (v1.0 / HTTP transport).** When you expose the daemon beyond
+the loopback interface, every request must carry an `Authorization: Bearer
+<token>` header. The daemon refuses to start on a non-loopback bind without
+a bearer-token config file.
+
+**First-time setup:**
+
+```sh
+# 1. Generate a token (prints a 43-char URL-safe base64 string to stdout).
+google-personal-mcp auth bearer generate
+
+# 2. Paste the output into http_auth.toml.
+sudo -u google-personal-mcp \
+  install -m 600 /dev/null \
+  /home/google-personal-mcp/.config/google-personal-mcp/http_auth.toml
+
+# Edit the file (run as google-personal-mcp or root):
+cat > /home/google-personal-mcp/.config/google-personal-mcp/http_auth.toml <<'EOF'
+# Active bearer tokens. During rotation, list both old and new; remove
+# the old one after all clients have updated their Authorization header.
+tokens = [
+  "paste-token-here",
+]
+EOF
+chmod 600 /home/google-personal-mcp/.config/google-personal-mcp/http_auth.toml
+chown google-personal-mcp: \
+  /home/google-personal-mcp/.config/google-personal-mcp/http_auth.toml
+```
+
+**Token rotation** — to rotate without dropping existing client connections:
+
+```sh
+NEW=$(google-personal-mcp auth bearer generate)
+# Add $NEW to tokens[] alongside the old entry, then reload:
+systemctl reload google-personal-mcp   # SIGHUP — re-reads http_auth.toml
+# Distribute $NEW to clients; once all clients have migrated, remove the
+# old token from tokens[] and reload again.
+```
+
+**nginx** — skip the nginx step until
+[#77](https://github.com/torsday/google-personal-mcp/issues/77) ships the
+`nginx.conf.example`. For stdio-only or dev installs, drop the `--http ...`
+flag from `ExecStart` first — no bearer config file is needed for loopback
+binds.
 
 ### 9. Enable + start the service
 
