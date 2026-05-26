@@ -171,6 +171,13 @@ pub(crate) async fn run_stdio(server: GoogleServer) -> Result<(), Error> {
 /// factory passed to rmcp clones the handle per session so accounts,
 /// tokens, cache, and audit writer are identical across transports.
 ///
+/// When `validator` is `Some`, an `Authorization: Bearer <token>`
+/// middleware is layered in front of `/mcp` per ADR-0020. The caller
+/// (`lib::run_serve_blocking`) supplies `None` for loopback binds and a
+/// constructed validator for non-loopback binds; loopback binds skip
+/// the auth check entirely because the OS user boundary is the auth
+/// layer for local-only deployments.
+///
 /// `axum::serve` is configured for graceful shutdown via the
 /// `StreamableHttpServerConfig::cancellation_token`. The token is
 /// owned by this function; cancellation is left for a future
@@ -180,7 +187,11 @@ pub(crate) async fn run_stdio(server: GoogleServer) -> Result<(), Error> {
 /// Errors:
 /// - [`Error::Config`] if the listener cannot bind `addr`.
 /// - [`Error::Internal`] for axum serve faults.
-pub(crate) async fn run_http(server: GoogleServer, addr: &str) -> Result<(), Error> {
+pub(crate) async fn run_http(
+    server: GoogleServer,
+    addr: &str,
+    validator: Option<Arc<crate::http_auth::BearerValidator>>,
+) -> Result<(), Error> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| Error::Config {
@@ -190,8 +201,12 @@ pub(crate) async fn run_http(server: GoogleServer, addr: &str) -> Result<(), Err
     let bound = listener
         .local_addr()
         .map_or_else(|_| addr.to_owned(), |a| a.to_string());
-    tracing::info!(addr = %bound, "HTTP transport listening at /mcp");
-    serve_http_on(listener, server).await
+    tracing::info!(
+        addr = %bound,
+        bearer_auth = validator.is_some(),
+        "HTTP transport listening at /mcp",
+    );
+    serve_http_on(listener, server, validator).await
 }
 
 /// Inner half of [`run_http`] — accepts a pre-bound listener so tests
@@ -201,11 +216,11 @@ pub(crate) async fn run_http(server: GoogleServer, addr: &str) -> Result<(), Err
 pub(crate) async fn serve_http_on(
     listener: tokio::net::TcpListener,
     server: GoogleServer,
+    validator: Option<Arc<crate::http_auth::BearerValidator>>,
 ) -> Result<(), Error> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
-    use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     let cancel = CancellationToken::new();
@@ -221,8 +236,18 @@ pub(crate) async fn serve_http_on(
             config,
         );
 
-    let router = axum::Router::new().nest_service("/mcp", service);
-    axum::serve(listener, router)
+    // Mount the rmcp service at `/mcp`; layer the bearer-auth middleware
+    // in front of it when the caller supplied a validator. The layer
+    // applies only to routes nested below this Router, so it doesn't
+    // affect any sibling routes added in the future.
+    let mut mcp_router = axum::Router::new().nest_service("/mcp", service);
+    if let Some(v) = validator {
+        mcp_router = mcp_router.layer(axum::middleware::from_fn_with_state(
+            v,
+            crate::http_auth::middleware::bearer_middleware,
+        ));
+    }
+    axum::serve(listener, mcp_router)
         .with_graceful_shutdown(async move { cancel.cancelled_owned().await })
         .await
         .map_err(|e| Error::Internal {
@@ -413,11 +438,19 @@ mod tests {
     /// the bound URL. The server task is detached; it stops when the
     /// test runtime tears down.
     async fn spawn_http_server() -> String {
+        // Existing test: no bearer auth (mirrors a loopback bind in
+        // production, where the validator is None per ADR-0020).
+        spawn_http_server_with(None).await
+    }
+
+    async fn spawn_http_server_with(
+        validator: Option<Arc<crate::http_auth::BearerValidator>>,
+    ) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = fake_server();
         tokio::spawn(async move {
-            let _ = serve_http_on(listener, server).await;
+            let _ = serve_http_on(listener, server, validator).await;
         });
         format!("http://{addr}/mcp")
     }
@@ -472,5 +505,79 @@ mod tests {
             "serverInfo flows from GoogleServer::get_info",
         );
         assert_eq!(server_info["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    // ── Layer 2: bearer-auth middleware end-to-end (ADR-0020 / #162) ────────
+
+    /// Spawn an http transport with a bearer validator and POST the same
+    /// `initialize` body used by the no-auth test above:
+    ///   - no `Authorization` header → 401 with `WWW-Authenticate`
+    ///   - wrong token → 401
+    ///   - correct token → 200 (the inner rmcp `initialize` handler runs)
+    ///
+    /// This is the acceptance-criterion "every HTTP request validates
+    /// `Authorization: Bearer <token>` **before** session lookup" test.
+    #[tokio::test]
+    async fn http_transport_enforces_bearer_when_validator_supplied() {
+        use crate::http_auth::{BearerValidator, HttpAuthConfig};
+        use std::path::PathBuf;
+
+        let cfg = HttpAuthConfig {
+            tokens: vec!["the-real-token".to_owned()],
+        };
+        let validator = Arc::new(BearerValidator::new(&cfg, PathBuf::from("/dev/null")));
+        let url = spawn_http_server_with(Some(Arc::clone(&validator))).await;
+
+        let init_body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"layer2-auth-test","version":"0.0.1"}}}"#;
+        let client = reqwest::Client::new();
+
+        // ── 1. No Authorization header ──────────────────────────────────────
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(init_body)
+            .send()
+            .await
+            .expect("POST without auth");
+        assert_eq!(resp.status(), 401, "missing-header must be 401");
+        let www = resp
+            .headers()
+            .get("www-authenticate")
+            .map(|v| v.to_str().unwrap_or("").to_owned())
+            .unwrap_or_default();
+        assert!(
+            www.contains("Bearer") && www.contains("google-personal-mcp"),
+            "WWW-Authenticate must advertise Bearer realm: {www:?}",
+        );
+        let body = resp.text().await.unwrap_or_default();
+        assert!(
+            body.contains(r#""error""#) && body.contains("unauthorized"),
+            "401 body must be JSON unauthorized envelope: {body:?}",
+        );
+
+        // ── 2. Wrong token ──────────────────────────────────────────────────
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("Authorization", "Bearer not-the-token")
+            .body(init_body)
+            .send()
+            .await
+            .expect("POST with wrong auth");
+        assert_eq!(resp.status(), 401, "wrong-token must be 401");
+
+        // ── 3. Correct token: rmcp initialize handler runs ──────────────────
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("Authorization", "Bearer the-real-token")
+            .body(init_body)
+            .send()
+            .await
+            .expect("POST with correct auth");
+        assert_eq!(resp.status(), 200, "correct token must reach inner handler");
     }
 }
