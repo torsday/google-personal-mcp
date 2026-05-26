@@ -157,6 +157,21 @@ pub(crate) struct AuditConfig {
     /// corresponding filename patterns.
     #[serde(default)]
     pub(crate) rotate: RotateMode,
+    /// Number of days after which closed rotation files are deleted. `0`
+    /// (the default) disables retention entirely — ADR-0011's "no
+    /// automatic deletion" remains the safe default. Set this only when
+    /// you have a compliance mandate to delete old audit logs.
+    ///
+    /// Age is computed from the **filename**'s period (per ADR-0019, not
+    /// mtime). Size-rotated files (`audit-<N>.log`) carry no period and
+    /// are exempt — operators using `rotate = "size:..."` must implement
+    /// retention externally.
+    ///
+    /// The currently-open rotation file is always exempt regardless of
+    /// the threshold; see [`crate::audit_retention`] for the full
+    /// algorithm.
+    #[serde(default)]
+    pub(crate) delete_after_days: u32,
 }
 
 /// `[secrets]` section — selects the storage backend per
