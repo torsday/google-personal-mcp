@@ -45,10 +45,23 @@ server {
         proxy_request_buffering off;
     }
 
-    # Optional: restrict access to known MCP clients via HTTP basic auth.
-    # Uncomment and create the password file with `htpasswd -c`.
-    # auth_basic "google-personal-mcp";
-    # auth_basic_user_file /etc/nginx/google-personal-mcp.htpasswd;
+    # Optional: require a client certificate (mTLS) on top of TLS (ADR-0020).
+    #
+    # mTLS is ADDITIVE to the daemon-side bearer-token check — it does not
+    # replace it. The daemon continues to validate the Authorization header
+    # regardless of nginx-layer auth. This means an nginx misconfiguration
+    # that silently disables mTLS does not drop the daemon to anonymous access.
+    #
+    # Setup (one-time, operator-side — no daemon tooling required):
+    #   openssl req -x509 -newkey rsa:4096 -keyout clients-ca.key \
+    #     -out clients-ca.crt -days 3650 -nodes -subj "/CN=google-personal-mcp-ca"
+    #   sudo cp clients-ca.crt /etc/nginx/google-personal-mcp-clients-ca.crt
+    #   # Then issue a per-device cert signed by clients-ca.key and distribute
+    #   # the .crt + .key pair to each MCP client device.
+    #
+    # Uncomment to enable:
+    # ssl_client_certificate /etc/nginx/google-personal-mcp-clients-ca.crt;
+    # ssl_verify_client      on;
 }
 
 # Redirect plain HTTP to HTTPS.

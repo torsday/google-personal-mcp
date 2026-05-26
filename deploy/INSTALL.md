@@ -161,11 +161,24 @@ systemctl reload google-personal-mcp   # SIGHUP — re-reads http_auth.toml
 # old token from tokens[] and reload again.
 ```
 
-**nginx** — skip the nginx step until
-[#77](https://github.com/torsday/google-personal-mcp/issues/77) ships the
-`nginx.conf.example`. For stdio-only or dev installs, drop the `--http ...`
-flag from `ExecStart` first — no bearer config file is needed for loopback
-binds.
+**nginx TLS termination** — copy `deploy/nginx.conf.example` to
+`/etc/nginx/sites-available/google-personal-mcp`, edit the domain and cert
+paths, then enable and reload:
+
+```sh
+sudo ln -s /etc/nginx/sites-available/google-personal-mcp \
+           /etc/nginx/sites-enabled/google-personal-mcp
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+**Optional: mTLS on top of bearer (ADR-0020).** mTLS is additive — it does
+not replace the daemon's bearer-token check. To enable, generate a CA, issue
+per-device certs, and uncomment the `ssl_client_certificate` / `ssl_verify_client`
+lines in `nginx.conf.example` (see the inline instructions there). No daemon
+tooling is needed for the cert ceremony; it is entirely operator-side.
+
+For stdio-only or dev installs, drop the `--http ...` flag from `ExecStart`
+first — no bearer config file is needed for loopback-only binds.
 
 ### 9. Enable + start the service
 
