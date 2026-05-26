@@ -9,6 +9,7 @@ pub mod error;
 pub mod gmail;
 pub mod healthz;
 pub mod http;
+pub mod http_auth;
 pub mod observability;
 pub mod perm_check;
 pub mod project_quota;
@@ -368,6 +369,13 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
         audit::Verbosity::Redacted
     };
 
+    // ADR-0020 §"Fail-closed startup invariant": resolve the HTTP-auth
+    // validator *before* `dir` is moved into `PurgePaths`. For loopback
+    // binds this returns `None`; for non-loopback it loads, validates,
+    // and refuses startup if `http_auth.toml` is missing or contains no
+    // active tokens. Stdio binds skip this entirely.
+    let http_validator = build_http_validator(&transport, &dir)?;
+
     // `dir` and `cfg.cache.dir` are not used after this point, so move
     // them into the PurgePaths value rather than cloning. The
     // GoogleServer's `Arc<PurgePaths>` owns the only live reference
@@ -402,9 +410,103 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
                      docs/adr/0003-transport-stdio-and-streamable-http.md"
                 );
             }
-            runtime.block_on(server::run_http(server, &addr))
+            // SIGHUP-driven reload of `http_auth.toml` per ADR-0020
+            // §Rotation. Only meaningful when a validator was
+            // constructed (i.e. non-loopback bind). Spawned on the same
+            // runtime as the HTTP listener; aborts when the runtime
+            // drops. Unix-only — Windows doesn't have SIGHUP.
+            #[cfg(unix)]
+            if let Some(v) = http_validator.as_ref() {
+                let v = Arc::clone(v);
+                runtime.spawn(async move {
+                    let mut sig = match tokio::signal::unix::signal(
+                        tokio::signal::unix::SignalKind::hangup(),
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "failed to install SIGHUP handler — \
+                                 http_auth.toml reload disabled",
+                            );
+                            return;
+                        }
+                    };
+                    while sig.recv().await.is_some() {
+                        match v.reload() {
+                            Ok(count) => tracing::info!(
+                                tokens = count,
+                                path = %v.path().display(),
+                                "http_auth.toml reloaded",
+                            ),
+                            Err(e) => tracing::error!(
+                                error = ?e,
+                                path = %v.path().display(),
+                                "http_auth.toml reload failed; \
+                                 previous tokens remain in force",
+                            ),
+                        }
+                    }
+                });
+            }
+            runtime.block_on(server::run_http(server, &addr, http_validator))
         }
     }
+}
+
+/// Build the HTTP bearer-auth validator per ADR-0020 §"Fail-closed
+/// startup invariant". Returns:
+///
+/// - `Ok(None)` for stdio transports and loopback HTTP binds (auth is
+///   not enforced).
+/// - `Ok(Some(v))` for non-loopback HTTP binds where `http_auth.toml`
+///   loaded and validated.
+/// - `Err(Config)` for non-loopback HTTP binds where the file is missing
+///   or unusable — the error message names the file and the generate
+///   subcommand so operators can fix it on the spot.
+///
+/// Loopback binds (`127.0.0.1`, `::1`) skip the check entirely: the OS
+/// user boundary is the auth layer for local-only deployments per the
+/// ADR. Operators wanting bearer enforcement on loopback should bind a
+/// non-loopback address and use SSH tunneling instead.
+fn build_http_validator(
+    transport: &Transport,
+    config_dir: &std::path::Path,
+) -> Result<Option<Arc<http_auth::BearerValidator>>, Error> {
+    let Transport::Http(addr) = transport else {
+        return Ok(None);
+    };
+    if config::is_loopback_bind(addr) {
+        return Ok(None);
+    }
+    let path = config::http_auth_path(config_dir);
+    if !path.exists() {
+        return Err(Error::Config {
+            path: path.display().to_string(),
+            message: format!(
+                "non-loopback HTTP bind `{addr}` requires a bearer-token \
+                 config at `{}`. Create one with:\n  \
+                 google-personal-mcp auth bearer generate \
+                 > {}\n  \
+                 chmod 0600 {}\n  \
+                 then wrap the token in `tokens = [\"...\"]`. \
+                 See docs/adr/0020-http-transport-authentication.md.",
+                path.display(),
+                path.display(),
+                path.display(),
+            ),
+        });
+    }
+    let cfg = http_auth::HttpAuthConfig::from_file(&path)?;
+    let token_count = cfg.tokens.len();
+    let validator = Arc::new(http_auth::BearerValidator::new(&cfg, path.clone()));
+    tracing::info!(
+        path = %path.display(),
+        tokens = token_count,
+        "http_auth.toml loaded — bearer authentication enforced on /mcp \
+         (SIGHUP to reload)",
+    );
+    Ok(Some(validator))
 }
 
 /// Bundle returned from [`build_cache_wiring`] — owns the cache and the

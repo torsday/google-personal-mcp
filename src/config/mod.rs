@@ -45,6 +45,14 @@ pub(crate) fn config_path(dir: &Path) -> PathBuf {
     dir.join("config.toml")
 }
 
+/// Path to `http_auth.toml` per
+/// [ADR-0020](../../docs/adr/0020-http-transport-authentication.md). Only
+/// loaded for non-loopback HTTP binds; the file itself is operator-
+/// managed (created via `auth bearer generate` + paste).
+pub(crate) fn http_auth_path(dir: &Path) -> PathBuf {
+    dir.join(crate::http_auth::HTTP_AUTH_FILE)
+}
+
 /// Expand a leading `~/` to `$HOME`. Rejects `~<user>/...` form explicitly
 /// per ADR-0006 — the daemon is single-user and the other-user form is a
 /// foot-gun.
