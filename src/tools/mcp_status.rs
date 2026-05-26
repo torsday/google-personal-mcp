@@ -53,6 +53,15 @@ pub(crate) struct McpStatusOutput {
     pub schema_version: u32,
     pub version: String,
     pub accounts: Vec<AccountStatus>,
+    /// Cumulative count of deprecated-tool invocations since process
+    /// start, across all tools and accounts. Bumped by the dispatcher's
+    /// deprecation wrapper per [ADR-0015](../../docs/adr/0015-tool-versioning-policy.md).
+    ///
+    /// **Lifetime, not last-hour.** A rolling-window breakdown is
+    /// deferred until #75 (Prometheus exporter) lands time-bucketed
+    /// infrastructure — same simplification taken for cache
+    /// `hit_rate_lifetime` in `cache_status`.
+    pub deprecated_tool_invocations_total: u64,
 }
 
 /// Per-account status row.
@@ -68,7 +77,14 @@ pub(crate) struct AccountStatus {
 
 /// Public schema-version of the response. Bump on breaking shape changes
 /// so consumers (Claude Desktop, other LLM clients) can detect mismatch.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+///
+/// History:
+/// - **v1** — initial cut: `accounts[]` with auth state.
+/// - **v2** — added `deprecated_tool_invocations_total` for ADR-0015.
+///   Additive — clients written against v1 still deserialize cleanly,
+///   but bumping signals the *availability* of the new field to clients
+///   that check `schema_version` before reading it.
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 /// Build the `mcp_status` response from a slice of snapshots. Pure; tests
 /// pass synthetic snapshots without standing up a `TokenManager`.
@@ -89,6 +105,7 @@ pub(crate) fn build_status(snapshots: &[AccountSnapshot], now: DateTime<Utc>) ->
         schema_version: SCHEMA_VERSION,
         version: env!("CARGO_PKG_VERSION").to_owned(),
         accounts,
+        deprecated_tool_invocations_total: crate::server::deprecation::invocations_total(),
     }
 }
 

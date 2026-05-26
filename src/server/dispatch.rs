@@ -68,6 +68,15 @@ impl ServerHandler for GoogleServer {
         // dispatch arm; that's a follow-up. Always-on: `metrics::*!` is
         // a no-op when no recorder is installed.
         let tool_name = request.name.to_string();
+
+        // ADR-0015 deprecation telemetry — emit before the call so the
+        // structured WARN is correlated with any downstream failure /
+        // result by trace context. Counter is process-global; see
+        // `super::deprecation` module docs.
+        if let Some(dep) = self.deprecations.get(&tool_name) {
+            super::deprecation::on_deprecated_invocation(&tool_name, dep);
+        }
+
         let started = std::time::Instant::now();
         let result = self.dispatch_inner(request, context).await;
         let outcome = if result.is_ok() { "success" } else { "error" };

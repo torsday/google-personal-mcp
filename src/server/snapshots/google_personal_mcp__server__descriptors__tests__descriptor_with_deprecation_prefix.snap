@@ -1,0 +1,8 @@
+---
+source: src/server/descriptors.rs
+assertion_line: 651
+expression: "t.description.as_deref().unwrap_or(\"\")"
+---
+[DEPRECATED — use list_threads_v2 — sunset 2027-01-01] List all Gmail labels visible to the given account, including system labels (INBOX, STARRED, SENT, etc.) and user-created labels. Returns label_id, name, kind (system|user), messages_total, messages_unread.
+
+**Cross-account fan-out.** Pass `account: "*"` to query every registered account in parallel. The response then has shape `{fanout: true, accounts: [{account, outcome, data|error}], summary: {...}}` — per-account failures surface as `outcome: "error"` entries and never block healthy accounts.

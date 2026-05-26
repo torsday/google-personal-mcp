@@ -555,6 +555,26 @@ fn batch_modify_thread_labels_descriptor() -> Tool {
     t
 }
 
+/// Prepend the ADR-0015 deprecation banner to `tool.description` so the
+/// host LLM sees the sunset warning in the same place it sees the rest
+/// of the tool's docs. Used at registration time when a deprecation
+/// entry exists in [`super::deprecation::Registry`].
+///
+/// Idempotency: this helper does not check for an already-applied
+/// prefix — callers apply it exactly once per descriptor at build
+/// time.
+pub(crate) fn apply_deprecation_prefix(
+    tool: &mut Tool,
+    deprecation: &super::deprecation::Deprecation,
+) {
+    let prefix = deprecation.description_prefix();
+    let new_description = match tool.description.as_deref() {
+        Some(existing) => format!("{prefix}{existing}"),
+        None => prefix,
+    };
+    tool.description = Some(new_description.into());
+}
+
 /// Return the canonical list of every registered v0.2 tool descriptor.
 ///
 /// Single source of truth consumed by `list_tools` and by the Layer 4
@@ -610,6 +630,42 @@ mod tests {
         assert!(
             required.iter().any(|v| v == "account"),
             "account must be required"
+        );
+    }
+
+    /// Apply the ADR-0015 deprecation prefix to a fixture descriptor and
+    /// snapshot the rendered description so a maintainer reading the
+    /// snapshot diff catches drift in either the prefix format or the
+    /// concatenation logic. Substitute for the not-yet-existing
+    /// "Layer 4 snapshot of a real deprecated tool" — pre-1.0 there are
+    /// no deprecated tools to snapshot.
+    #[test]
+    fn deprecation_prefix_renders_in_descriptor() {
+        use chrono::NaiveDate;
+        let dep = super::super::deprecation::Deprecation {
+            sunset_date: NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
+            replacement: "list_threads_v2".into(),
+        };
+        let mut t = list_labels_descriptor(); // arbitrary non-deprecated tool
+        apply_deprecation_prefix(&mut t, &dep);
+        insta::assert_snapshot!(
+            "descriptor_with_deprecation_prefix",
+            t.description.as_deref().unwrap_or("")
+        );
+    }
+
+    #[test]
+    fn deprecation_prefix_handles_tool_with_no_description() {
+        use chrono::NaiveDate;
+        let dep = super::super::deprecation::Deprecation {
+            sunset_date: NaiveDate::from_ymd_opt(2027, 6, 30).unwrap(),
+            replacement: "successor".into(),
+        };
+        let mut t = Tool::default(); // description = None
+        apply_deprecation_prefix(&mut t, &dep);
+        assert_eq!(
+            t.description.as_deref(),
+            Some("[DEPRECATED — use successor — sunset 2027-06-30] ")
         );
     }
 
