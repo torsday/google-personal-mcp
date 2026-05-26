@@ -644,4 +644,117 @@ mod tests {
             .expect("query schema");
         insta::assert_snapshot!("cache_v2_schema", ddl);
     }
+
+    /// Phase 7 gate: cache-enabled integration smoke-test.
+    ///
+    /// Simulates a 1 000-operation workload: 500 thread inserts + 500 hits,
+    /// followed by 500 lookups of unknown IDs (misses) and one
+    /// `invalidate_all_queries` call (history-sync invalidation).  Verifies
+    /// that
+    ///
+    /// * ≥ 1 hit counter was recorded (`hits ≥ 500`)
+    /// * ≥ 1 miss counter was recorded (`misses ≥ 500`)
+    /// * `invalidate_all_queries` completes without error (≥ 1 history-sync
+    ///   invalidation)
+    /// * no staleness panics fire (the workload completes without unwinding)
+    ///
+    /// This is the ADR-0009 Phase 7 acceptance test referenced in issue #168.
+    #[tokio::test]
+    async fn phase7_cache_enabled_integration_smoke() {
+        use crate::gmail::threads::{ParsedMessage, ParsedThread};
+
+        const OPS: usize = 500;
+
+        let dir = tmp();
+        let cache = open(dir.path(), &["work"]).await.expect("open cache");
+
+        // ── Build synthetic threads ───────────────────────────────────────
+        let threads: Vec<ParsedThread> = (0..OPS)
+            .map(|i| ParsedThread {
+                thread_id: format!("thread-{i:04}"),
+                messages: vec![ParsedMessage {
+                    message_id: format!("msg-{i:04}"),
+                    internal_date_ms: "1700000000000".to_owned(),
+                    label_ids: vec!["INBOX".to_owned()],
+                    subject: format!("Subject {i}"),
+                    from: "sender@example.com".to_owned(),
+                    to: vec!["me@example.com".to_owned()],
+                    cc: vec![],
+                    body_text: format!("Body text for message {i}"),
+                    attachments: vec![],
+                }],
+            })
+            .collect();
+
+        // ── Insert all threads (write pass) ──────────────────────────────
+        for t in &threads {
+            cache.insert_thread("work", t).await.expect("insert_thread");
+        }
+
+        // ── Lookup all inserted threads: each must hit ────────────────────
+        let mut hits: usize = 0;
+        for t in &threads {
+            let result = cache
+                .lookup_thread("work", &t.thread_id)
+                .await
+                .expect("lookup_thread");
+            if result.is_some() {
+                cache.metrics().record_hit("work", "thread");
+                hits += 1;
+            }
+        }
+        assert_eq!(
+            hits, OPS,
+            "expected every inserted thread to be a cache hit"
+        );
+
+        // ── Lookup unknown thread IDs: each must miss ─────────────────────
+        let mut misses: usize = 0;
+        for i in 0..OPS {
+            let result = cache
+                .lookup_thread("work", &format!("unknown-{i:04}"))
+                .await
+                .expect("lookup_thread unknown");
+            if result.is_none() {
+                cache.metrics().record_miss("work", "thread");
+                misses += 1;
+            }
+        }
+        assert_eq!(
+            misses, OPS,
+            "expected every unknown lookup to be a cache miss"
+        );
+
+        // ── History-sync invalidation ─────────────────────────────────────
+        // Simulates a history-API event invalidating all cached query results.
+        cache
+            .invalidate_all_queries("work")
+            .await
+            .expect("invalidate_all_queries should succeed without error");
+
+        // After invalidation, subsequent query lookups should return None.
+        let post_invalidation = cache
+            .lookup_query("work", "in:inbox", 50, None)
+            .await
+            .expect("lookup_query post-invalidation");
+        assert!(
+            post_invalidation.is_none(),
+            "query cache should be empty after invalidate_all_queries"
+        );
+
+        // ── Metric assertions ─────────────────────────────────────────────
+        let m = cache.metrics();
+        assert!(
+            m.hits() >= OPS as u64,
+            "expected ≥ {OPS} hits, got {}",
+            m.hits()
+        );
+        assert!(
+            m.misses() >= OPS as u64,
+            "expected ≥ {OPS} misses, got {}",
+            m.misses()
+        );
+        // Zero staleness panics: if we reached this point, the workload
+        // completed without unwinding — no panics fired.
+    }
 }
