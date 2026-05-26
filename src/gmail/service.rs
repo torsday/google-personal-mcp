@@ -461,6 +461,57 @@ mod tests {
         assert_eq!(cache.metrics().hits(), 1);
     }
 
+    /// ADR-0019 (#169) Layer-2 invariant: after a body-purge nulls the
+    /// body columns, the next `get_thread` MUST issue exactly one
+    /// upstream call (rehydration), and the subsequent read MUST hit
+    /// the cache again (`purged_at` cleared by the FULL insert).
+    /// `.expect(2)` on the wiremock proves "two upstream calls total
+    /// across three reads" — initial miss + post-purge rehydrate, no
+    /// more.
+    #[tokio::test]
+    async fn get_thread_rehydrates_after_body_purge() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/threads/t-purge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(thread_body("t-purge")))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let cache = make_cache(&["work"]).await;
+        let service = GmailService::new(client, Some(Arc::clone(&cache)));
+
+        // Read 1: cold cache → fetches from Gmail.
+        let _t1 = service.get_thread("work", "t-purge").await.expect("first");
+        assert_eq!(cache.metrics().misses(), 1);
+        assert_eq!(cache.metrics().hits(), 0);
+
+        // Body-purge passes a far-future age cutoff so the seeded row
+        // (internal_date = 1717200000000) is unambiguously past it.
+        let report = cache
+            .purge_old_bodies("work", i64::MAX, 0)
+            .await
+            .expect("purge");
+        assert_eq!(report.age_purged, 1);
+        assert_eq!(cache.metrics().bodies_purged(), 1);
+
+        // Read 2: cache returns None (purged → body_text IS NULL),
+        // GmailService refetches from Gmail and writes back.
+        let _t2 = service.get_thread("work", "t-purge").await.expect("second");
+        assert_eq!(cache.metrics().misses(), 2);
+        assert_eq!(cache.metrics().hits(), 0);
+
+        // Read 3: post-rehydration the row has body_text populated and
+        // purged_at = NULL — should hit the cache, no upstream call.
+        let _t3 = service.get_thread("work", "t-purge").await.expect("third");
+        assert_eq!(cache.metrics().hits(), 1, "rehydrated row hits the cache");
+        assert_eq!(cache.metrics().misses(), 2);
+
+        // `.expect(2)` on the wiremock enforces the upstream-call cap
+        // when the server drops.
+    }
+
     /// `list_threads` warm-cache path: distinct `(query, max_results,
     /// page_token)` tuples cache independently. One upstream hit for one
     /// tuple even when called twice.

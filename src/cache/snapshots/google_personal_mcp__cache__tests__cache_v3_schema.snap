@@ -1,6 +1,6 @@
 ---
 source: src/cache/mod.rs
-assertion_line: 578
+assertion_line: 673
 expression: ddl
 ---
 -- index: idx_messages_date
@@ -47,7 +47,7 @@ CREATE TABLE messages (
     raw_size         INTEGER,
     fetched_at       INTEGER NOT NULL,        -- ms epoch; diagnostics only
     deleted_at       INTEGER                  -- nullable; set on Gmail-side delete
-)
+, purged_at INTEGER)
 
 -- table: query_cache
 CREATE TABLE query_cache (

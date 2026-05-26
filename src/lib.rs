@@ -474,10 +474,13 @@ fn build_cache_wiring(
     // `eviction_interval_seconds`. Eviction is a no-op when the DB is
     // under `max_size_bytes_per_account`.
     let eviction_interval = std::time::Duration::from_secs(cfg.cache.eviction_interval_seconds);
+    let purge_interval = std::time::Duration::from_secs(cfg.cache.purge_interval_seconds);
     let evictor = Arc::new(cache::eviction::Evictor::new(
         Arc::clone(&cache),
         eviction_interval,
         cfg.cache.max_size_bytes_per_account,
+        cfg.cache.body_max_age_days,
+        purge_interval,
     ));
     let mut eviction_handles: Vec<cache::eviction::EvictionHandle> = Vec::new();
     for alias in &account_aliases {

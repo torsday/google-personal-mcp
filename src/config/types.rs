@@ -548,6 +548,20 @@ pub(crate) struct CacheConfig {
     /// background eviction task. Default 300 s (5 min) per ADR-0009.
     #[serde(default = "default_eviction_interval")]
     pub(crate) eviction_interval_seconds: u64,
+    /// Time-based body purge per [ADR-0019 §Cache body age cap](../docs/adr/0019-data-retention-and-purge.md).
+    /// When `> 0`, the eviction task's body-purge phase nulls
+    /// body/snippet/attachments columns on messages whose `internal_date`
+    /// is older than `N` days. Metadata is preserved and bodies rehydrate
+    /// on next on-demand fetch (one Gmail call). `0` (default) disables
+    /// the phase — only ADR-0009's LRU eviction runs.
+    #[serde(default = "default_body_max_age_days")]
+    pub(crate) body_max_age_days: u32,
+    /// Cadence of the body-purge sweep in seconds. Default 86400 s
+    /// (one day) per ADR-0019. The sweep also fires inline with every
+    /// eviction tick; this knob caps how often a *forced* body-purge
+    /// runs when the LRU phase would otherwise skip (no size pressure).
+    #[serde(default = "default_purge_interval")]
+    pub(crate) purge_interval_seconds: u64,
 }
 
 impl Default for CacheConfig {
@@ -561,6 +575,8 @@ impl Default for CacheConfig {
             sync_on_read: default_sync_on_read(),
             max_size_bytes_per_account: default_max_size_bytes_per_account(),
             eviction_interval_seconds: default_eviction_interval(),
+            body_max_age_days: default_body_max_age_days(),
+            purge_interval_seconds: default_purge_interval(),
         }
     }
 }
@@ -598,6 +614,17 @@ const fn default_max_size_bytes_per_account() -> u64 {
 /// 5 minutes per ADR-0009 §"TTLs and eviction".
 const fn default_eviction_interval() -> u64 {
     300
+}
+
+/// Disabled by default — keep ADR-0011's "no automatic deletion" stance
+/// safe out of the box. Operators with retention requirements opt in.
+const fn default_body_max_age_days() -> u32 {
+    0
+}
+
+/// 24 hours per ADR-0019 §"Cache body age cap".
+const fn default_purge_interval() -> u64 {
+    86_400
 }
 
 #[cfg(test)]

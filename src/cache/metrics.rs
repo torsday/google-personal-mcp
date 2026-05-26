@@ -10,12 +10,15 @@
 //! - `gmcp_cache_hits_total{account, kind}`
 //! - `gmcp_cache_misses_total{account, kind}`
 //! - `gmcp_cache_write_discarded_total{account, kind}` (Phase 4 — [#81])
+//! - `gmcp_cache_bodies_purged_total{account}` (ADR-0019 — [#169])
+//! - `gmcp_cache_bodies_purged_due_to_delete_total{account}` (ADR-0019 — [#169])
 //!
 //! where `kind` is one of `"thread"`, `"thread_metadata"`, `"query"`.
 //!
 //! [ADR-0009]: ../../docs/adr/0009-caching-with-sqlite-and-history-api.md
 //! [#75]: https://github.com/torsday/google-personal-mcp/issues/75
 //! [#81]: https://github.com/torsday/google-personal-mcp/issues/81
+//! [#169]: https://github.com/torsday/google-personal-mcp/issues/169
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,6 +32,8 @@ pub(crate) struct CacheMetrics {
     hits: AtomicU64,
     misses: AtomicU64,
     write_discarded: AtomicU64,
+    bodies_purged: AtomicU64,
+    bodies_purged_due_to_delete: AtomicU64,
 }
 
 impl CacheMetrics {
@@ -77,6 +82,30 @@ impl CacheMetrics {
         .increment(1);
     }
 
+    /// Record a body purge — ADR-0019 (#169). `kind = "age"` when the
+    /// row's `internal_date` was past the configured `body_max_age_days`;
+    /// `kind = "soft_delete"` when the row was tombstoned more than 7
+    /// days ago. The two split into separate Prometheus counter names
+    /// (per ADR-0019) so dashboards can show retention-driven purges
+    /// distinct from Gmail-side deletions.
+    pub(crate) fn record_body_purged(&self, account: &str, kind: &str) {
+        let counter_name = if kind == "soft_delete" {
+            self.bodies_purged_due_to_delete
+                .fetch_add(1, Ordering::Relaxed);
+            crate::observability::metrics::names::CACHE_BODIES_PURGED_DUE_TO_DELETE_TOTAL
+        } else {
+            self.bodies_purged.fetch_add(1, Ordering::Relaxed);
+            crate::observability::metrics::names::CACHE_BODIES_PURGED_TOTAL
+        };
+        tracing::debug!(
+            metric.name = counter_name,
+            account = account,
+            kind = kind,
+            "cache body purged",
+        );
+        metrics::counter!(counter_name, "account" => account.to_owned()).increment(1);
+    }
+
     /// Total hits since process start. Test-only; the Prometheus exporter
     /// will read the underlying atomic directly when it lands.
     #[cfg(test)]
@@ -94,6 +123,30 @@ impl CacheMetrics {
     #[cfg(test)]
     pub(crate) fn write_discarded(&self) -> u64 {
         self.write_discarded.load(Ordering::Relaxed)
+    }
+
+    /// Total age-based body purges since process start. Test-only.
+    #[cfg(test)]
+    pub(crate) fn bodies_purged(&self) -> u64 {
+        self.bodies_purged.load(Ordering::Relaxed)
+    }
+
+    /// Total soft-delete-driven body purges since process start. Test-only.
+    #[cfg(test)]
+    pub(crate) fn bodies_purged_due_to_delete(&self) -> u64 {
+        self.bodies_purged_due_to_delete.load(Ordering::Relaxed)
+    }
+
+    /// Lifetime cumulative age-based body purge counter — used by
+    /// `cache_status` (#83).
+    pub(crate) fn bodies_purged_lifetime(&self) -> u64 {
+        self.bodies_purged.load(Ordering::Relaxed)
+    }
+
+    /// Lifetime cumulative soft-delete-driven body purge counter — used by
+    /// `cache_status` (#83).
+    pub(crate) fn bodies_purged_due_to_delete_lifetime(&self) -> u64 {
+        self.bodies_purged_due_to_delete.load(Ordering::Relaxed)
     }
 
     /// Lifetime cumulative hit counter — used by `cache_status` (#83).

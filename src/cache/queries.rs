@@ -653,6 +653,92 @@ pub(super) async fn db_size_bytes(conn: &Arc<Connection>) -> Result<u64, Error> 
     .map_err(map_tokio_err)
 }
 
+/// Tallies returned from [`purge_old_bodies`]. Counted separately so
+/// the eviction reporter and the operator-facing metrics can split
+/// "purged because too old" from "purged because deleted from Gmail
+/// more than 7 days ago" — the two have different operational
+/// implications.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BodyPurgeReport {
+    /// Rows whose `internal_date` was older than the `body_max_age_days`
+    /// cutoff. Bumps `gmcp_cache_bodies_purged_total`.
+    pub age_purged: usize,
+    /// Rows whose `deleted_at` was older than the 7-day soft-delete
+    /// grace window. Bumps `gmcp_cache_bodies_purged_due_to_delete_total`.
+    pub delete_purged: usize,
+}
+
+/// Null out the body columns (`body_text`, `body_html`, `snippet`,
+/// `attachments_json`) on messages older than `age_cutoff_ms` or
+/// soft-deleted before `delete_cutoff_ms`. Sets `purged_at = now` on
+/// every affected row. Metadata (`id`, `thread_id`, `internal_date`,
+/// `headers_json`, `has_attachments`) is preserved per ADR-0019.
+///
+/// Idempotent: rows already carrying `purged_at` are skipped.
+///
+/// `age_cutoff_ms = 0` disables the age-based purge step (used when
+/// `body_max_age_days = 0` is configured); the soft-delete step still
+/// runs because deleted rows beyond the 7-day grace window are always
+/// safe to drop the body from.
+///
+/// Per ADR-0019 §"Cache body age cap":
+/// > "Bodies older than `body_max_age_days` get their body columns nulled
+/// > (the row itself stays; `lookup_thread` falls through to a refetch).
+/// > Soft-deleted bodies past the 7-day grace window are purged
+/// > unconditionally."
+pub(super) async fn purge_old_bodies(
+    conn: &Arc<Connection>,
+    age_cutoff_ms: i64,
+    delete_cutoff_ms: i64,
+) -> Result<BodyPurgeReport, Error> {
+    let now = now_ms();
+    conn.call(move |c| -> rusqlite::Result<BodyPurgeReport> {
+        let tx = c.transaction()?;
+
+        // Age-based purge. Skip when caller passed 0 cutoff (feature
+        // disabled). The `body_text IS NOT NULL` guard keeps the count
+        // accurate: rows that were already metadata-only stubs (Phase 2
+        // sentinel) don't count toward `age_purged` — we'd be "purging"
+        // something that had no body to begin with.
+        let age_purged = if age_cutoff_ms > 0 {
+            tx.execute(
+                "UPDATE messages \
+                 SET body_text = NULL, body_html = NULL, snippet = NULL, \
+                     attachments_json = NULL, purged_at = ?1 \
+                 WHERE internal_date < ?2 \
+                   AND purged_at IS NULL \
+                   AND body_text IS NOT NULL",
+                rusqlite::params![now, age_cutoff_ms],
+            )?
+        } else {
+            0
+        };
+
+        // Soft-deleted past grace. Same body columns; same purged_at
+        // sentinel. Body might already be NULL on these (Phase 3
+        // messages_deleted sets deleted_at; the original body may have
+        // already been written before that). `purged_at IS NULL`
+        // dedupes if this row also matched the age step above.
+        let delete_purged = tx.execute(
+            "UPDATE messages \
+             SET body_text = NULL, body_html = NULL, snippet = NULL, \
+                 attachments_json = NULL, purged_at = ?1 \
+             WHERE deleted_at IS NOT NULL \
+               AND deleted_at < ?2 \
+               AND purged_at IS NULL",
+            rusqlite::params![now, delete_cutoff_ms],
+        )?;
+
+        tx.commit()?;
+        Ok(BodyPurgeReport {
+            age_purged,
+            delete_purged,
+        })
+    })
+    .await
+    .map_err(map_tokio_err)
+}
+
 /// Reseed path for the 404 `historyNotFound` case. Drops every
 /// message/thread/label-link/query-result row for this account and
 /// installs a fresh watermark. The `labels` table is preserved (it's
@@ -1601,6 +1687,212 @@ mod tests {
                 .expect("lookup")
                 .is_some(),
             "row inserted at watermark 0 hits when watermark is still NULL",
+        );
+    }
+
+    // ── ADR-0019 body-purge tests (#169) ─────────────────────────────────────
+
+    /// Seed the messages table directly so the purge tests can pick the
+    /// exact `internal_date` / `deleted_at` they need without going
+    /// through the parse-and-encode path.
+    async fn seed_raw_message(
+        cache: &Cache,
+        account: &str,
+        id: &str,
+        thread_id: &str,
+        internal_date: i64,
+        body_text: Option<&str>,
+        deleted_at: Option<i64>,
+    ) {
+        let conn = cache.connection(account).expect("conn").clone();
+        let id = id.to_owned();
+        let thread_id = thread_id.to_owned();
+        let body_text = body_text.map(str::to_owned);
+        conn.call(move |c| -> rusqlite::Result<()> {
+            c.execute(
+                "INSERT INTO messages \
+                 (id, thread_id, internal_date, headers_json, body_text, body_html, \
+                  snippet, has_attachments, attachments_json, raw_size, fetched_at, deleted_at) \
+                 VALUES (?1, ?2, ?3, '{}', ?4, NULL, 'snip', 1, '[]', 0, 100, ?5)",
+                rusqlite::params![id, thread_id, internal_date, body_text, deleted_at],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed");
+    }
+
+    async fn read_body_columns(
+        cache: &Cache,
+        account: &str,
+        id: &str,
+    ) -> (Option<String>, Option<String>, Option<i64>) {
+        let conn = cache.connection(account).expect("conn").clone();
+        let id = id.to_owned();
+        conn.call(
+            move |c| -> rusqlite::Result<(Option<String>, Option<String>, Option<i64>)> {
+                c.query_row(
+                    "SELECT body_text, attachments_json, purged_at FROM messages WHERE id = ?1",
+                    rusqlite::params![id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            },
+        )
+        .await
+        .expect("query")
+    }
+
+    #[tokio::test]
+    async fn purge_old_bodies_nulls_age_cutoff_rows() {
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        seed_raw_message(&cache, "work", "old", "t1", 50, Some("ancient"), None).await;
+        seed_raw_message(&cache, "work", "fresh", "t2", 1_000, Some("recent"), None).await;
+
+        let conn = cache.connection("work").expect("conn").clone();
+        // age_cutoff = 100 → "old" (50) is past cutoff; "fresh" (1000) is not.
+        let report = purge_old_bodies(&conn, 100, 0).await.expect("purge");
+        assert_eq!(report.age_purged, 1);
+        assert_eq!(report.delete_purged, 0);
+
+        let (body, atts, purged_at) = read_body_columns(&cache, "work", "old").await;
+        assert!(body.is_none(), "old.body_text must be NULL");
+        assert!(atts.is_none(), "old.attachments_json must be NULL");
+        assert!(purged_at.is_some(), "purged_at sentinel must be set");
+
+        let (body, _, purged_at) = read_body_columns(&cache, "work", "fresh").await;
+        assert_eq!(body.as_deref(), Some("recent"), "fresh row untouched");
+        assert!(purged_at.is_none(), "fresh row has no purged_at");
+    }
+
+    #[tokio::test]
+    async fn purge_old_bodies_nulls_soft_deleted_past_grace() {
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        // Soft-deleted "ages ago" (deleted_at = 10), grace cutoff = 100.
+        seed_raw_message(
+            &cache,
+            "work",
+            "del-old",
+            "t1",
+            9_999,
+            Some("body"),
+            Some(10),
+        )
+        .await;
+        // Soft-deleted "recently" (deleted_at = 200), grace cutoff = 100.
+        seed_raw_message(
+            &cache,
+            "work",
+            "del-new",
+            "t2",
+            9_999,
+            Some("body"),
+            Some(200),
+        )
+        .await;
+
+        let conn = cache.connection("work").expect("conn").clone();
+        let report = purge_old_bodies(&conn, 0, 100).await.expect("purge");
+        assert_eq!(report.age_purged, 0, "age step disabled (cutoff=0)");
+        assert_eq!(report.delete_purged, 1, "only del-old past grace");
+
+        let (body, _, purged_at) = read_body_columns(&cache, "work", "del-old").await;
+        assert!(body.is_none() && purged_at.is_some(), "del-old purged");
+        let (body, _, purged_at) = read_body_columns(&cache, "work", "del-new").await;
+        assert_eq!(body.as_deref(), Some("body"));
+        assert!(
+            purged_at.is_none(),
+            "del-new still within grace — preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_old_bodies_is_idempotent() {
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        seed_raw_message(&cache, "work", "old", "t1", 50, Some("body"), None).await;
+        let conn = cache.connection("work").expect("conn").clone();
+
+        let first = purge_old_bodies(&conn, 100, 0).await.expect("first");
+        assert_eq!(first.age_purged, 1);
+        let second = purge_old_bodies(&conn, 100, 0).await.expect("second");
+        assert_eq!(
+            second.age_purged, 0,
+            "purged_at filter prevents double-counting",
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_old_bodies_skips_metadata_only_stubs() {
+        // Metadata-only rows (Phase 2 sentinel: body_text IS NULL) are
+        // already "purged" in a sense — the purge SQL must not count
+        // them or set purged_at on rows that never had bodies.
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        seed_raw_message(&cache, "work", "stub", "t1", 50, None, None).await;
+        let conn = cache.connection("work").expect("conn").clone();
+        let report = purge_old_bodies(&conn, 100, 0).await.expect("purge");
+        assert_eq!(report.age_purged, 0, "metadata-only stub is not counted");
+        let (_, _, purged_at) = read_body_columns(&cache, "work", "stub").await;
+        assert!(
+            purged_at.is_none(),
+            "purged_at must not be set on never-had-body rows",
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_thread_misses_after_purge_and_rehydrates_on_insert() {
+        // End-to-end of the read-path contract from ADR-0019: a full
+        // thread present, body-purge runs, lookup misses, FULL insert
+        // clears the purged_at sentinel.
+        let dir = tmp();
+        let cache = open_cache(&dir).await;
+        let thread = sample_thread();
+        cache.insert_thread("work", &thread).await.expect("seed");
+        assert!(
+            cache
+                .lookup_thread("work", "tid-1")
+                .await
+                .expect("lookup")
+                .is_some(),
+            "FULL thread is cached pre-purge",
+        );
+
+        // Purge everything by passing a cutoff well past the seeded
+        // internal_date (1717200000000).
+        let conn = cache.connection("work").expect("conn").clone();
+        let report = purge_old_bodies(&conn, i64::MAX, 0).await.expect("purge");
+        assert!(report.age_purged > 0);
+
+        assert!(
+            cache
+                .lookup_thread("work", "tid-1")
+                .await
+                .expect("lookup")
+                .is_none(),
+            "purged thread misses (body_text IS NULL on every row)",
+        );
+
+        // FULL re-insert (the on-demand fetcher's behavior on miss)
+        // restores the row set with purged_at = NULL.
+        cache
+            .insert_thread("work", &thread)
+            .await
+            .expect("rehydrate");
+        let (body, _, purged_at) = read_body_columns(&cache, "work", "m1").await;
+        assert_eq!(body.as_deref(), Some("the body"));
+        assert!(
+            purged_at.is_none(),
+            "FULL insert restores the row with purged_at = NULL",
+        );
+        assert!(
+            cache
+                .lookup_thread("work", "tid-1")
+                .await
+                .expect("lookup")
+                .is_some(),
+            "thread hits again after rehydration",
         );
     }
 }

@@ -22,13 +22,22 @@
 //!    `message_labels` rows cascade via the FK.
 //! 5. `VACUUM` once at the end of the cycle to reclaim file pages.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use tokio_rusqlite::Connection;
 
 use crate::cache::Cache;
 use crate::error::Error;
+
+/// Soft-delete grace window per ADR-0019: rows tombstoned more than 7
+/// days ago always have their bodies purged regardless of
+/// `body_max_age_days` — there's no read path that wants the body of a
+/// deleted message.
+const SOFT_DELETE_GRACE_DAYS: i64 = 7;
+
+const MS_PER_DAY: i64 = 86_400_000;
 
 /// Batch size for the message and query-cache LRU steps. Per ADR-0009
 /// §"TTLs and eviction" line 219.
@@ -49,6 +58,12 @@ pub(crate) struct EvictionReport {
     /// `page_count * page_size` measured after `VACUUM`. When the cycle
     /// is a no-op (under threshold), equals `bytes_before`.
     pub(crate) bytes_after: u64,
+    /// Rows whose bodies were nulled in the ADR-0019 body-purge phase
+    /// because their `internal_date` was older than `body_max_age_days`.
+    pub(crate) bodies_purged_age: usize,
+    /// Rows whose bodies were nulled in the body-purge phase because
+    /// they were tombstoned more than the 7-day grace window ago.
+    pub(crate) bodies_purged_delete: usize,
     /// Rows removed in step 1 (expired `query_cache`).
     pub(crate) query_cache_expired: usize,
     /// Rows removed in step 2 (oldest `query_cache`).
@@ -66,7 +81,9 @@ impl EvictionReport {
     /// A `false` here means the file was already under the cap and the
     /// cycle is a no-op — callers skip the INFO log on no-ops.
     pub(crate) const fn did_work(&self) -> bool {
-        self.query_cache_expired > 0
+        self.bodies_purged_age > 0
+            || self.bodies_purged_delete > 0
+            || self.query_cache_expired > 0
             || self.query_cache_oldest > 0
             || self.messages_tombstoned > 0
             || self.messages_oldest > 0
@@ -79,24 +96,52 @@ impl EvictionReport {
     }
 }
 
-/// Per-account background-loop driver for the size-based LRU eviction.
+/// Per-account background-loop driver for the size-based LRU eviction
+/// and the ADR-0019 body-purge phase.
+///
 /// One instance is built in `lib::build_cache_wiring` and shared across
 /// per-account `tokio::task`s via `Arc`.
 pub(crate) struct Evictor {
     cache: Arc<Cache>,
     interval: Duration,
     max_size_bytes: u64,
+    /// ADR-0019 `body_max_age_days`. `0` disables the age-based
+    /// body-purge phase; the soft-delete grace-window purge still
+    /// runs because deleted bodies past 7 days are always safe to
+    /// drop.
+    body_max_age_days: u32,
+    /// Minimum interval between body-purge phases per account. Per
+    /// ADR-0019 the default is 24 h. The eviction tick is faster
+    /// (5 min default) — this guards against churning the UPDATE on
+    /// every tick.
+    purge_interval: Duration,
+    /// Per-account last-purge wallclock so the cycle can skip the
+    /// body-purge phase between purge_interval-spaced ticks. Lost
+    /// across daemon restarts, which is intentional: the next tick
+    /// after a restart runs the purge unconditionally.
+    last_body_purge: Mutex<HashMap<String, Instant>>,
 }
 
 impl Evictor {
     /// Build an evictor. `interval` controls the background cadence;
     /// `Duration::ZERO` indicates "no background task" (the daemon will
     /// still see eviction tools call into [`Self::evict_account`] later).
-    pub(crate) const fn new(cache: Arc<Cache>, interval: Duration, max_size_bytes: u64) -> Self {
+    /// `body_max_age_days = 0` and `purge_interval = Duration::ZERO`
+    /// together disable the body-purge phase.
+    pub(crate) fn new(
+        cache: Arc<Cache>,
+        interval: Duration,
+        max_size_bytes: u64,
+        body_max_age_days: u32,
+        purge_interval: Duration,
+    ) -> Self {
         Self {
             cache,
             interval,
             max_size_bytes,
+            body_max_age_days,
+            purge_interval,
+            last_body_purge: Mutex::new(HashMap::new()),
         }
     }
 
@@ -113,13 +158,46 @@ impl Evictor {
     /// Run exactly one eviction cycle for `account`. Returns the report
     /// regardless of whether the cycle did real work; `report.did_work()`
     /// discriminates. Unknown accounts return an empty `Ok(default)`.
+    ///
+    /// Phase order (per ADR-0019 §"Cache body age cap"):
+    /// 1. Body-purge — runs at most once per `purge_interval`; nulls
+    ///    body columns on rows past `body_max_age_days` or
+    ///    soft-deleted > 7 days. Bumps `gmcp_cache_bodies_purged_*`.
+    /// 2. LRU eviction — the existing ADR-0009 four-step cycle.
+    /// 3. `VACUUM` — once at end if either phase did work.
     pub(crate) async fn evict_account(&self, account: &str) -> Result<EvictionReport, Error> {
+        let started = Instant::now();
+
+        // Phase 1: body-purge. Runs even when the account is "unknown
+        // to cache" (no-ops via Cache::purge_old_bodies), so the
+        // accounting is consistent regardless of the cache wiring state.
+        let purge = if self.should_run_body_purge(account) {
+            let report = self
+                .cache
+                .purge_old_bodies(account, self.age_cutoff_ms(), Self::delete_cutoff_ms())
+                .await?;
+            self.record_body_purge_run(account);
+            report
+        } else {
+            crate::cache::queries::BodyPurgeReport::default()
+        };
+
+        // Phase 2 + 3: existing LRU eviction + VACUUM. Skip when the
+        // account is unknown to this cache.
         let Some(conn) = self.cache.connection(account) else {
-            return Ok(EvictionReport::default());
+            let mut report = EvictionReport {
+                bodies_purged_age: purge.age_purged,
+                bodies_purged_delete: purge.delete_purged,
+                ..EvictionReport::default()
+            };
+            report.duration = started.elapsed();
+            return Ok(report);
         };
         let max = self.max_size_bytes;
-        let started = Instant::now();
-        let mut report = run_eviction_cycle(conn, max).await?;
+        let force_vacuum = purge.age_purged > 0 || purge.delete_purged > 0;
+        let mut report = run_eviction_cycle(conn, max, force_vacuum).await?;
+        report.bodies_purged_age = purge.age_purged;
+        report.bodies_purged_delete = purge.delete_purged;
         report.duration = started.elapsed();
 
         if report.did_work() {
@@ -128,6 +206,8 @@ impl Evictor {
                 bytes_before = report.bytes_before,
                 bytes_after = report.bytes_after,
                 bytes_evicted = report.bytes_evicted(),
+                bodies_purged_age = report.bodies_purged_age,
+                bodies_purged_delete = report.bodies_purged_delete,
                 query_cache_expired = report.query_cache_expired,
                 query_cache_oldest = report.query_cache_oldest,
                 messages_tombstoned = report.messages_tombstoned,
@@ -137,6 +217,54 @@ impl Evictor {
             );
         }
         Ok(report)
+    }
+
+    /// `body_max_age_days * 86_400_000` ms before now, or `0` when the
+    /// age-based purge is disabled. The SQL helper treats `0` as
+    /// "skip age step" while still running the soft-delete step.
+    fn age_cutoff_ms(&self) -> i64 {
+        if self.body_max_age_days == 0 {
+            return 0;
+        }
+        let now = now_ms();
+        let days = i64::from(self.body_max_age_days);
+        now.saturating_sub(days.saturating_mul(MS_PER_DAY))
+    }
+
+    /// `now - 7 days` in ms. Always applies; the soft-delete grace
+    /// window is a constant, not a config.
+    fn delete_cutoff_ms() -> i64 {
+        now_ms().saturating_sub(SOFT_DELETE_GRACE_DAYS.saturating_mul(MS_PER_DAY))
+    }
+
+    /// `true` when this tick should run the body-purge phase. The
+    /// gate fires when either:
+    /// - no purge has run for `account` yet this process lifetime, or
+    /// - `purge_interval` has elapsed since the last run.
+    ///
+    /// Returns `false` when both `body_max_age_days = 0` and
+    /// `purge_interval = ZERO` — the operator has fully disabled the
+    /// phase. When only `body_max_age_days = 0`, the soft-delete step
+    /// still runs (returning `true` lets it fire), because deleted
+    /// bodies past the grace window are always safe to drop.
+    fn should_run_body_purge(&self, account: &str) -> bool {
+        if self.purge_interval.is_zero() {
+            return false;
+        }
+        let last = self
+            .last_body_purge
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        last.get(account)
+            .is_none_or(|t| t.elapsed() >= self.purge_interval)
+    }
+
+    fn record_body_purge_run(&self, account: &str) {
+        let mut last = self
+            .last_body_purge
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        last.insert(account.to_owned(), Instant::now());
     }
 
     /// Spawn a `tokio::task` that calls [`Self::evict_account`] every
@@ -211,6 +339,7 @@ impl Drop for EvictionHandle {
 async fn run_eviction_cycle(
     conn: &Arc<Connection>,
     max_size_bytes: u64,
+    force_vacuum: bool,
 ) -> Result<EvictionReport, Error> {
     let now = now_ms();
     conn.call(move |c| -> rusqlite::Result<EvictionReport> {
@@ -290,8 +419,12 @@ async fn run_eviction_cycle(
 
         // ── VACUUM (must run outside any transaction) ────────────────────
         // Only worth running if something was actually deleted; an empty
-        // VACUUM still rewrites the whole file.
-        if report.did_work() {
+        // VACUUM still rewrites the whole file. `force_vacuum` covers
+        // the case where the body-purge phase nulled body columns (no
+        // rows removed, but freelist pages now exist) and the LRU
+        // phase did nothing — without the force we'd never reclaim the
+        // body-column bytes.
+        if force_vacuum || report.did_work() {
             c.execute("VACUUM", [])?;
         }
 
@@ -403,7 +536,7 @@ mod tests {
         let target = cap * 9 / 10;
 
         // Sanity: before eviction the file is well over the cap.
-        let report = run_eviction_cycle(&conn, cap).await.expect("cycle");
+        let report = run_eviction_cycle(&conn, cap, false).await.expect("cycle");
         assert!(
             report.bytes_before > cap,
             "test setup must overshoot cap: bytes_before={} cap={cap}",
@@ -426,7 +559,7 @@ mod tests {
         seed_messages(&conn, 4, 1).await;
 
         let cap: u64 = 100 * 1024 * 1024; // 100 MiB — far above test data
-        let report = run_eviction_cycle(&conn, cap).await.expect("cycle");
+        let report = run_eviction_cycle(&conn, cap, false).await.expect("cycle");
         assert!(!report.did_work(), "report: {report:?}");
         assert_eq!(report.bytes_before, report.bytes_after);
     }
@@ -460,7 +593,7 @@ mod tests {
         // Use a cap of 1 byte so the algorithm definitely enters the
         // eviction loop; we want to observe that expired rows are
         // deleted by Step 1 specifically.
-        let report = run_eviction_cycle(&conn, 1).await.expect("cycle");
+        let report = run_eviction_cycle(&conn, 1, false).await.expect("cycle");
         assert_eq!(
             report.query_cache_expired, 2,
             "expected 2 expired rows removed; report: {report:?}"
@@ -474,8 +607,18 @@ mod tests {
     async fn unknown_account_is_no_op() {
         let dir = tmp();
         let cache = open_cache(&dir, &["work"]).await;
-        let evictor = Evictor::new(cache, Duration::from_mins(5), 1024 * 1024);
-        let report = evictor.evict_account("missing").await.expect("ok");
+        let evictor = Evictor::new(
+            cache,
+            Duration::from_mins(5),
+            1024 * 1024,
+            0,
+            Duration::ZERO,
+        );
+        let mut report = evictor.evict_account("missing").await.expect("ok");
+        // `duration` is wall-clock and non-deterministic — zero it
+        // before structural comparison to keep this assertion stable
+        // across machines.
+        report.duration = Duration::ZERO;
         assert_eq!(report, EvictionReport::default());
     }
 
@@ -523,7 +666,9 @@ mod tests {
         assert_eq!(labels_before, 100, "test setup must seed 100 label links");
 
         // Tiny cap forces Step 4 to run.
-        let report = run_eviction_cycle(&conn, 32 * 1024).await.expect("cycle");
+        let report = run_eviction_cycle(&conn, 32 * 1024, false)
+            .await
+            .expect("cycle");
         assert!(report.messages_oldest > 0, "Step 4 must run");
 
         // No orphan label rows survive: every remaining message_labels row
@@ -551,7 +696,13 @@ mod tests {
     async fn spawn_for_returns_none_when_interval_is_zero() {
         let dir = tmp();
         let cache = open_cache(&dir, &["work"]).await;
-        let evictor = Arc::new(Evictor::new(cache, Duration::ZERO, 1024 * 1024));
+        let evictor = Arc::new(Evictor::new(
+            cache,
+            Duration::ZERO,
+            1024 * 1024,
+            0,
+            Duration::ZERO,
+        ));
         assert!(evictor.spawn_for("work".into()).is_none());
     }
 
@@ -566,6 +717,8 @@ mod tests {
             Arc::clone(&cache),
             Duration::from_millis(25),
             32 * 1024, // tiny cap so the first tick evicts
+            0,
+            Duration::ZERO,
         ));
         let handle = evictor.spawn_for("work".into()).expect("Some");
 
