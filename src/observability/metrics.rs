@@ -46,6 +46,9 @@ pub(crate) mod names {
     pub(crate) const HTTP_SESSION_DURATION_SECONDS: &str = "gmcp_http_session_duration_seconds";
     pub(crate) const HOT_RELOAD_TOTAL: &str = "gmcp_hot_reload_total";
     pub(crate) const CACHE_WRITE_DISCARDED_TOTAL: &str = "gmcp_cache_write_discarded_total";
+    pub(crate) const CACHE_BODIES_PURGED_TOTAL: &str = "gmcp_cache_bodies_purged_total";
+    pub(crate) const CACHE_BODIES_PURGED_DUE_TO_DELETE_TOTAL: &str =
+        "gmcp_cache_bodies_purged_due_to_delete_total";
     pub(crate) const RATE_LIMIT_BLOCKS_TOTAL: &str = "gmcp_rate_limit_blocks_total";
     pub(crate) const BUILD_INFO: &str = "gmcp_build_info";
 }
@@ -220,6 +223,14 @@ fn describe_all() {
     describe_counter!(
         names::CACHE_WRITE_DISCARDED_TOTAL,
         "query_cache writes discarded because the history watermark advanced during the fetch (ADR-0009 §Race-prevention)",
+    );
+    describe_counter!(
+        names::CACHE_BODIES_PURGED_TOTAL,
+        "Message body columns nulled because the row exceeded `body_max_age_days` (ADR-0019 §Cache body age cap)",
+    );
+    describe_counter!(
+        names::CACHE_BODIES_PURGED_DUE_TO_DELETE_TOTAL,
+        "Message body columns nulled because the row was soft-deleted more than the 7-day grace window ago (ADR-0019)",
     );
     describe_counter!(
         names::RATE_LIMIT_BLOCKS_TOTAL,

@@ -39,6 +39,11 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         to_version: 2,
         sql: include_str!("migrations/002_query_cache_history_watermark.sql"),
     },
+    Migration {
+        from_version: 2,
+        to_version: 3,
+        sql: include_str!("migrations/003_messages_purged_at.sql"),
+    },
 ];
 
 /// Highest known schema version. Used for the downgrade-refuse check.
@@ -218,6 +223,67 @@ mod tests {
             .optional()
             .expect("query");
         assert_eq!(col.as_deref(), Some("fetched_at_history_id"));
+        // And the v3 column must exist on messages.
+        let col: Option<String> = conn
+            .query_row(
+                "SELECT name FROM pragma_table_info('messages') \
+                 WHERE name = 'purged_at'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("query");
+        assert_eq!(col.as_deref(), Some("purged_at"));
+    }
+
+    /// A v2-era DB (Phase 2-5 schema with `fetched_at_history_id` already
+    /// present) upgrades to v3 cleanly without disturbing v2 rows.
+    /// Guards against migration 003's `ALTER TABLE` colliding with the
+    /// Phase 4 schema state operators currently have on disk.
+    #[test]
+    fn upgrades_v2_database_to_current() {
+        let mut conn = in_memory();
+        // Apply 001 + 002 only.
+        let through_v2 = &MIGRATIONS[0..2];
+        for m in through_v2 {
+            let tx = conn.transaction().expect("tx");
+            tx.execute_batch(m.sql).expect("apply");
+            if m.from_version > 0 {
+                tx.execute(
+                    "UPDATE account_state SET schema_version = ?1 WHERE rowid = 1",
+                    params![m.to_version],
+                )
+                .expect("bump");
+            }
+            tx.commit().expect("commit");
+        }
+        assert_eq!(current_version(&conn).expect("read"), 2);
+
+        // Seed a row so we can prove the existing data survives the upgrade.
+        conn.execute(
+            "INSERT INTO messages \
+             (id, thread_id, internal_date, headers_json, body_text, has_attachments, fetched_at) \
+             VALUES ('m1', 't1', 1, '{}', 'body', 0, 100)",
+            [],
+        )
+        .expect("seed");
+
+        let v = apply_pending(&mut conn).expect("apply");
+        assert_eq!(v, MAX_KNOWN_VERSION);
+
+        // purged_at column now exists and the seeded row's value is NULL
+        // (no backfill — ADR-0019).
+        let purged_at: Option<i64> = conn
+            .query_row(
+                "SELECT purged_at FROM messages WHERE id = 'm1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(
+            purged_at, None,
+            "v2 → v3 upgrade must not backfill purged_at"
+        );
     }
 
     #[test]

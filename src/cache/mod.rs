@@ -313,6 +313,34 @@ impl Cache {
         queries::db_size_bytes(conn).await.map(Some)
     }
 
+    /// Null out body columns on messages older than `age_cutoff_ms` or
+    /// soft-deleted before `delete_cutoff_ms`. See
+    /// [`queries::purge_old_bodies`] for the SQL contract.
+    ///
+    /// Bumps `gmcp_cache_bodies_purged_total` and
+    /// `gmcp_cache_bodies_purged_due_to_delete_total` (per ADR-0019)
+    /// for each affected row. Returns the per-class counts.
+    ///
+    /// `Ok(default)` for unknown accounts.
+    pub(crate) async fn purge_old_bodies(
+        &self,
+        account: &str,
+        age_cutoff_ms: i64,
+        delete_cutoff_ms: i64,
+    ) -> Result<queries::BodyPurgeReport, Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(queries::BodyPurgeReport::default());
+        };
+        let report = queries::purge_old_bodies(conn, age_cutoff_ms, delete_cutoff_ms).await?;
+        for _ in 0..report.age_purged {
+            self.metrics.record_body_purged(account, "age");
+        }
+        for _ in 0..report.delete_purged {
+            self.metrics.record_body_purged(account, "soft_delete");
+        }
+        Ok(report)
+    }
+
     /// `last_full_sync_at` timestamp (ms epoch) for `account`, or
     /// `None` when the column is NULL or the account is unknown. The
     /// column is bumped on every successful `set_last_history_id` call
@@ -642,7 +670,7 @@ mod tests {
             })
             .await
             .expect("query schema");
-        insta::assert_snapshot!("cache_v2_schema", ddl);
+        insta::assert_snapshot!("cache_v3_schema", ddl);
     }
 
     /// Phase 7 gate: cache-enabled integration smoke-test.
