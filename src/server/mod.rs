@@ -16,6 +16,7 @@
 //! - [`args`] — tool-argument extraction helpers + `ok_result`
 
 mod args;
+pub(crate) mod deprecation;
 mod descriptors;
 mod dispatch;
 
@@ -44,11 +45,19 @@ pub(crate) struct GoogleServer {
     /// Audit verbosity configured via `[audit] verbose` in config.toml.
     /// `Redacted` by default; `Verbose` only when the operator has opted in.
     pub(super) verbosity: Verbosity,
+    /// Tool-deprecation registry per [ADR-0015](../../docs/adr/0015-tool-versioning-policy.md).
+    /// Empty in production pre-1.0; populated in tests via the `with_*`
+    /// constructor so the dispatcher's deprecation-WARN branch can be
+    /// exercised without committing a real deprecation.
+    pub(super) deprecations: Arc<deprecation::Registry>,
 }
 
 impl GoogleServer {
-    /// Construct the server with its component clients pre-wired.
-    pub(crate) const fn new(
+    /// Construct the server with its component clients pre-wired. Uses the
+    /// production deprecation registry (empty pre-1.0); use
+    /// [`Self::with_deprecations`] in tests that need to exercise the
+    /// deprecation dispatch path.
+    pub(crate) fn new(
         accounts: Arc<Vec<AccountEntry>>,
         tokens: Arc<TokenManager<ReqwestRefreshTransport>>,
         gmail: Arc<GmailService<ReqwestRefreshTransport>>,
@@ -61,6 +70,31 @@ impl GoogleServer {
             gmail,
             audit,
             verbosity,
+            deprecations: Arc::new(deprecation::production()),
+        }
+    }
+
+    /// Test-only constructor that injects a populated deprecation
+    /// registry. Production code uses [`Self::new`], which always wires
+    /// the empty `deprecation::production()` registry. Gated behind
+    /// `#[cfg(test)]` so the fixture can never accidentally land in
+    /// production.
+    #[cfg(test)]
+    pub(crate) fn with_deprecations(
+        accounts: Arc<Vec<AccountEntry>>,
+        tokens: Arc<TokenManager<ReqwestRefreshTransport>>,
+        gmail: Arc<GmailService<ReqwestRefreshTransport>>,
+        audit: AuditWriter,
+        verbosity: Verbosity,
+        deprecations: deprecation::Registry,
+    ) -> Self {
+        Self {
+            accounts,
+            tokens,
+            gmail,
+            audit,
+            verbosity,
+            deprecations: Arc::new(deprecations),
         }
     }
 

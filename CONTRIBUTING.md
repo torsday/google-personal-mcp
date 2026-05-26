@@ -180,6 +180,17 @@ ADR process is documented in [ADR-0000](docs/adr/0000-adr-process.md).
 
 The open-questions queue at the bottom of [ADR-0000](docs/adr/0000-adr-process.md) lists known gaps where new ADRs would be welcome — quota model, attachment composition, data retention, HTTP-transport auth, keyring backend.
 
+## Deprecating a tool
+
+The full procedure lives in [ADR-0015 §Deprecation procedure](docs/adr/0015-tool-versioning-policy.md). Quick reference:
+
+1. **Sunset window** — non-destructive tools get 6 months; destructive tools (anything that mutates Gmail state or writes to disk) get 12 months. The clock starts the day the deprecation lands on `main`.
+2. **Add a `Deprecation` entry** to the `production()` map in [`src/server/deprecation.rs`](src/server/deprecation.rs), keyed by the exact registered tool name. Set `sunset_date` to the ISO date the tool will be removed and `replacement` to the successor tool's name.
+3. **Prefix the descriptor** — call `descriptors::apply_deprecation_prefix(&mut tool, &dep)` inside the tool's `*_descriptor()` fn before returning. The `[DEPRECATED — use {new} — sunset {YYYY-MM-DD}]` banner renders automatically.
+4. **No further wiring needed.** The dispatcher's `call_tool` wrapper checks the registry on every call and emits a structured `tracing::warn!` plus increments the global counter surfaced by `mcp_status.deprecated_tool_invocations_total`.
+5. **Bump `mcp_status::SCHEMA_VERSION`** only when adding or removing a field on the response envelope, not when adding deprecation entries.
+6. **Removal day** — when the sunset date arrives, delete the descriptor fn, the dispatch arm, and the registry entry in one PR. The Layer 4 snapshot test catches drift.
+
 ## Commit and PR style
 
 - **Conventional Commits** (`type(scope): subject` — imperative, lowercase,
