@@ -1,6 +1,6 @@
 ---
 source: src/server/descriptors.rs
-assertion_line: 632
+assertion_line: 733
 expression: json
 ---
 [
@@ -213,6 +213,32 @@ expression: json
       "type": "object"
     },
     "name": "cache_invalidate"
+  },
+  {
+    "description": "**DESTRUCTIVE — IRREVERSIBLE.** Drop all persistent state for one account: the SQLite cache DB (+ WAL/SHM sidecars), the OAuth token file, and the entry in `accounts.toml`. Audit log files are **not** modified — the historical record of what was done on the purged account persists per ADR-0011's tamper-resistance contract.\n\n**Confirmation guard:** `confirm` must be the literal string `yes-purge-<account>` (the alias interpolated). Any other value is rejected with a config-invalid error. Host applications should gate this tool behind an extra human confirmation on top of the literal.\n\n**Not fan-out-eligible** (`account = \"*\"` is rejected). Per ADR-0013, purge is a per-account operation by design.\n\n**In-flight reads** may still complete on `Arc<TokenManager>` snapshots captured before the purge (ADR-0002). The next call on a fresh snapshot returns `account_not_found`. Restart the daemon for a fully clean state.\n\nReturns `{account, dry_run, cache_db_existed, token_existed, registry_entry_existed}`. Idempotent: running twice produces an all-false-existed second response.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml. Must NOT be `*`.",
+          "type": "string"
+        },
+        "confirm": {
+          "description": "Must equal `yes-purge-<account>` (the alias interpolated). Required even for dry_run to keep host-side gating consistent.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "If true, report what would be deleted without unlinking anything.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "account",
+        "confirm"
+      ],
+      "type": "object"
+    },
+    "name": "purge_account"
   },
   {
     "description": "Remove the INBOX label from a single thread (archive it). Does not delete. Applies threads.modify (10 quota units). dry_run: true returns the outcome without making any Gmail API call.",

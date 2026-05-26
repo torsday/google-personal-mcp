@@ -368,7 +368,15 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
         audit::Verbosity::Redacted
     };
 
-    let server = GoogleServer::new(accounts, tokens, gmail, audit, verbosity);
+    // `dir` and `cfg.cache.dir` are not used after this point, so move
+    // them into the PurgePaths value rather than cloning. The
+    // GoogleServer's `Arc<PurgePaths>` owns the only live reference
+    // from here forward.
+    let purge_paths = tools::purge_account::PurgePaths {
+        config_dir: dir,
+        cache_dir: cfg.cache.dir,
+    };
+    let server = GoogleServer::new(accounts, tokens, gmail, audit, verbosity, purge_paths);
 
     // Hold the cache-sync and eviction handles for the lifetime of the
     // daemon — drop aborts the background tasks, which is what we want

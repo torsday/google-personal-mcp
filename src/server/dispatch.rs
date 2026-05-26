@@ -19,7 +19,7 @@ use crate::error;
 use crate::tools::{
     archive, audit_summary, cache_invalidate, cache_status, download_attachment, fanout,
     get_thread, list_accounts, list_attachments, list_labels, mcp_status, modify_labels,
-    search_threads, trash,
+    purge_account, search_threads, trash,
 };
 
 use super::args::{
@@ -337,6 +337,80 @@ impl GoogleServer {
                 result
                     .map_err(|e| error::to_mcp_error(&e))
                     .and_then(|out| ok_result("cache_invalidate serialize", &out))
+            }
+
+            "purge_account" => {
+                let account = extract_string_arg(&request, "account")?;
+                // Per ADR-0013 #166 acceptance: purge is NOT
+                // fan-out-eligible. The tool fn also validates this,
+                // but reject early here so the host LLM gets a clear
+                // `invalid_params` rather than a downstream error.
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "`purge_account` is not fan-out-eligible per ADR-0013; \
+                         pass a single account alias, not the `*` marker",
+                        None,
+                    ));
+                }
+                let dry_run = extract_bool_arg(&request, "dry_run");
+                let confirm = extract_string_arg(&request, "confirm")?;
+                // ADR-0011 lines 83-86: write a fsync'd `intent` row
+                // before any destructive side effect lands. Skipped for
+                // dry-run per existing `write_destructive_intent`
+                // convention.
+                self.write_destructive_intent(
+                    &account,
+                    "purge_account",
+                    crate::audit::summarize_purge_account(
+                        &account, dry_run, /* placeholders for pre-call */ false, false, false,
+                    ),
+                    dry_run,
+                )?;
+                let result = purge_account::purge_account(
+                    purge_account::PurgeAccountInput {
+                        account: account.clone(),
+                        dry_run,
+                        confirm,
+                    },
+                    &self.purge_paths,
+                );
+                // Post-call audit row carries the real `*_existed`
+                // values so the operator can correlate intent vs
+                // outcome.
+                let summary = result.as_ref().map_or_else(
+                    |_| {
+                        crate::audit::summarize_purge_account(
+                            &account, dry_run, false, false, false,
+                        )
+                    },
+                    |out| {
+                        crate::audit::summarize_purge_account(
+                            &out.account,
+                            out.dry_run,
+                            out.cache_db_existed,
+                            out.token_existed,
+                            out.registry_entry_existed,
+                        )
+                    },
+                );
+                self.audit.write(&AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    account,
+                    tool: "purge_account".into(),
+                    params_summary: summary,
+                    action: if dry_run {
+                        "dry_run".into()
+                    } else {
+                        "applied".into()
+                    },
+                    result: match &result {
+                        Ok(_) => "ok".into(),
+                        Err(e) => format!("error: {e}"),
+                    },
+                });
+                result
+                    .map_err(|e| error::to_mcp_error(&e))
+                    .and_then(|out| ok_result("purge_account serialize", &out))
             }
 
             "archive_thread" => {

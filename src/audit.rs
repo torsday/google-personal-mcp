@@ -336,6 +336,31 @@ pub(crate) fn summarize_cache_invalidate(account: &str, scope: &str) -> Value {
     })
 }
 
+/// `purge_account` params per [ADR-0019](docs/adr/0019-data-retention-and-purge.md).
+/// The `confirm` literal is intentionally **not** recorded — it carries
+/// no information the `account` field doesn't already imply. The three
+/// `_existed` booleans reflect on-disk state at probe time; identical
+/// rows on a re-run with all-false values are the idempotency receipt.
+// Same rationale as `PurgeAccountOutput`: each bool names a distinct
+// on-disk artefact. Suppressing the lint preserves the audit-row schema
+// the operator and downstream tooling consume.
+#[allow(clippy::fn_params_excessive_bools)]
+pub(crate) fn summarize_purge_account(
+    account: &str,
+    dry_run: bool,
+    cache_db_existed: bool,
+    token_existed: bool,
+    registry_entry_existed: bool,
+) -> Value {
+    serde_json::json!({
+        "account": account,
+        "dry_run": dry_run,
+        "cache_db_existed": cache_db_existed,
+        "token_existed": token_existed,
+        "registry_entry_existed": registry_entry_existed,
+    })
+}
+
 /// `modify_thread_labels` params: thread + label IDs + `dry_run`. Label IDs
 /// are operator-assigned (system labels like `INBOX` or user-created); not
 /// considered content.
