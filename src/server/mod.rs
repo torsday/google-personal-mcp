@@ -50,6 +50,9 @@ pub(crate) struct GoogleServer {
     /// constructor so the dispatcher's deprecation-WARN branch can be
     /// exercised without committing a real deprecation.
     pub(super) deprecations: Arc<deprecation::Registry>,
+    /// Filesystem paths used by the `purge_account` tool (#166). Built
+    /// at startup from `cfg.cache.dir` + the daemon's `config_dir()`.
+    pub(super) purge_paths: Arc<crate::tools::purge_account::PurgePaths>,
 }
 
 impl GoogleServer {
@@ -63,6 +66,7 @@ impl GoogleServer {
         gmail: Arc<GmailService<ReqwestRefreshTransport>>,
         audit: AuditWriter,
         verbosity: Verbosity,
+        purge_paths: crate::tools::purge_account::PurgePaths,
     ) -> Self {
         Self {
             accounts,
@@ -71,6 +75,7 @@ impl GoogleServer {
             audit,
             verbosity,
             deprecations: Arc::new(deprecation::production()),
+            purge_paths: Arc::new(purge_paths),
         }
     }
 
@@ -95,6 +100,12 @@ impl GoogleServer {
             audit,
             verbosity,
             deprecations: Arc::new(deprecations),
+            // Tests using `with_deprecations` don't exercise the
+            // purge path; supply harmless placeholder paths.
+            purge_paths: Arc::new(crate::tools::purge_account::PurgePaths {
+                config_dir: std::path::PathBuf::from("/tmp/.gpm-test-stub"),
+                cache_dir: std::path::PathBuf::from("/tmp/.gpm-test-stub/cache"),
+            }),
         }
     }
 
@@ -247,7 +258,17 @@ mod tests {
             std::env::temp_dir().join(format!("gpm-srv-test-{}", std::process::id())),
             crate::config::RotateMode::Monthly,
         );
-        GoogleServer::new(Arc::new(vec![]), tokens, gmail, audit, Verbosity::Redacted)
+        GoogleServer::new(
+            Arc::new(vec![]),
+            tokens,
+            gmail,
+            audit,
+            Verbosity::Redacted,
+            crate::tools::purge_account::PurgePaths {
+                config_dir: std::path::PathBuf::from("/tmp/.gpm-test-stub"),
+                cache_dir: std::path::PathBuf::from("/tmp/.gpm-test-stub/cache"),
+            },
+        )
     }
 
     #[test]
@@ -327,7 +348,17 @@ mod tests {
         let gmail = Arc::new(GmailService::new(client, None));
         let audit = AuditWriter::new(dir.path(), crate::config::RotateMode::Monthly);
         (
-            GoogleServer::new(Arc::new(vec![]), tokens, gmail, audit, Verbosity::Redacted),
+            GoogleServer::new(
+                Arc::new(vec![]),
+                tokens,
+                gmail,
+                audit,
+                Verbosity::Redacted,
+                crate::tools::purge_account::PurgePaths {
+                    config_dir: std::path::PathBuf::from("/tmp/.gpm-test-stub"),
+                    cache_dir: std::path::PathBuf::from("/tmp/.gpm-test-stub/cache"),
+                },
+            ),
             dir,
         )
     }
