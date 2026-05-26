@@ -82,6 +82,14 @@ impl AuditWriter {
         &self.audit_dir
     }
 
+    /// Snapshot of the writer's rotation mode. Used by
+    /// [`crate::audit_retention`] to determine the filename pattern the
+    /// currently-open rotation file matches without sharing state with
+    /// the writer beyond the (immutable) config.
+    pub(crate) const fn rotate_mode(&self) -> &RotateMode {
+        &self.rotate
+    }
+
     /// Compute the filename (not path) for a write at `now`. This is the
     /// time-based rotation lookup; for [`RotateMode::Size`] callers should
     /// use [`Self::size_path`] which also needs the directory state.

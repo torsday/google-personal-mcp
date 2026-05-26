@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod audit;
+pub mod audit_retention;
 pub mod auth;
 pub mod cache;
 pub mod config;
@@ -300,6 +301,22 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
 
     let accounts = Arc::new(loaded_accounts.accounts);
     let audit = AuditWriter::new(&dir, cfg.audit.rotate.clone());
+
+    // ADR-0019 §"Audit: opt-in automatic deletion" — spawn the daily
+    // retention sweep only when the operator opted in by setting
+    // `[audit] delete_after_days > 0`. The default (0) preserves
+    // ADR-0011's "no automatic deletion" promise. Drop semantics on
+    // `RetentionHandle` mirror the cache eviction/sync handles.
+    let _audit_retention_handle = runtime.block_on(async {
+        audit_retention::RetentionSweep::new(audit.clone(), cfg.audit.delete_after_days).spawn()
+    });
+    if cfg.audit.delete_after_days > 0 {
+        tracing::info!(
+            delete_after_days = cfg.audit.delete_after_days,
+            "audit retention sweep enabled — closed rotation files older \
+             than this threshold will be deleted daily (ADR-0019)",
+        );
+    }
 
     // Liveness `/healthz` + Prometheus `/metrics` listener per ADR-0008
     // (#70, #75). Only spawned when the operator opted in by including
