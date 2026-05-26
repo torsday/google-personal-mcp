@@ -487,19 +487,18 @@ const fn default_max_total() -> u64 {
 
 /// `[cache]` section per [ADR-0009 §Config additions](../docs/adr/0009-caching-with-sqlite-and-history-api.md).
 ///
-/// `enabled` defaults to `false` during the staged rollout
-/// ([docs/cache-implementation-plan.md](../docs/cache-implementation-plan.md)).
-/// ADR-0009 documents `enabled = true` as the long-term default; v1.0 flips it
-/// in Phase 7. Until then, operators wanting to dogfood the cache must opt in
-/// explicitly. With `enabled = false`, [`crate::gmail::service::GmailService`]
-/// is constructed with `cache = None` and every read passes through to Gmail.
+/// `enabled` defaults to `true` as of v1.0 (ADR-0009 Phase 7).  All six
+/// prerequisite phases (0-6) have shipped; the cache is production-ready.
+/// Set `enabled = false` in your `config.toml` to disable the cache and pass
+/// every read through directly to Gmail.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CacheConfig {
-    /// Master switch. `false` (default) bypasses the cache entirely;
+    /// Master switch. `true` (default as of v1.0 Phase 7) constructs the
+    /// `SQLite` cache on startup. `false` bypasses the cache entirely —
     /// `Cache::new` is never called and no per-account `.db` files are
-    /// created. `true` constructs the cache during startup.
-    #[serde(default)]
+    /// created.
+    #[serde(default = "default_cache_enabled")]
     pub(crate) enabled: bool,
     /// Directory holding per-account `<alias>.db` files. Created at mode
     /// `0700`; each DB at mode `0600` per [ADR-0017](../docs/adr/0017-secrets-at-rest.md).
@@ -539,7 +538,7 @@ pub(crate) struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_cache_enabled(),
             dir: default_cache_dir(),
             query_ttl_seconds: default_query_ttl(),
             labels_ttl_seconds: default_labels_ttl(),
@@ -549,6 +548,10 @@ impl Default for CacheConfig {
             eviction_interval_seconds: default_eviction_interval(),
         }
     }
+}
+
+const fn default_cache_enabled() -> bool {
+    true
 }
 
 fn default_cache_dir() -> PathBuf {
