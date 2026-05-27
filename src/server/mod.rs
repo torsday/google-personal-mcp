@@ -191,6 +191,7 @@ pub(crate) async fn run_http(
     server: GoogleServer,
     addr: &str,
     validator: Option<Arc<crate::http_auth::BearerValidator>>,
+    throttle: Option<Arc<crate::http_auth::throttle::Throttle>>,
 ) -> Result<(), Error> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -204,9 +205,10 @@ pub(crate) async fn run_http(
     tracing::info!(
         addr = %bound,
         bearer_auth = validator.is_some(),
+        throttle = throttle.is_some(),
         "HTTP transport listening at /mcp",
     );
-    serve_http_on(listener, server, validator).await
+    serve_http_on(listener, server, validator, throttle).await
 }
 
 /// Inner half of [`run_http`] — accepts a pre-bound listener so tests
@@ -217,6 +219,7 @@ pub(crate) async fn serve_http_on(
     listener: tokio::net::TcpListener,
     server: GoogleServer,
     validator: Option<Arc<crate::http_auth::BearerValidator>>,
+    throttle: Option<Arc<crate::http_auth::throttle::Throttle>>,
 ) -> Result<(), Error> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -241,13 +244,23 @@ pub(crate) async fn serve_http_on(
     // applies only to routes nested below this Router, so it doesn't
     // affect any sibling routes added in the future.
     let mut mcp_router = axum::Router::new().nest_service("/mcp", service);
-    if let Some(v) = validator {
+    if let (Some(v), Some(t)) = (validator, throttle) {
+        let state = crate::http_auth::middleware::AuthState {
+            validator: v,
+            throttle: t,
+        };
         mcp_router = mcp_router.layer(axum::middleware::from_fn_with_state(
-            v,
+            state,
             crate::http_auth::middleware::bearer_middleware,
         ));
     }
-    axum::serve(listener, mcp_router)
+    // `into_make_service_with_connect_info::<SocketAddr>()` is the
+    // load-bearing wiring that makes the `ConnectInfo<SocketAddr>`
+    // extractor in `bearer_middleware` resolve to the peer address.
+    // Without it the middleware compiles but every request 500s at
+    // extractor failure.
+    let make_service = mcp_router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    axum::serve(listener, make_service)
         .with_graceful_shutdown(async move { cancel.cancelled_owned().await })
         .await
         .map_err(|e| Error::Internal {
@@ -449,8 +462,17 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = fake_server();
+        // Bundle a default-config throttle when the test passes a
+        // validator (production wiring; see lib::run_serve_blocking).
+        // Loopback-only tests that omit the validator also omit the
+        // throttle — matches the production invariant.
+        let throttle = validator.as_ref().map(|_| {
+            Arc::new(crate::http_auth::throttle::Throttle::new(
+                crate::http_auth::throttle::ThrottleConfig::default(),
+            ))
+        });
         tokio::spawn(async move {
-            let _ = serve_http_on(listener, server, validator).await;
+            let _ = serve_http_on(listener, server, validator, throttle).await;
         });
         format!("http://{addr}/mcp")
     }

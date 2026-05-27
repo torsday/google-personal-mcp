@@ -449,7 +449,19 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
                     }
                 });
             }
-            runtime.block_on(server::run_http(server, &addr, http_validator))
+            // Per-source-IP failed-auth throttle (ADR-0020 §"Failed-
+            // auth treatment" / #170). Constructed alongside the
+            // validator so test paths that skip the validator also
+            // skip the throttle. Spawn the sweeper after construction
+            // so idle buckets get aged out; the handle aborts on drop
+            // along with the runtime.
+            let throttle = http_validator.as_ref().map(|_| {
+                Arc::new(http_auth::throttle::Throttle::new(
+                    http_auth::throttle::ThrottleConfig::default(),
+                ))
+            });
+            let _throttle_sweeper = throttle.as_ref().and_then(http_auth::throttle::Throttle::spawn_sweeper);
+            runtime.block_on(server::run_http(server, &addr, http_validator, throttle))
         }
     }
 }

@@ -51,6 +51,12 @@ pub(crate) mod names {
         "gmcp_cache_bodies_purged_due_to_delete_total";
     pub(crate) const RATE_LIMIT_BLOCKS_TOTAL: &str = "gmcp_rate_limit_blocks_total";
     pub(crate) const BUILD_INFO: &str = "gmcp_build_info";
+    /// Per-source-IP failed HTTP auth attempts (ADR-0020 / #170).
+    /// **High-cardinality label**: `source_ip` is labelled per the
+    /// ADR-0020 spec. Downstream alertmanager rules aggregate across
+    /// IPs; storage cost is bounded by the throttle's idle-bucket
+    /// sweep + drive-by sweep mitigation.
+    pub(crate) const HTTP_AUTH_FAILURES_TOTAL: &str = "gmcp_http_auth_failures_total";
 }
 
 /// Bucket set used by `gmcp_tool_call_duration_seconds`. Matches the
