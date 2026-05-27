@@ -24,6 +24,7 @@
 //! - nginx mTLS template (separate ticket).
 
 pub(crate) mod middleware;
+pub(crate) mod throttle;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
