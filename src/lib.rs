@@ -460,7 +460,9 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
                     http_auth::throttle::ThrottleConfig::default(),
                 ))
             });
-            let _throttle_sweeper = throttle.as_ref().and_then(http_auth::throttle::Throttle::spawn_sweeper);
+            let _throttle_sweeper = throttle
+                .as_ref()
+                .and_then(http_auth::throttle::Throttle::spawn_sweeper);
             runtime.block_on(server::run_http(server, &addr, http_validator, throttle))
         }
     }
