@@ -35,6 +35,21 @@ pub(super) fn extract_bool_arg(request: &CallToolRequestParams, field: &str) -> 
         .unwrap_or(false)
 }
 
+/// Extract an optional `bool` parameter — returns `None` when missing or not a
+/// boolean. Unlike [`extract_bool_arg`] (which hard-defaults to `false`), this
+/// lets the caller distinguish "absent" from "false" so a parameter whose
+/// default is `true` (e.g. `single_events`) can be expressed.
+pub(super) fn extract_optional_bool_arg(
+    request: &CallToolRequestParams,
+    field: &str,
+) -> Option<bool> {
+    request
+        .arguments
+        .as_ref()
+        .and_then(|a| a.get(field))
+        .and_then(Value::as_bool)
+}
+
 /// Extract an optional `String` parameter — returns `None` when missing or
 /// when present but not a string. Empty strings round-trip as `Some("")`.
 pub(super) fn extract_optional_string_arg(

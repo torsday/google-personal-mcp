@@ -15,6 +15,7 @@ use rmcp::service::RequestContext;
 use rmcp::RoleServer;
 
 use crate::audit::AuditEntry;
+use crate::calendar::{calendars, events};
 use crate::error;
 use crate::tools::{
     archive, audit_summary, batch, cache_invalidate, cache_status, download_attachment, fanout,
@@ -23,8 +24,8 @@ use crate::tools::{
 };
 
 use super::args::{
-    extract_account_arg, extract_bool_arg, extract_optional_string_arg, extract_optional_u32_arg,
-    extract_string_arg, extract_string_array_arg, ok_result,
+    extract_account_arg, extract_bool_arg, extract_optional_bool_arg, extract_optional_string_arg,
+    extract_optional_u32_arg, extract_string_arg, extract_string_array_arg, ok_result,
 };
 use super::descriptors::registered_tools;
 use super::GoogleServer;
@@ -704,10 +705,74 @@ impl GoogleServer {
                     .and_then(|out| ok_result("batch_modify_thread_labels serialize", &out))
             }
 
+            "list_calendars" => {
+                let account = extract_account_arg(&request, "list_calendars")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not yet implemented for `list_calendars` \
+                         — pass a single account alias",
+                        None,
+                    ));
+                }
+                let calendar = self.calendar.as_ref().ok_or_else(calendar_disabled_err)?;
+                calendars::list_calendars(calendar, &account)
+                    .await
+                    .map_err(|e| error::to_mcp_error(&e))
+                    .and_then(|out| ok_result("list_calendars serialize", &out))
+            }
+
+            "list_events" => {
+                let account = extract_account_arg(&request, "list_events")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not yet implemented for `list_events` \
+                         — pass a single account alias",
+                        None,
+                    ));
+                }
+                let calendar = self.calendar.as_ref().ok_or_else(calendar_disabled_err)?;
+                let calendar_id = extract_string_arg(&request, "calendar_id")?;
+                let time_min = extract_string_arg(&request, "time_min")?;
+                let time_max = extract_string_arg(&request, "time_max")?;
+                let q = extract_optional_string_arg(&request, "q");
+                let single_events =
+                    extract_optional_bool_arg(&request, "single_events").unwrap_or(true);
+                let order_by = extract_optional_string_arg(&request, "order_by");
+                let max_results = extract_optional_u32_arg(&request, "max_results")
+                    .unwrap_or(events::DEFAULT_MAX_RESULTS);
+                let page_token = extract_optional_string_arg(&request, "page_token");
+                events::list_events(
+                    calendar,
+                    events::ListEventsInput {
+                        account,
+                        calendar_id,
+                        time_min,
+                        time_max,
+                        q,
+                        single_events,
+                        order_by,
+                        max_results,
+                        page_token,
+                    },
+                )
+                .await
+                .map_err(|e| error::to_mcp_error(&e))
+                .and_then(|out| ok_result("list_events serialize", &out))
+            }
+
             other => Err(rmcp::ErrorData::invalid_params(
                 format!("unknown tool `{other}`"),
                 None,
             )),
         }
     }
+}
+
+/// Error returned when a Calendar tool is invoked but `[services.calendar]` is
+/// disabled (the default) — the service was never constructed at startup.
+fn calendar_disabled_err() -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_params(
+        "calendar service is not enabled — set `[services.calendar] enabled = true` in config.toml",
+        None,
+    )
 }
