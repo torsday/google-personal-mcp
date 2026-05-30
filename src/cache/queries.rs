@@ -225,6 +225,7 @@ pub(super) async fn lookup_thread_metadata(
         let labels = fetch_labels(conn, &m.id).await?;
         let headers: HeadersJson = parse_headers(&m.headers_json)?;
         parsed.push(ThreadMetadataMessage {
+            message_id: m.id.clone(),
             internal_date_ms: m.internal_date.to_string(),
             label_ids: labels,
             size_estimate: m.raw_size.try_into().unwrap_or(0),
@@ -1071,6 +1072,7 @@ mod tests {
         let meta = ThreadMetadata {
             thread_id: "tid-meta".into(),
             messages: vec![ThreadMetadataMessage {
+                message_id: "msg-meta-1".into(),
                 internal_date_ms: "1717200000000".into(),
                 label_ids: vec!["INBOX".into()],
                 size_estimate: 4096,
@@ -1112,6 +1114,7 @@ mod tests {
         let meta = ThreadMetadata {
             thread_id: "tid-1".into(),
             messages: vec![ThreadMetadataMessage {
+                message_id: "msg-before".into(),
                 internal_date_ms: "1717200000000".into(),
                 label_ids: vec!["INBOX".into()],
                 size_estimate: 1024,
@@ -1153,6 +1156,7 @@ mod tests {
         let meta = ThreadMetadata {
             thread_id: "tid-1".into(),
             messages: vec![ThreadMetadataMessage {
+                message_id: "msg-after".into(),
                 internal_date_ms: "1717200000000".into(),
                 label_ids: vec!["IMPORTANT".into()],
                 size_estimate: 9999,

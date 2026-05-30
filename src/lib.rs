@@ -103,9 +103,14 @@ pub mod bench_handle {
 
         /// Run `get_thread(account, thread_id)` end-to-end.
         pub async fn get_thread(&self, thread_id: &str) -> bool {
-            get_thread::get_thread(&self.gmail, &self.account, thread_id)
-                .await
-                .is_ok()
+            get_thread::get_thread(
+                &self.gmail,
+                &self.account,
+                thread_id,
+                get_thread::ThreadFormat::Full,
+            )
+            .await
+            .is_ok()
         }
 
         /// Run `search_threads({account, query, max_results=10})`

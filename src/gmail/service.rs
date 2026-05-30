@@ -31,7 +31,9 @@ use crate::cache::sync::HistorySync;
 use crate::cache::Cache;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
-use crate::gmail::threads::{self as threads_api, ParsedThread, RawThreadsList, ThreadMetadata};
+use crate::gmail::threads::{
+    self as threads_api, ParsedThread, ParsedThreadMinimal, RawThreadsList, ThreadMetadata,
+};
 
 /// Cache-aware wrapper around [`GmailClient`]. Tools take this instead of the
 /// raw client so cacheable reads route through one place.
@@ -242,6 +244,17 @@ impl<T: RefreshTransport + 'static> GmailService<T> {
             return Ok(fresh);
         }
         threads_api::get_thread_metadata(&self.client, account, thread_id).await
+    }
+
+    /// `threads.get(format=minimal)` (40 quota units) — IDs and label state
+    /// only. Not cached (minimal format carries no content worth storing).
+    pub(crate) async fn get_thread_minimal(
+        &self,
+        account: &str,
+        thread_id: &str,
+    ) -> Result<ParsedThreadMinimal, Error> {
+        self.maybe_sync(account).await;
+        threads_api::get_thread_minimal(&self.client, account, thread_id).await
     }
 }
 
