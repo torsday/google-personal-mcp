@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::gmail::quota::GmailMethod;
 use crate::gmail::service::GmailService;
 use crate::http::percent_encode_path_segment;
-use crate::tools::batch::{self, BatchItem};
+use crate::tools::batch::{self, BatchMode, BatchResponse};
 use crate::tools::destructive::{Decision, DestructiveContext};
 
 // ── Input / output types ──────────────────────────────────────────────────────
@@ -44,11 +44,7 @@ pub(crate) struct BatchModifyThreadLabelsInput {
     pub add_label_ids: Vec<String>,
     pub remove_label_ids: Vec<String>,
     pub dry_run: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct BatchModifyThreadLabelsOutput {
-    pub results: Vec<BatchItem>,
+    pub mode: BatchMode,
 }
 
 // ── Gmail API response ────────────────────────────────────────────────────────
@@ -172,7 +168,7 @@ pub(crate) async fn modify_thread_labels<T: RefreshTransport>(
 pub(crate) async fn batch_modify_thread_labels<T: RefreshTransport + Send + Sync + 'static>(
     gmail: Arc<GmailService<T>>,
     input: BatchModifyThreadLabelsInput,
-) -> Result<BatchModifyThreadLabelsOutput, Error> {
+) -> Result<BatchResponse, Error> {
     batch::validate_batch_input(&input.account, &input.thread_ids)?;
 
     // modify-specific: at least one of add/remove must be non-empty.
@@ -183,44 +179,42 @@ pub(crate) async fn batch_modify_thread_labels<T: RefreshTransport + Send + Sync
         });
     }
 
-    if input.dry_run {
-        return Ok(BatchModifyThreadLabelsOutput {
-            results: batch::dry_run_results(input.thread_ids),
-        });
-    }
+    let results = if input.dry_run {
+        batch::dry_run_results(input.thread_ids)
+    } else {
+        let account = Arc::new(input.account);
+        let add = Arc::new(input.add_label_ids);
+        let remove = Arc::new(input.remove_label_ids);
+        batch::run_thread_batch(input.thread_ids, |tid| {
+            let g = Arc::clone(&gmail);
+            let a = Arc::clone(&account);
+            let add = Arc::clone(&add);
+            let remove = Arc::clone(&remove);
+            async move {
+                modify_thread_labels(
+                    &g,
+                    ModifyThreadLabelsInput {
+                        account: (*a).clone(),
+                        thread_id: tid,
+                        add_label_ids: (*add).clone(),
+                        remove_label_ids: (*remove).clone(),
+                        dry_run: false,
+                    },
+                )
+                .await
+                .map(|_| ())
+            }
+        })
+        .await
+    };
 
-    let account = Arc::new(input.account);
-    let add = Arc::new(input.add_label_ids);
-    let remove = Arc::new(input.remove_label_ids);
-    let results = batch::run_thread_batch(input.thread_ids, |tid| {
-        let g = Arc::clone(&gmail);
-        let a = Arc::clone(&account);
-        let add = Arc::clone(&add);
-        let remove = Arc::clone(&remove);
-        async move {
-            modify_thread_labels(
-                &g,
-                ModifyThreadLabelsInput {
-                    account: (*a).clone(),
-                    thread_id: tid,
-                    add_label_ids: (*add).clone(),
-                    remove_label_ids: (*remove).clone(),
-                    dry_run: false,
-                },
-            )
-            .await
-            .map(|_| ())
-        }
-    })
-    .await;
-
-    Ok(BatchModifyThreadLabelsOutput { results })
+    Ok(BatchResponse::from_items(results, input.mode))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
@@ -385,11 +379,21 @@ mod tests {
                 add_label_ids: vec!["STARRED".into()],
                 remove_label_ids: vec![],
                 dry_run: true,
+                mode: BatchMode::All,
             },
         )
         .await
         .expect("batch dry run ok");
-        assert!(out.results.iter().all(|r| r.ok));
+        match out {
+            BatchResponse::All {
+                succeeded_count,
+                results,
+            } => {
+                assert_eq!(succeeded_count, 2);
+                assert!(results.iter().all(|r| r.ok));
+            }
+            other => panic!("expected All variant, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -413,6 +417,7 @@ mod tests {
             .await;
 
         let client = make_client(&mock.uri());
+        // mode: all preserves the full per-item list in input order.
         let out = batch_modify_thread_labels(
             client,
             BatchModifyThreadLabelsInput {
@@ -421,14 +426,24 @@ mod tests {
                 add_label_ids: vec!["STARRED".into()],
                 remove_label_ids: vec![],
                 dry_run: false,
+                mode: BatchMode::All,
             },
         )
         .await
         .expect("batch completes");
-        // sorted: err < ok
-        assert_eq!(out.results[0].thread_id, "err");
-        assert!(!out.results[0].ok);
-        assert_eq!(out.results[1].thread_id, "ok");
-        assert!(out.results[1].ok);
+        match out {
+            BatchResponse::All {
+                succeeded_count,
+                results,
+            } => {
+                assert_eq!(succeeded_count, 1);
+                // Input order preserved (issue #105): err first.
+                assert_eq!(results[0].thread_id, "err");
+                assert!(!results[0].ok);
+                assert_eq!(results[1].thread_id, "ok");
+                assert!(results[1].ok);
+            }
+            other => panic!("expected All variant, got {other:?}"),
+        }
     }
 }

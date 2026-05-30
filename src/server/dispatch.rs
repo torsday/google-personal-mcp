@@ -17,7 +17,7 @@ use rmcp::RoleServer;
 use crate::audit::AuditEntry;
 use crate::error;
 use crate::tools::{
-    archive, audit_summary, cache_invalidate, cache_status, download_attachment, fanout,
+    archive, audit_summary, batch, cache_invalidate, cache_status, download_attachment, fanout,
     get_thread, list_accounts, list_attachments, list_labels, mcp_status, modify_labels,
     purge_account, search_threads, trash,
 };
@@ -456,6 +456,10 @@ impl GoogleServer {
                 let account = extract_account_arg(&request, "batch_archive")?;
                 let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
                 let dry_run = extract_bool_arg(&request, "dry_run");
+                let mode = batch::BatchMode::from_arg(
+                    extract_optional_string_arg(&request, "mode").as_deref(),
+                )
+                .map_err(|e| error::to_mcp_error(&e))?;
                 self.write_destructive_intent(
                     &account,
                     "batch_archive",
@@ -468,6 +472,7 @@ impl GoogleServer {
                         account: account.clone(),
                         thread_ids: thread_ids.clone(),
                         dry_run,
+                        mode,
                     },
                 )
                 .await;
@@ -538,6 +543,10 @@ impl GoogleServer {
                 let account = extract_account_arg(&request, "batch_trash")?;
                 let thread_ids = extract_string_array_arg(&request, "thread_ids")?;
                 let dry_run = extract_bool_arg(&request, "dry_run");
+                let mode = batch::BatchMode::from_arg(
+                    extract_optional_string_arg(&request, "mode").as_deref(),
+                )
+                .map_err(|e| error::to_mcp_error(&e))?;
                 self.write_destructive_intent(
                     &account,
                     "batch_trash",
@@ -550,6 +559,7 @@ impl GoogleServer {
                         account: account.clone(),
                         thread_ids: thread_ids.clone(),
                         dry_run,
+                        mode,
                     },
                 )
                 .await;
@@ -640,6 +650,10 @@ impl GoogleServer {
                 let remove_label_ids =
                     extract_string_array_arg(&request, "remove_label_ids").unwrap_or_default();
                 let dry_run = extract_bool_arg(&request, "dry_run");
+                let mode = batch::BatchMode::from_arg(
+                    extract_optional_string_arg(&request, "mode").as_deref(),
+                )
+                .map_err(|e| error::to_mcp_error(&e))?;
                 self.write_destructive_intent(
                     &account,
                     "batch_modify_thread_labels",
@@ -660,6 +674,7 @@ impl GoogleServer {
                         add_label_ids: add_label_ids.clone(),
                         remove_label_ids: remove_label_ids.clone(),
                         dry_run,
+                        mode,
                     },
                 )
                 .await;

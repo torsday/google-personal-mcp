@@ -5,8 +5,12 @@
 //! pattern so future fixes apply once rather than three times.
 //!
 //! Per [ADR-0016 §Batch response convention](../../docs/adr/0016-tool-surface-and-conventions.md):
-//! batch tools return per-item `{ thread_id, ok, error? }` and never
-//! short-circuit on per-item failure.
+//! batch tools never short-circuit on per-item failure. The response shape is
+//! selected by the `mode` parameter ([`BatchMode`], default
+//! [`BatchMode::FailuresOnly`]) per
+//! [ADR-0027 §5](../../docs/adr/0027-v1-1-surface-refinements.md); `run_thread_batch`
+//! produces the per-item `{ thread_id, ok, error? }` outcomes that
+//! [`BatchResponse::from_items`] then folds into the chosen envelope.
 
 use std::future::Future;
 
@@ -22,6 +26,127 @@ pub(crate) struct BatchItem {
     pub thread_id: String,
     pub ok: bool,
     pub error: Option<String>,
+}
+
+/// One failed-thread entry in `"failures_only"` / `"summary"` responses. Wire
+/// shape `{ "thread_id": "...", "error": "..." }` per
+/// [ADR-0027 §5](../../docs/adr/0027-v1-1-surface-refinements.md). Only failures
+/// are represented, so `error` is always present (unlike [`BatchItem`]).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct BatchFailure {
+    pub thread_id: String,
+    pub error: String,
+}
+
+/// Response verbosity for a batch tool, selected by the `mode` parameter per
+/// [ADR-0027 §5](../../docs/adr/0027-v1-1-surface-refinements.md). Defaults to
+/// [`BatchMode::FailuresOnly`] — the common all-success batch returns a terse
+/// empty `failures` array rather than N redundant per-item rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum BatchMode {
+    /// Response lists only failed items (`failures: [{thread_id, error}]`);
+    /// `failures: []` on full success. The default.
+    #[default]
+    FailuresOnly,
+    /// Response lists every per-item outcome (`results: [{thread_id, ok, error}]`)
+    /// — the v1.0 shape, for audit-trail callers.
+    All,
+    /// Response carries counts plus the first 5 failure details only — for
+    /// "ran a 1000-item batch, just tell me how it went" callers.
+    Summary,
+}
+
+impl BatchMode {
+    /// Maximum failure details surfaced in [`BatchMode::Summary`] responses.
+    const SUMMARY_FAILURE_CAP: usize = 5;
+
+    /// Parse the `mode` tool argument. Absent → [`BatchMode::FailuresOnly`].
+    /// Returns `Err(InvalidArgument)` on any unrecognized value so a typo
+    /// fails loudly rather than silently defaulting.
+    pub(crate) fn from_arg(raw: Option<&str>) -> Result<Self, Error> {
+        match raw {
+            None | Some("failures_only") => Ok(Self::FailuresOnly),
+            Some("all") => Ok(Self::All),
+            Some("summary") => Ok(Self::Summary),
+            Some(other) => Err(Error::InvalidArgument {
+                field: "mode".into(),
+                detail: format!("mode must be one of failures_only|all|summary, got `{other}`"),
+            }),
+        }
+    }
+}
+
+/// A batch tool's response envelope, shaped by the requested [`BatchMode`].
+/// `succeeded_count` is present in every variant per
+/// [ADR-0027 §5](../../docs/adr/0027-v1-1-surface-refinements.md) — it
+/// distinguishes "0 succeeded, 0 failed" from "200 succeeded, 0 failed", which
+/// an empty `failures` array alone cannot.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum BatchResponse {
+    /// `mode: "failures_only"` — `{ succeeded_count, failures: [...] }`.
+    FailuresOnly {
+        succeeded_count: u32,
+        failures: Vec<BatchFailure>,
+    },
+    /// `mode: "all"` — `{ succeeded_count, results: [...] }`.
+    All {
+        succeeded_count: u32,
+        results: Vec<BatchItem>,
+    },
+    /// `mode: "summary"` — `{ succeeded_count, failed_count, failures: [≤5] }`.
+    Summary {
+        succeeded_count: u32,
+        failed_count: u32,
+        failures: Vec<BatchFailure>,
+    },
+}
+
+impl BatchResponse {
+    /// Fold per-item [`BatchItem`] outcomes into the envelope for `mode`.
+    /// Consumes `items` since each variant either reshapes or moves them.
+    pub(crate) fn from_items(items: Vec<BatchItem>, mode: BatchMode) -> Self {
+        let succeeded_count = count_u32(items.iter().filter(|i| i.ok).count());
+        match mode {
+            BatchMode::FailuresOnly => Self::FailuresOnly {
+                succeeded_count,
+                failures: collect_failures(items, None),
+            },
+            BatchMode::All => Self::All {
+                succeeded_count,
+                results: items,
+            },
+            BatchMode::Summary => {
+                let failed_count = count_u32(items.iter().filter(|i| !i.ok).count());
+                Self::Summary {
+                    succeeded_count,
+                    failed_count,
+                    failures: collect_failures(items, Some(BatchMode::SUMMARY_FAILURE_CAP)),
+                }
+            }
+        }
+    }
+}
+
+/// Saturating `usize → u32`. Batch sizes are bounded by [`MAX_BATCH_SIZE`], so
+/// this never actually saturates; the conversion stays clippy-clean regardless.
+fn count_u32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// Pull failed items into [`BatchFailure`] entries, preserving input order
+/// (the order guarantee from [#105](https://github.com/torsday/google-personal-mcp/issues/105)).
+/// `cap` optionally limits how many are kept (summary mode).
+fn collect_failures(items: Vec<BatchItem>, cap: Option<usize>) -> Vec<BatchFailure> {
+    let failed = items.into_iter().filter(|i| !i.ok).map(|i| BatchFailure {
+        thread_id: i.thread_id,
+        // A non-ok item always carries an error; default defensively.
+        error: i.error.unwrap_or_else(|| "unknown error".into()),
+    });
+    match cap {
+        Some(n) => failed.take(n).collect(),
+        None => failed.collect(),
+    }
 }
 
 /// Maximum thread IDs per batch call, per
@@ -349,5 +474,139 @@ mod tests {
         };
         let json = serde_json::to_value(&err_item).unwrap();
         assert_eq!(json["error"], "nope");
+    }
+
+    // ── BatchMode::from_arg ────────────────────────────────────────────────
+
+    #[test]
+    fn batch_mode_from_arg_defaults_to_failures_only() {
+        assert_eq!(BatchMode::from_arg(None).unwrap(), BatchMode::FailuresOnly);
+        assert_eq!(
+            BatchMode::from_arg(Some("failures_only")).unwrap(),
+            BatchMode::FailuresOnly
+        );
+    }
+
+    #[test]
+    fn batch_mode_from_arg_parses_each_variant() {
+        assert_eq!(BatchMode::from_arg(Some("all")).unwrap(), BatchMode::All);
+        assert_eq!(
+            BatchMode::from_arg(Some("summary")).unwrap(),
+            BatchMode::Summary
+        );
+    }
+
+    #[test]
+    fn batch_mode_from_arg_rejects_unknown() {
+        let err = BatchMode::from_arg(Some("verbose")).unwrap_err();
+        match err {
+            Error::InvalidArgument { field, detail } => {
+                assert_eq!(field, "mode");
+                assert!(detail.contains("verbose"));
+            }
+            _ => panic!("expected InvalidArgument"),
+        }
+    }
+
+    // ── BatchResponse::from_items ──────────────────────────────────────────
+
+    fn items() -> Vec<BatchItem> {
+        // 2 ok, 1 failed — input order: ok, bad, ok.
+        vec![
+            BatchItem {
+                thread_id: "a".into(),
+                ok: true,
+                error: None,
+            },
+            BatchItem {
+                thread_id: "b".into(),
+                ok: false,
+                error: Some("boom".into()),
+            },
+            BatchItem {
+                thread_id: "c".into(),
+                ok: true,
+                error: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn failures_only_lists_just_failures_with_count() {
+        let resp = BatchResponse::from_items(items(), BatchMode::FailuresOnly);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["succeeded_count"], 2);
+        assert_eq!(json["failures"].as_array().unwrap().len(), 1);
+        assert_eq!(json["failures"][0]["thread_id"], "b");
+        assert_eq!(json["failures"][0]["error"], "boom");
+        // `all` and `summary` fields must be absent in this variant.
+        assert!(json.get("results").is_none());
+        assert!(json.get("failed_count").is_none());
+    }
+
+    #[test]
+    fn failures_only_full_success_is_empty_array_not_omitted() {
+        let all_ok = vec![BatchItem {
+            thread_id: "a".into(),
+            ok: true,
+            error: None,
+        }];
+        let resp = BatchResponse::from_items(all_ok, BatchMode::FailuresOnly);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["succeeded_count"], 1);
+        // Present and empty — distinguishes "all succeeded" from "no data".
+        assert_eq!(json["failures"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn all_mode_preserves_every_item_in_order() {
+        let resp = BatchResponse::from_items(items(), BatchMode::All);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["succeeded_count"], 2);
+        let results = json["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["thread_id"], "a");
+        assert_eq!(results[1]["thread_id"], "b");
+        assert_eq!(results[1]["ok"], false);
+        assert!(json.get("failures").is_none());
+    }
+
+    #[test]
+    fn summary_mode_carries_both_counts_plus_failures() {
+        let resp = BatchResponse::from_items(items(), BatchMode::Summary);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["succeeded_count"], 2);
+        assert_eq!(json["failed_count"], 1);
+        assert_eq!(json["failures"].as_array().unwrap().len(), 1);
+        assert!(json.get("results").is_none());
+    }
+
+    #[test]
+    fn summary_mode_caps_failures_at_five() {
+        // 7 failures → summary keeps the first 5 (input order), but
+        // failed_count reports the true total.
+        let many: Vec<BatchItem> = (0..7)
+            .map(|i| BatchItem {
+                thread_id: format!("t{i}"),
+                ok: false,
+                error: Some(format!("err{i}")),
+            })
+            .collect();
+        let resp = BatchResponse::from_items(many, BatchMode::Summary);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["succeeded_count"], 0);
+        assert_eq!(json["failed_count"], 7);
+        let failures = json["failures"].as_array().unwrap();
+        assert_eq!(failures.len(), 5, "capped at first 5");
+        assert_eq!(failures[0]["thread_id"], "t0");
+        assert_eq!(failures[4]["thread_id"], "t4");
+    }
+
+    #[test]
+    fn empty_batch_succeeded_count_is_zero() {
+        let resp = BatchResponse::from_items(vec![], BatchMode::FailuresOnly);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["succeeded_count"], 0);
+        assert_eq!(json["failures"].as_array().unwrap().len(), 0);
     }
 }

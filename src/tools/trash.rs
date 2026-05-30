@@ -12,7 +12,7 @@ use crate::error::Error;
 use crate::gmail::quota::GmailMethod;
 use crate::gmail::service::GmailService;
 use crate::http::percent_encode_path_segment;
-use crate::tools::batch::{self, BatchItem};
+use crate::tools::batch::{self, BatchMode, BatchResponse};
 use crate::tools::destructive::{Decision, DestructiveContext};
 
 // ── Input / output types ──────────────────────────────────────────────────────
@@ -34,11 +34,7 @@ pub(crate) struct BatchTrashInput {
     pub account: String,
     pub thread_ids: Vec<String>,
     pub dry_run: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct BatchTrashOutput {
-    pub results: Vec<BatchItem>,
+    pub mode: BatchMode,
 }
 
 // ── Core logic ────────────────────────────────────────────────────────────────
@@ -119,41 +115,39 @@ pub(crate) async fn trash_thread<T: RefreshTransport>(
 pub(crate) async fn batch_trash<T: RefreshTransport + Send + Sync + 'static>(
     gmail: Arc<GmailService<T>>,
     input: BatchTrashInput,
-) -> Result<BatchTrashOutput, Error> {
+) -> Result<BatchResponse, Error> {
     batch::validate_batch_input(&input.account, &input.thread_ids)?;
 
-    if input.dry_run {
-        return Ok(BatchTrashOutput {
-            results: batch::dry_run_results(input.thread_ids),
-        });
-    }
+    let results = if input.dry_run {
+        batch::dry_run_results(input.thread_ids)
+    } else {
+        let account = Arc::new(input.account);
+        batch::run_thread_batch(input.thread_ids, |tid| {
+            let g = Arc::clone(&gmail);
+            let a = Arc::clone(&account);
+            async move {
+                trash_thread(
+                    &g,
+                    TrashThreadInput {
+                        account: (*a).clone(),
+                        thread_id: tid,
+                        dry_run: false,
+                    },
+                )
+                .await
+                .map(|_| ())
+            }
+        })
+        .await
+    };
 
-    let account = Arc::new(input.account);
-    let results = batch::run_thread_batch(input.thread_ids, |tid| {
-        let g = Arc::clone(&gmail);
-        let a = Arc::clone(&account);
-        async move {
-            trash_thread(
-                &g,
-                TrashThreadInput {
-                    account: (*a).clone(),
-                    thread_id: tid,
-                    dry_run: false,
-                },
-            )
-            .await
-            .map(|_| ())
-        }
-    })
-    .await;
-
-    Ok(BatchTrashOutput { results })
+    Ok(BatchResponse::from_items(results, input.mode))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
@@ -260,12 +254,22 @@ mod tests {
                 account: "personal".into(),
                 thread_ids: vec!["a".into(), "b".into()],
                 dry_run: true,
+                mode: BatchMode::All,
             },
         )
         .await
         .expect("dry run should not fail");
-        assert_eq!(out.results.len(), 2);
-        assert!(out.results.iter().all(|r| r.ok));
+        match out {
+            BatchResponse::All {
+                succeeded_count,
+                results,
+            } => {
+                assert_eq!(succeeded_count, 2);
+                assert_eq!(results.len(), 2);
+                assert!(results.iter().all(|r| r.ok));
+            }
+            other => panic!("expected All variant, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -292,23 +296,33 @@ mod tests {
             .await;
 
         let client = make_client(&mock.uri());
-        let mut out = batch_trash(
+        // mode: all returns the full per-item list in input order.
+        let out = batch_trash(
             client,
             BatchTrashInput {
                 account: "personal".into(),
                 thread_ids: vec!["tid-err".into(), "tid-ok".into()],
                 dry_run: false,
+                mode: BatchMode::All,
             },
         )
         .await
         .expect("batch should complete");
-        // Sorted by thread_id: tid-err < tid-ok
-        out.results.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
-        assert_eq!(out.results[0].thread_id, "tid-err");
-        assert!(!out.results[0].ok);
-        assert!(out.results[0].error.is_some());
-        assert_eq!(out.results[1].thread_id, "tid-ok");
-        assert!(out.results[1].ok);
+        match out {
+            BatchResponse::All {
+                succeeded_count,
+                results,
+            } => {
+                assert_eq!(succeeded_count, 1);
+                // Input order is preserved (issue #105): tid-err first.
+                assert_eq!(results[0].thread_id, "tid-err");
+                assert!(!results[0].ok);
+                assert!(results[0].error.is_some());
+                assert_eq!(results[1].thread_id, "tid-ok");
+                assert!(results[1].ok);
+            }
+            other => panic!("expected All variant, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -320,6 +334,7 @@ mod tests {
                 account: "personal".into(),
                 thread_ids: vec![],
                 dry_run: false,
+                mode: BatchMode::FailuresOnly,
             },
         )
         .await
