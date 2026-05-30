@@ -1,14 +1,18 @@
 //! `config.toml` schema — the top-level [`Config`] struct and every nested
-//! `[<section>]` it owns. Pure types + `Default` impls + `default_*` helpers.
+//! `[<section>]` it owns. Pure types + `Default` impls + `default_*` helpers,
+//! plus the pure capability-resolution logic ([`Config::resolve_capability`])
+//! that reads this state (ADR-0022).
 //!
 //! Load/validate logic lives in [`super::parse`].
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::auth::scopes::GmailProfile;
 use crate::error::Error;
+use crate::tools::aspect::Aspect;
 
 /// Operator-managed daemon settings per ADR-0006. All fields optional; missing
 /// file means "use all defaults".
@@ -286,6 +290,27 @@ impl Default for ServicesConfig {
     }
 }
 
+impl ServicesConfig {
+    /// The configured services paired with their canonical names — the single
+    /// place that maps a service string to its [`ServiceEntry`]. Adding a new
+    /// service (Drive, ADR-0025) means adding one row here.
+    pub(super) const fn all(&self) -> [(&'static str, &ServiceEntry); 3] {
+        [
+            ("gmail", &self.gmail),
+            ("calendar", &self.calendar),
+            ("contacts", &self.contacts),
+        ]
+    }
+
+    /// The [`ServiceEntry`] for `service`, or `None` for an unknown name.
+    fn entry(&self, service: &str) -> Option<&ServiceEntry> {
+        self.all()
+            .into_iter()
+            .find(|(name, _)| *name == service)
+            .map(|(_, entry)| entry)
+    }
+}
+
 pub(super) fn default_services() -> ServicesConfig {
     ServicesConfig {
         gmail: default_gmail_service(),
@@ -305,6 +330,21 @@ pub(crate) struct ServiceEntry {
     /// are requested and enforced. Defaults to `"modify+send"`.
     #[serde(default = "default_gmail_profile_str")]
     pub(crate) profile: String,
+    /// Per-aspect capability toggles (ADR-0022). An omitted block — or an
+    /// omitted aspect within it — leaves that aspect `None`, so resolution
+    /// falls through to the per-account override, then the service-aware
+    /// built-in default. See [`Config::resolve_capability`].
+    #[serde(default)]
+    pub(crate) capabilities: CapabilityOverride,
+    /// Per-account capability overrides keyed by account alias (ADR-0022
+    /// §Per-account). Merges over [`Self::capabilities`].
+    #[serde(default)]
+    pub(crate) accounts: HashMap<String, AccountOverride>,
+    /// Per-tool overrides — the sanctioned-exception escape hatch (ADR-0022
+    /// §Per-tool override). The load-time validator in [`super::parse`] rejects
+    /// any key not in [`SANCTIONED_TOOL_OVERRIDES`].
+    #[serde(default)]
+    pub(crate) tools: HashMap<String, ToolOverride>,
 }
 
 impl Default for ServiceEntry {
@@ -313,6 +353,9 @@ impl Default for ServiceEntry {
             enabled: false,
             scopes: vec![],
             profile: default_gmail_profile_str(),
+            capabilities: CapabilityOverride::default(),
+            accounts: HashMap::new(),
+            tools: HashMap::new(),
         }
     }
 }
@@ -322,6 +365,171 @@ impl ServiceEntry {
     /// for unknown values.
     pub(crate) fn gmail_profile(&self) -> Result<GmailProfile, Error> {
         GmailProfile::from_str(&self.profile)
+    }
+}
+
+/// Tools for which a `[services.<svc>.tools.<tool>]` per-tool override is
+/// sanctioned. Per [ADR-0022 §Per-tool override](../../docs/adr/0022-capability-gating.md),
+/// the aspect vocabulary is the default surface and per-tool overrides are a
+/// bounded exception list that grows only by ADR amendment:
+///
+/// - the three Contacts read populations ([ADR-0024](../../docs/adr/0024-contacts-service-surface.md)),
+/// - Gmail's `send_draft` ([ADR-0026](../../docs/adr/0026-gmail-tool-surface-phase-2.md)).
+///
+/// The load-time validator rejects an override naming any other tool.
+pub(super) const SANCTIONED_TOOL_OVERRIDES: &[&str] = &[
+    "list_contacts",
+    "list_other_contacts",
+    "list_directory_people",
+    "send_draft",
+];
+
+/// Operator-written per-aspect capability toggles — the parsed form of a
+/// `[...capabilities]` TOML block. Each aspect is `Option<bool>`: `None` (the
+/// serde default for an omitted key) means "not specified at this level," which
+/// is what lets a partial override (e.g. only `destructive = true`) leave the
+/// other aspects to inherit from a lower precedence level.
+///
+/// ```toml
+/// [services.calendar.capabilities]
+/// read        = true
+/// write       = true
+/// destructive = false   # operator hasn't opted into delete_event yet
+/// ```
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CapabilityOverride {
+    #[serde(default)]
+    pub(crate) read: Option<bool>,
+    #[serde(default)]
+    pub(crate) write: Option<bool>,
+    #[serde(default)]
+    pub(crate) destructive: Option<bool>,
+}
+
+impl CapabilityOverride {
+    /// The operator-specified value for `aspect` at this level, or `None` if
+    /// this level says nothing about it.
+    const fn get(&self, aspect: Aspect) -> Option<bool> {
+        match aspect {
+            Aspect::Read => self.read,
+            Aspect::Write => self.write,
+            Aspect::Destructive => self.destructive,
+        }
+    }
+}
+
+/// Per-account capability override block, merged over the service-level
+/// capabilities (ADR-0022 §Per-account).
+///
+/// ```toml
+/// [services.calendar.accounts.work.capabilities]
+/// destructive = true   # the work account may delete events
+/// ```
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AccountOverride {
+    #[serde(default)]
+    pub(crate) capabilities: CapabilityOverride,
+}
+
+/// Per-tool override — disables a single sanctioned tool inside an otherwise
+/// enabled aspect (ADR-0022 §Per-tool override).
+///
+/// ```toml
+/// [services.contacts.tools.list_directory_people]
+/// enabled = false
+/// ```
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ToolOverride {
+    pub(crate) enabled: bool,
+}
+
+/// Fully-resolved per-aspect capability for a `(account, service)` pair — every
+/// aspect reduced to a concrete allow/deny after the precedence ladder. The
+/// output type of [`Config::resolve_capabilities`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct Capabilities {
+    pub(crate) read: bool,
+    pub(crate) write: bool,
+    pub(crate) destructive: bool,
+}
+
+impl Capabilities {
+    /// The service-aware built-in default (the lowest precedence level), used
+    /// when neither a per-account nor a service-level block specifies an
+    /// aspect. Per [ADR-0022 §Default posture](../../docs/adr/0022-capability-gating.md):
+    /// Gmail is grandfathered all-on (flipping it write-off on upgrade would
+    /// silently break every existing operator); every other service — and any
+    /// future one — is conservative read-only until the operator opts in.
+    fn builtin_default(service: &str) -> Self {
+        if service == "gmail" {
+            Self {
+                read: true,
+                write: true,
+                destructive: true,
+            }
+        } else {
+            Self {
+                read: true,
+                write: false,
+                destructive: false,
+            }
+        }
+    }
+
+    /// The effective bool for a single aspect.
+    pub(crate) const fn for_aspect(self, aspect: Aspect) -> bool {
+        match aspect {
+            Aspect::Read => self.read,
+            Aspect::Write => self.write,
+            Aspect::Destructive => self.destructive,
+        }
+    }
+}
+
+impl Config {
+    /// Resolve the effective capability for `(account, service, aspect)`,
+    /// merging the precedence ladder from [ADR-0022 §Resolution precedence](../../docs/adr/0022-capability-gating.md)
+    /// — most specific wins:
+    ///
+    /// 1. **per-account** capability override (`[services.<svc>.accounts.<acct>.capabilities]`)
+    /// 2. **service** capability (`[services.<svc>.capabilities]`)
+    /// 3. **built-in default** ([`Capabilities::builtin_default`], service-aware)
+    ///
+    /// Per-tool overrides are aspect-independent (they disable a named tool, not
+    /// an aspect) and are enforced separately at dispatch; they do not
+    /// participate here. An unknown `service` name resolves to the conservative
+    /// read-only default.
+    ///
+    /// This is the *soft* gate only: the caller still intersects it with the
+    /// service `enabled` flag and the OAuth scope ceiling (ADR-0022 §Decision).
+    pub(crate) fn resolve_capability(&self, account: &str, service: &str, aspect: Aspect) -> bool {
+        if let Some(entry) = self.services.entry(service) {
+            if let Some(v) = entry
+                .accounts
+                .get(account)
+                .and_then(|acct| acct.capabilities.get(aspect))
+            {
+                return v;
+            }
+            if let Some(v) = entry.capabilities.get(aspect) {
+                return v;
+            }
+        }
+        Capabilities::builtin_default(service).for_aspect(aspect)
+    }
+
+    /// All three aspects resolved at once for `(account, service)` — convenience
+    /// over [`Self::resolve_capability`] for callers that need the full matrix
+    /// (e.g. the future `mcp_status` capability view, ADR-0022 §`mcp_status`).
+    pub(crate) fn resolve_capabilities(&self, account: &str, service: &str) -> Capabilities {
+        Capabilities {
+            read: self.resolve_capability(account, service, Aspect::Read),
+            write: self.resolve_capability(account, service, Aspect::Write),
+            destructive: self.resolve_capability(account, service, Aspect::Destructive),
+        }
     }
 }
 
@@ -337,6 +545,7 @@ fn default_gmail_service() -> ServiceEntry {
             "https://www.googleapis.com/auth/gmail.send".into(),
         ],
         profile: default_gmail_profile_str(),
+        ..ServiceEntry::default()
     }
 }
 
@@ -631,6 +840,135 @@ const fn default_purge_interval() -> u64 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    // ── capability resolution (ADR-0022) ──────────────────────────────────────
+
+    /// Build a `ServiceEntry` with an explicit service-level capability block.
+    fn entry_with_caps(caps: CapabilityOverride) -> ServiceEntry {
+        ServiceEntry {
+            enabled: true,
+            capabilities: caps,
+            ..ServiceEntry::default()
+        }
+    }
+
+    #[test]
+    fn builtin_default_gmail_is_all_on() {
+        // Grandfathered: a default Config (no capability blocks) resolves Gmail
+        // to all-on so existing v1.0 operators don't break on upgrade.
+        let cfg = Config::default();
+        assert!(cfg.resolve_capability("personal", "gmail", Aspect::Read));
+        assert!(cfg.resolve_capability("personal", "gmail", Aspect::Write));
+        assert!(cfg.resolve_capability("personal", "gmail", Aspect::Destructive));
+    }
+
+    #[test]
+    fn builtin_default_other_services_are_read_only() {
+        let cfg = Config::default();
+        for service in ["calendar", "contacts"] {
+            assert!(
+                cfg.resolve_capability("personal", service, Aspect::Read),
+                "{service} read should default on"
+            );
+            assert!(
+                !cfg.resolve_capability("personal", service, Aspect::Write),
+                "{service} write should default off"
+            );
+            assert!(
+                !cfg.resolve_capability("personal", service, Aspect::Destructive),
+                "{service} destructive should default off"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_service_resolves_to_conservative_default() {
+        let cfg = Config::default();
+        assert!(cfg.resolve_capability("personal", "drive", Aspect::Read));
+        assert!(!cfg.resolve_capability("personal", "drive", Aspect::Write));
+        assert!(!cfg.resolve_capability("personal", "drive", Aspect::Destructive));
+    }
+
+    #[test]
+    fn service_level_capability_overrides_builtin_default() {
+        let mut cfg = Config::default();
+        // Turn calendar write on at the service level.
+        cfg.services.calendar = entry_with_caps(CapabilityOverride {
+            write: Some(true),
+            ..CapabilityOverride::default()
+        });
+        assert!(cfg.resolve_capability("personal", "calendar", Aspect::Write));
+        // Aspects the block didn't mention still fall through to the default.
+        assert!(!cfg.resolve_capability("personal", "calendar", Aspect::Destructive));
+        assert!(cfg.resolve_capability("personal", "calendar", Aspect::Read));
+    }
+
+    #[test]
+    fn per_account_override_wins_over_service_level() {
+        let mut cfg = Config::default();
+        let mut calendar = entry_with_caps(CapabilityOverride {
+            destructive: Some(false),
+            ..CapabilityOverride::default()
+        });
+        // work account may delete; service-level (and other accounts) may not.
+        calendar.accounts.insert(
+            "work".into(),
+            AccountOverride {
+                capabilities: CapabilityOverride {
+                    destructive: Some(true),
+                    ..CapabilityOverride::default()
+                },
+            },
+        );
+        cfg.services.calendar = calendar;
+        assert!(cfg.resolve_capability("work", "calendar", Aspect::Destructive));
+        assert!(!cfg.resolve_capability("personal", "calendar", Aspect::Destructive));
+    }
+
+    #[test]
+    fn per_account_partial_override_inherits_unspecified_aspects() {
+        // The account block only sets `destructive`; `write` must still come
+        // from the service level, not reset to the built-in default.
+        let mut cfg = Config::default();
+        let mut calendar = entry_with_caps(CapabilityOverride {
+            write: Some(true),
+            ..CapabilityOverride::default()
+        });
+        calendar.accounts.insert(
+            "work".into(),
+            AccountOverride {
+                capabilities: CapabilityOverride {
+                    destructive: Some(true),
+                    ..CapabilityOverride::default()
+                },
+            },
+        );
+        cfg.services.calendar = calendar;
+        assert!(cfg.resolve_capability("work", "calendar", Aspect::Write)); // from service level
+        assert!(cfg.resolve_capability("work", "calendar", Aspect::Destructive));
+        // from account
+    }
+
+    #[test]
+    fn resolve_capabilities_returns_full_matrix() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.resolve_capabilities("personal", "gmail"),
+            Capabilities {
+                read: true,
+                write: true,
+                destructive: true
+            }
+        );
+        assert_eq!(
+            cfg.resolve_capabilities("personal", "calendar"),
+            Capabilities {
+                read: true,
+                write: false,
+                destructive: false
+            }
+        );
+    }
 
     // ── RotateMode ────────────────────────────────────────────────────────────
 

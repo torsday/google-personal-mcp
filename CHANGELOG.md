@@ -10,6 +10,7 @@ The **v1.1 design program** is locked; implementation has begun with the capabil
 
 ### Added — capability gating foundation
 - Tool **aspect** classification (`read` / `write` / `destructive`) per [ADR-0022 §The three aspects](docs/adr/0022-capability-gating.md): every dispatchable tool now declares exactly one aspect, captured per tool in the Layer-4 registry snapshot so a reclassification surfaces as a reviewed diff. Generalizes the prior `is_destructive()` boolean. First implementation brick for capability gating (#195).
+- Capability **config schema** ([ADR-0022 §Config shape](docs/adr/0022-capability-gating.md)): `[services.<svc>.capabilities]` per-aspect toggles, `[services.<svc>.accounts.<acct>.capabilities]` per-account overrides, and `[services.<svc>.tools.<tool>]` per-tool overrides (bounded to a sanctioned set, rejected at load otherwise). `Config::resolve_capability(account, service, aspect)` resolves the effective value down the precedence ladder; Gmail defaults all-on (grandfathered), every other service read-only. Config layer only — dispatch enforcement is a later ticket (#194).
 
 ### Changed
 - Cross-account fan-out rejection (`account: "*"`) now keys off tool aspect (rejected for any non-`read` tool) rather than a flat destructive list. The set of rejected tools is unchanged — every write and destructive tool stays non-fan-out-able — but the rejection message is now `cross-account fan-out is permitted on read-only tools only` ([ADR-0013](docs/adr/0013-cross-account-fan-out.md) / [ADR-0022](docs/adr/0022-capability-gating.md); #195).
