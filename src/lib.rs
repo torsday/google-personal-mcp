@@ -6,6 +6,7 @@ pub mod auth;
 pub mod cache;
 pub mod calendar;
 pub mod config;
+pub mod contacts;
 pub mod error;
 pub mod gmail;
 pub mod healthz;
@@ -138,6 +139,8 @@ use crate::auth::secrets::SecretStore;
 use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager, TokenState};
 use crate::calendar::client::{CalendarClient, CALENDAR_API_BASE};
 use crate::calendar::service::CalendarService;
+use crate::contacts::client::{PeopleClient, PEOPLE_API_BASE};
+use crate::contacts::service::ContactsService;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
 use crate::gmail::service::GmailService;
@@ -302,9 +305,22 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
         let calendar_client = Arc::new(CalendarClient::new(
             CALENDAR_API_BASE,
             tokens.clone(),
-            http_client,
+            http_client.clone(),
         ));
         Some(Arc::new(CalendarService::new(calendar_client)))
+    } else {
+        None
+    };
+
+    // Contacts service (ADR-0024). Same conditional-on-enabled scaffold wiring
+    // as Calendar; `http_client` is moved here as its last use.
+    let contacts = if cfg.services.contacts.enabled {
+        let people_client = Arc::new(PeopleClient::new(
+            PEOPLE_API_BASE,
+            tokens.clone(),
+            http_client,
+        ));
+        Some(Arc::new(ContactsService::new(people_client)))
     } else {
         None
     };
@@ -408,7 +424,8 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
         cache_dir: cfg.cache.dir,
     };
     let server = GoogleServer::new(accounts, tokens, gmail, audit, verbosity, purge_paths)
-        .with_calendar(calendar);
+        .with_calendar(calendar)
+        .with_contacts(contacts);
 
     // Hold the cache-sync and eviction handles for the lifetime of the
     // daemon — drop aborts the background tasks, which is what we want

@@ -108,6 +108,7 @@ const fn error_kind(e: &Error) -> &'static str {
         Error::Upstream { .. } => "Upstream",
         Error::NotFound { .. } => "NotFound",
         Error::RecurrenceInstanceNotFound { .. } => "RecurrenceInstanceNotFound",
+        Error::ConcurrencyConflict { .. } => "ConcurrencyConflict",
         Error::InvalidArgument { .. } => "InvalidArgument",
         Error::HeaderInjection { .. } => "HeaderInjection",
         Error::Parse { .. }

@@ -15,6 +15,9 @@ The **v1.1 design program** is locked; implementation has begun with the capabil
 ### Added — Calendar service surface
 - Calendar **service-module scaffold** ([ADR-0023](docs/adr/0023-calendar-service-surface.md)): new `src/calendar/` tree mirroring `gmail/` — `CalendarClient<T>` (same `RefreshTransport` auth + single-retry 401 fallback as Gmail), a `CalendarService` seam, and stub tool-group modules. `GoogleServer` gains an optional `calendar` service, constructed at startup only when `[services.calendar]` is enabled. New `Error::RecurrenceInstanceNotFound` variant. No Calendar tools yet — they land in follow-ups (#200+) (#199).
 
+### Added — Contacts service surface
+- Contacts (People API) **service-module scaffold** ([ADR-0024](docs/adr/0024-contacts-service-surface.md)): new `src/contacts/` tree mirroring `gmail/` — `PeopleClient<T>`, a `ContactsService` seam, stub tool-group modules, and `etag.rs` concurrency/field-mask helpers (`person_fields_mask`, `ensure_etag_matches`, a `SourceType` enum for the CONTACT/OTHER_CONTACT/DIRECTORY read populations). `GoogleServer` gains an optional `contacts` service, constructed only when `[services.contacts]` is enabled. New `Error::ConcurrencyConflict { resource, hint }` variant for optimistic-concurrency (etag) failures. No Contacts tools yet — they land in follow-ups (#206+) (#205).
+
 ### Changed
 - Cross-account fan-out rejection (`account: "*"`) now keys off tool aspect (rejected for any non-`read` tool) rather than a flat destructive list. The set of rejected tools is unchanged — every write and destructive tool stays non-fan-out-able — but the rejection message is now `cross-account fan-out is permitted on read-only tools only` ([ADR-0013](docs/adr/0013-cross-account-fan-out.md) / [ADR-0022](docs/adr/0022-capability-gating.md); #195).
 
