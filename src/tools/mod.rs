@@ -4,6 +4,7 @@
 //! themselves live under `gmail::tools` / `calendar::tools` per service.
 
 pub(crate) mod archive;
+pub(crate) mod aspect;
 pub(crate) mod audit_summary;
 pub(crate) mod batch;
 pub(crate) mod cache_invalidate;

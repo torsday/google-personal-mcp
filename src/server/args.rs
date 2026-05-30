@@ -109,22 +109,25 @@ pub(super) fn extract_string_arg(
     }
 }
 
-/// Extract the `account` argument and reject `"*"` when `tool_name` is
-/// destructive per ADR-0013. The cross-account fan-out wildcard is a
-/// read-tool affordance only; allowing it on destructive tools would let a
-/// single mistaken call mutate every registered account.
+/// Extract the `account` argument and reject `"*"` unless `tool_name` is a
+/// read-aspect tool, per ADR-0013. The cross-account fan-out wildcard is a
+/// read-tool affordance only; allowing it on a write or destructive tool would
+/// let a single mistaken call mutate every registered account.
 ///
-/// Returns `Error::InvalidArgument` with the exact wording specified by the
-/// issue body ("cross-account fan-out is not permitted on destructive
-/// tools"); the dispatch arm propagates it via `to_mcp_error`.
+/// The eligibility check keys off [`is_fanout_eligible`] (aspect == read), not
+/// `is_destructive`: ADR-0022 classification separates `write` from
+/// `destructive`, and write tools (`archive_thread`, `modify_thread_labels`)
+/// must stay non-fan-out-able even though they are no longer "destructive".
+///
+/// [`is_fanout_eligible`]: crate::tools::metadata::is_fanout_eligible
 pub(super) fn extract_account_arg(
     request: &CallToolRequestParams,
     tool_name: &str,
 ) -> Result<String, rmcp::ErrorData> {
     let account = extract_string_arg(request, "account")?;
-    if account == "*" && crate::tools::metadata::is_destructive(tool_name) {
+    if account == "*" && !crate::tools::metadata::is_fanout_eligible(tool_name) {
         return Err(rmcp::ErrorData::invalid_params(
-            "cross-account fan-out is not permitted on destructive tools",
+            "cross-account fan-out is permitted on read-only tools only",
             None,
         ));
     }
@@ -192,10 +195,13 @@ mod tests {
         params
     }
 
-    /// Every destructive tool rejects `account = "*"` with `InvalidParams`
-    /// and the exact ADR-0013 wording. Exhaustive — one assertion per tool.
+    /// Every mutating tool (write or destructive) rejects `account = "*"` with
+    /// `InvalidParams` and the ADR-0013 wording. Exhaustive — one assertion per
+    /// tool. `archive_thread` / `modify_thread_labels` are `write` under
+    /// ADR-0022 yet must stay non-fan-out-able (the reason the guard keys off
+    /// read-eligibility, not `is_destructive`).
     #[test]
-    fn extract_account_rejects_wildcard_on_every_destructive_tool() {
+    fn extract_account_rejects_wildcard_on_every_mutating_tool() {
         for tool in [
             "archive_thread",
             "batch_archive",
@@ -210,15 +216,14 @@ mod tests {
                 Err(e) => {
                     assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
                     assert!(
-                        e.message.contains(
-                            "cross-account fan-out is not permitted on destructive tools"
-                        ),
-                        "destructive tool `{tool}` rejected with wrong message: {}",
+                        e.message
+                            .contains("cross-account fan-out is permitted on read-only tools only"),
+                        "mutating tool `{tool}` rejected with wrong message: {}",
                         e.message,
                     );
                 }
                 Ok(acct) => {
-                    panic!("destructive tool `{tool}` accepted account=\"*\" — got `{acct}`")
+                    panic!("mutating tool `{tool}` accepted account=\"*\" — got `{acct}`")
                 }
             }
         }
@@ -231,7 +236,7 @@ mod tests {
         assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert!(
             err.message
-                .contains("cross-account fan-out is not permitted on destructive tools"),
+                .contains("cross-account fan-out is permitted on read-only tools only"),
             "got message: {}",
             err.message
         );
@@ -240,7 +245,8 @@ mod tests {
     #[test]
     fn extract_account_allows_wildcard_on_read_only_tools() {
         // Read-only tools may legitimately accept `*` once #84 ships fan-out.
-        // The guard is destructive-only; verify it doesn't over-reach.
+        // The guard rejects everything non-read; verify it doesn't over-reach
+        // onto the read tools.
         for tool in [
             "list_labels",
             "list_accounts",
@@ -281,13 +287,18 @@ mod tests {
         assert!(err.message.contains("account"), "got: {}", err.message);
     }
 
-    /// Descriptor sanity: no destructive tool advertises `"*"` in its
-    /// `account` description. Catches "we added fan-out copy to a tool
-    /// description by mistake" before it ships.
+    /// Descriptor sanity: no non-read (write/destructive) tool advertises the
+    /// fan-out wildcard in its `account` description. Catches "we added fan-out
+    /// copy to a mutating tool by mistake" before it ships.
+    ///
+    /// Keys off the "fan out" advertising phrase rather than a bare `*`: a
+    /// non-read tool may legitimately *prohibit* the wildcard (e.g.
+    /// `purge_account` says "Must NOT be `*`"), which contains `*` but is the
+    /// opposite of advertising it.
     #[test]
-    fn destructive_descriptors_do_not_advertise_wildcard() {
+    fn non_read_descriptors_do_not_advertise_fanout() {
         for tool in registered_tools() {
-            if !crate::tools::metadata::is_destructive(&tool.name) {
+            if crate::tools::metadata::is_fanout_eligible(&tool.name) {
                 continue;
             }
             let schema = serde_json::to_value(tool.input_schema.as_ref()).expect("schema");
@@ -296,8 +307,8 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             assert!(
-                !acct_desc.contains('*'),
-                "destructive tool `{}` advertises `*` in account description: {acct_desc}",
+                !acct_desc.to_lowercase().contains("fan out"),
+                "non-read tool `{}` advertises fan-out in account description: {acct_desc}",
                 tool.name
             );
         }

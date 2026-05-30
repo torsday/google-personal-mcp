@@ -6,7 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-The **v1.1 design program** is locked but not yet implemented. See [`docs/adr/INDEX.md`](docs/adr/INDEX.md) for the corpus map.
+The **v1.1 design program** is locked; implementation has begun with the capability-gating foundation. See [`docs/adr/INDEX.md`](docs/adr/INDEX.md) for the corpus map.
+
+### Added — capability gating foundation
+- Tool **aspect** classification (`read` / `write` / `destructive`) per [ADR-0022 §The three aspects](docs/adr/0022-capability-gating.md): every dispatchable tool now declares exactly one aspect, captured per tool in the Layer-4 registry snapshot so a reclassification surfaces as a reviewed diff. Generalizes the prior `is_destructive()` boolean. First implementation brick for capability gating (#195).
+
+### Changed
+- Cross-account fan-out rejection (`account: "*"`) now keys off tool aspect (rejected for any non-`read` tool) rather than a flat destructive list. The set of rejected tools is unchanged — every write and destructive tool stays non-fan-out-able — but the rejection message is now `cross-account fan-out is permitted on read-only tools only` ([ADR-0013](docs/adr/0013-cross-account-fan-out.md) / [ADR-0022](docs/adr/0022-capability-gating.md); #195).
 
 ### Designed (Accepted, target v1.1)
 - [ADR-0022](docs/adr/0022-capability-gating.md) — capability gating: per-service, per-aspect (read / write / destructive), per-account toggles layered on the OAuth scope ceiling. Foundational; gates everything below.
