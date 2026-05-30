@@ -114,9 +114,7 @@ These are real gaps; no ADR has been written yet. Each is tagged with the milest
 
 | Question | Triggers a decision before | Notes |
 | --- | --- | --- |
-| **Per-GCP-project daily quota model** — Gmail's per-OAuth-client quota cap matters once requests scale across accounts. | **v0.3** | Multi-account makes quota a real constraint; with caching ([ADR-0009](0009-caching-with-sqlite-and-history-api.md)) it becomes a tuning knob. |
-| **Outbound multipart `send_email` with attachments** — v0.2 is plain text only. Schema for the multipart compose path. | **post-v0.2 when needed** | Not load-bearing for v0.2 use cases. |
-| **Keyring backend for tokens** — macOS Keychain / libsecret as an alternative to the file-perm baseline. | **post-v1.0** | [ADR-0017](0017-secrets-at-rest.md) defers; file-perm baseline is sufficient for v0.x and v1.0. |
+| **Linux Secret Service / Windows Credential Manager backends** — keyring backends beyond the shipped macOS Keychain. | **post-v1.1** | [ADR-0017](0017-secrets-at-rest.md) defers; file-perm baseline + macOS Keychain cover the current operator base. |
 
 **Resolved:**
 
@@ -124,6 +122,9 @@ These are real gaps; no ADR has been written yet. Each is tagged with the milest
 - Data retention / purge story — decided in [ADR-0019](0019-data-retention-and-purge.md) (2026-05-22).
 - HTTP-transport authentication — decided in [ADR-0020](0020-http-transport-authentication.md) (2026-05-22).
 - Attachment download policy — decided in [ADR-0021](0021-attachment-download-policy.md) (2026-05-22).
+- Per-GCP-project daily quota model — implemented in [#30](https://github.com/torsday/google-personal-mcp/issues/30) (2026-05-17).
+- **macOS Keychain backend for tokens** — shipped in v0.2 via [#20](https://github.com/torsday/google-personal-mcp/issues/20) behind the `macos-keychain` Cargo feature flag; macOS CI coverage in [#33](https://github.com/torsday/google-personal-mcp/issues/33). [ADR-0017](0017-secrets-at-rest.md) corrected to reflect (2026-05-29).
+- **Outbound multipart `send_email` with attachments** — design folded into [ADR-0026](0026-gmail-tool-surface-phase-2.md) as an additive `attachments` parameter on `send_email` (2026-05-28; pending acceptance via [#192](https://github.com/torsday/google-personal-mcp/issues/192)).
 
 ## References
 
