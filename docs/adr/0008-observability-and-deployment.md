@@ -1,7 +1,8 @@
 # ADR-0008: Observability and deployment — `tracing`, Prometheus, `/healthz`, systemd + nginx
 
 **Date:** 2026-04-25
-**Status:** Accepted
+**Status:** Accepted (shipped in v1.0)
+**Amended by:** [ADR-0027](0027-v1-1-surface-refinements.md) §4 (per-call cost feedback fields surface daemon-side cost on every response)
 
 ---
 

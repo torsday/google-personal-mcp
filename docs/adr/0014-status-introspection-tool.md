@@ -1,7 +1,8 @@
 # ADR-0014: `mcp_status` introspection tool — operational visibility from inside the MCP
 
 **Date:** 2026-04-25
-**Status:** Accepted
+**Status:** Accepted (shipped in v1.0)
+**Amended by:** [ADR-0027](0027-v1-1-surface-refinements.md) §6 (`mcp_status(account: Option<String>)` filter)
 
 ---
 

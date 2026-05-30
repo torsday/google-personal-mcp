@@ -2,6 +2,7 @@
 
 **Date:** 2026-05-15
 **Status:** Accepted
+**Amended by:** [ADR-0027](0027-v1-1-surface-refinements.md) §§2–5 (optional `fields_mask` on read tools; `format` on `get_thread`/`get_message`; flat top-level `_cost_units`/`_cache_hit`/`_upstream_ms` on every response; batch default `mode: "failures_only"`)
 
 ---
 

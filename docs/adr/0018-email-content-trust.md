@@ -2,6 +2,7 @@
 
 **Date:** 2026-05-15
 **Status:** Accepted
+**Amended by:** [ADR-0027](0027-v1-1-surface-refinements.md) §1 (compact `«u»value«/u»` delimiter replaces `<<<UNTRUSTED:KIND value UNTRUSTED>>>`; `KIND` dropped as duplicative of the `_untrusted` field-name suffix; wrapping contract otherwise unchanged)
 
 ---
 

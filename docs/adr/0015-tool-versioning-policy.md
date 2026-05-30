@@ -1,7 +1,8 @@
 # ADR-0015: Tool versioning policy — additive-only, snapshot-enforced
 
 **Date:** 2026-04-25
-**Status:** Accepted
+**Status:** Accepted (shipped in v1.0)
+**Amended by:** [ADR-0027](0027-v1-1-surface-refinements.md) §7 (activation trigger clarified — additive-only policy activates on public advertisement, not on v1.0 tag)
 
 ---
 

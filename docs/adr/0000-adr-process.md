@@ -112,6 +112,7 @@ A proposed ADR can be withdrawn (status → `Withdrawn`) if the discussion concl
 | [0024](0024-contacts-service-surface.md) | Contacts (People API) service surface — full read/write/destructive under the capability gate | Accepted, target v1.1 |
 | [0025](0025-drive-service-surface.md) | Drive service surface — full read/write/destructive under the capability gate | Accepted, target v1.1 |
 | [0026](0026-gmail-tool-surface-phase-2.md) | Gmail tool surface — Phase 2 expansion (drafts, labels CRUD, filters, send-as, vacation, forward, permanent delete + multipart/full-body/forwarded-attachment/rate-cap consolidation) | Accepted, target v1.1 |
+| [0027](0027-v1-1-surface-refinements.md) | v1.1 surface refinements — compact untrust, response masks, per-call cost feedback, batch defaults, mcp_status filtering, ADR-0015 activation-trigger clarification (amends ADR-0015 / 0016 / 0018 / 0014 / 0008) | Accepted, target v1.1 |
 
 ## Open questions (decisions queued for later)
 

@@ -69,6 +69,7 @@ The corpus table in ADR-0000 is the authoritative list with current statuses; th
 | [0024](0024-contacts-service-surface.md) | Contacts (People API) service surface | Accepted, target v1.1 |
 | [0025](0025-drive-service-surface.md) | Drive service surface | Accepted, target v1.1 |
 | [0026](0026-gmail-tool-surface-phase-2.md) | Gmail tool surface — Phase 2 expansion | Accepted, target v1.1 |
+| [0027](0027-v1-1-surface-refinements.md) | v1.1 surface refinements (amends 0008/0014/0015/0016/0018) — compact untrust, response masks, per-call cost, batch defaults, mcp_status filter | Accepted, target v1.1 |
 
 ---
 
