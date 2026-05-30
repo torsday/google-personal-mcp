@@ -318,6 +318,62 @@ mod tests {
         r#"{"access_token":"new-access","expires_in":3600}"#.into()
     }
 
+    // ── account_snapshot filtering (ADR-0027 §6) ─────────────────────────────
+
+    #[tokio::test]
+    async fn account_snapshot_none_returns_all_sorted() {
+        let dir = unique_tmp_dir("snap-all");
+        let exp = Utc::now() + Duration::seconds(3600);
+        let mgr = TokenManager::new(
+            HashMap::from([
+                ("z-last".to_owned(), sample_state("a1", "r1", exp)),
+                ("a-first".to_owned(), sample_state("a2", "r2", exp)),
+            ]),
+            MockTransport::new(vec![]),
+            "https://example/token",
+            dir,
+        );
+        let snaps = mgr.account_snapshot(None).await;
+        let aliases: Vec<&str> = snaps.iter().map(|s| s.alias.as_str()).collect();
+        assert_eq!(
+            aliases,
+            vec!["a-first", "z-last"],
+            "must be sorted by alias"
+        );
+    }
+
+    #[tokio::test]
+    async fn account_snapshot_some_returns_only_matching_account() {
+        let dir = unique_tmp_dir("snap-filter");
+        let exp = Utc::now() + Duration::seconds(3600);
+        let mgr = TokenManager::new(
+            HashMap::from([
+                ("work".to_owned(), sample_state("a1", "r1", exp)),
+                ("personal".to_owned(), sample_state("a2", "r2", exp)),
+            ]),
+            MockTransport::new(vec![]),
+            "https://example/token",
+            dir,
+        );
+        let snaps = mgr.account_snapshot(Some("work")).await;
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].alias, "work");
+    }
+
+    #[tokio::test]
+    async fn account_snapshot_some_unknown_alias_returns_empty() {
+        let dir = unique_tmp_dir("snap-unknown");
+        let exp = Utc::now() + Duration::seconds(3600);
+        let mgr = TokenManager::new(
+            HashMap::from([("work".to_owned(), sample_state("a1", "r1", exp))]),
+            MockTransport::new(vec![]),
+            "https://example/token",
+            dir,
+        );
+        let snaps = mgr.account_snapshot(Some("ghost")).await;
+        assert!(snaps.is_empty(), "unknown alias must return empty slice");
+    }
+
     // ── TokenManager Debug redaction (AC) ─────────────────────────────────────
 
     #[tokio::test]
