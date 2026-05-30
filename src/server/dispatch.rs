@@ -110,6 +110,13 @@ impl GoogleServer {
 
             "mcp_status" => {
                 let account = extract_optional_string_arg(&request, "account");
+                if let Some(ref alias) = account {
+                    if !self.accounts.iter().any(|a| &a.alias == alias) {
+                        return Err(error::to_mcp_error(&crate::Error::AccountNotFound {
+                            account: alias.clone(),
+                        }));
+                    }
+                }
                 let snapshots = self.tokens.account_snapshot(account.as_deref()).await;
                 let out = mcp_status::build_status(&snapshots, chrono::Utc::now());
                 ok_result("mcp_status serialize", &out)

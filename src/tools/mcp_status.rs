@@ -240,4 +240,23 @@ mod tests {
         assert_eq!(out.accounts[0].expires_in_seconds, -3600);
         assert_eq!(out.accounts[0].auth_state, AuthState::Expired);
     }
+
+    // ── Per-account filter (ADR-0027 §6) ─────────────────────────────────────
+    // `build_status` itself is filter-agnostic — it transforms whatever
+    // snapshots are passed in. The caller (dispatch) is responsible for
+    // pre-filtering via `account_snapshot(Some(alias))`. These tests verify
+    // that passing a single-account slice yields a single-account response.
+
+    #[test]
+    fn single_account_slice_returns_one_row() {
+        let out = build_status(&[snap("work", 1_800)], now());
+        assert_eq!(out.accounts.len(), 1);
+        assert_eq!(out.accounts[0].alias, "work");
+    }
+
+    #[test]
+    fn empty_slice_yields_empty_accounts() {
+        let out = build_status(&[], now());
+        assert!(out.accounts.is_empty());
+    }
 }
