@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::error::Error;
 
-use super::types::Config;
+use super::types::{Config, SANCTIONED_TOOL_OVERRIDES};
 
 impl Config {
     /// Parse the file at `path`. Missing file returns default config — the
@@ -85,6 +85,23 @@ impl Config {
                 path: display(),
                 message: "`rate_limit.calendar.requests_per_second` must be > 0".into(),
             });
+        }
+        // Per-tool capability overrides are a bounded exception list (ADR-0022
+        // §Per-tool override) — reject any override naming a tool outside the
+        // sanctioned set so the escape hatch can't be widened by config alone.
+        for (service_name, entry) in self.services.all() {
+            for tool in entry.tools.keys() {
+                if !SANCTIONED_TOOL_OVERRIDES.contains(&tool.as_str()) {
+                    return Err(Error::Config {
+                        path: display(),
+                        message: format!(
+                            "[services.{service_name}.tools.{tool}] is not a sanctioned per-tool \
+                             override; only {SANCTIONED_TOOL_OVERRIDES:?} may be overridden \
+                             (ADR-0022 — adding one requires an ADR amendment)"
+                        ),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -435,5 +452,140 @@ mod tests {
         );
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.audit.rotate, RotateMode::Size(10_485_760));
+    }
+
+    // ── capability gating (ADR-0022) ──────────────────────────────────────────
+
+    use crate::tools::aspect::Aspect;
+
+    #[test]
+    fn capabilities_gmail_enabled_without_block_is_all_on() {
+        // The grandfathered-default guard: `[services.gmail]` present, enabled,
+        // but no `capabilities` block must resolve all-on — never the
+        // conservative read-only default.
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r"
+            [services.gmail]
+            enabled = true
+            ",
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.resolve_capability("personal", "gmail", Aspect::Write));
+        assert!(cfg.resolve_capability("personal", "gmail", Aspect::Destructive));
+    }
+
+    #[test]
+    fn capabilities_service_block_parsed_and_resolved() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r"
+            [services.calendar]
+            enabled = true
+
+            [services.calendar.capabilities]
+            read        = true
+            write       = true
+            destructive = false
+            ",
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.resolve_capability("personal", "calendar", Aspect::Write));
+        assert!(!cfg.resolve_capability("personal", "calendar", Aspect::Destructive));
+    }
+
+    #[test]
+    fn capabilities_per_account_override_parsed_and_resolved() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r"
+            [services.calendar]
+            enabled = true
+
+            [services.calendar.capabilities]
+            destructive = false
+
+            [services.calendar.accounts.work.capabilities]
+            destructive = true
+            ",
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.resolve_capability("work", "calendar", Aspect::Destructive));
+        assert!(!cfg.resolve_capability("personal", "calendar", Aspect::Destructive));
+    }
+
+    #[test]
+    fn capabilities_sanctioned_per_tool_override_accepted() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r"
+            [services.contacts]
+            enabled = true
+
+            [services.contacts.tools.list_directory_people]
+            enabled = false
+            ",
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(
+            cfg.services
+                .contacts
+                .tools
+                .get("list_directory_people")
+                .map(|t| t.enabled),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn capabilities_unsanctioned_per_tool_override_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r"
+            [services.gmail]
+            enabled = true
+
+            [services.gmail.tools.send_email]
+            enabled = false
+            ",
+        );
+        let err = Config::load(&path).expect_err("unsanctioned tool override should fail");
+        match err {
+            Error::Config { message, .. } => {
+                assert!(
+                    message.contains("send_email") && message.contains("sanctioned"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capabilities_unknown_aspect_key_rejected() {
+        // deny_unknown_fields: a typo in a capability key must be loud.
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r"
+            [services.calendar.capabilities]
+            reed = true
+            ",
+        );
+        assert!(
+            Config::load(&path).is_err(),
+            "typo'd capability key should be rejected"
+        );
     }
 }
