@@ -1,6 +1,6 @@
 # Contributing
 
-## v0.2 dev workflow
+## Dev workflow (v1.0+)
 
 ### Toolchain
 
@@ -19,7 +19,7 @@ cargo install cargo-nextest
 cargo install cargo-deny
 ```
 
-Minimum Rust version: **1.86** (see `rust-version` in `Cargo.toml`).
+Minimum Rust version: **1.95** (see `rust-version` in `Cargo.toml`).
 
 ### Clone and build
 
@@ -137,10 +137,11 @@ Co-located in `mod tests` blocks throughout `src/`. Run with:
 cargo nextest run
 ```
 
-### Layer 2 — `wiremock` HTTP tests (planned for v0.3)
+### Layer 2 — `wiremock` HTTP tests (shipped #17)
 
-Not yet implemented. Will cover `GmailClient`, `TokenManager` refresh,
-retry policy, and status-to-error mapping against a local mock server.
+Covers `GmailClient`, `TokenManager` refresh, retry policy, and
+status-to-error mapping against a local mock server. Run as part of
+`cargo nextest run` — no separate invocation needed.
 
 ### Layer 3 — Ignored e2e smoke tests
 
