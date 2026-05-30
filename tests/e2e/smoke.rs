@@ -107,7 +107,7 @@ fn smoke_get_thread_returns_thread_data() {
 /// `search_threads` (blocked on issue #9 — will be skipped until that tool
 /// is implemented).
 #[test]
-#[ignore = "requires GOOGLE_MCP_TEST_CONFIG_DIR; also blocked on search_threads implementation (#9)"]
+#[ignore = "requires GOOGLE_MCP_TEST_CONFIG_DIR pointing at a test installation"]
 fn smoke_search_threads_returns_results() {
     let dir = require_test_config_dir();
     let mut proc = McpProcess::start(&dir);
@@ -121,9 +121,11 @@ fn smoke_search_threads_returns_results() {
         }),
     );
 
-    let threads = result["threads"]
+    // Response envelope is `{ items, next_page_token, total_estimate }` per
+    // ADR-0016 / `SearchThreadsOutput` — not `threads`.
+    let threads = result["items"]
         .as_array()
-        .expect("search_threads.threads should be an array");
+        .expect("search_threads.items should be an array");
     assert!(
         threads.len() <= 5,
         "search_threads should respect max_results=5"

@@ -98,6 +98,7 @@ or by using the Gmail API Explorer against the test account.
 | File | Contents |
 |------|----------|
 | `tests/e2e/smoke.rs` | Read-only tests: `list_accounts`, `list_labels`, `get_thread`, `search_threads` |
+| `tests/e2e/search_excellence.rs` | SPEC §Search-excellence checklist verification (issue #193): query-syntax parity, pagination, metadata sufficiency, zero-results, two-account scoping, token refresh |
 | `tests/e2e/destructive.rs` | Write tests: `archive_thread`, `trash_thread`, `modify_thread_labels`, `send_email` |
 | `tests/e2e/harness.rs` | Shared subprocess harness (spawns the binary, talks MCP over stdio) |
 
@@ -108,6 +109,10 @@ or by using the Gmail API Explorer against the test account.
 ```sh
 # Run only smoke tests:
 cargo nextest run -E 'test(smoke_)' -- --ignored
+
+# Run the SPEC search-excellence verification suite (issue #193):
+#   Optional env: GOOGLE_MCP_TEST_LARGE_QUERY (claim 2), GOOGLE_MCP_TEST_SECOND_ALIAS (claim 6)
+cargo nextest run -E 'test(claim)' -- --ignored
 
 # Run only destructive tests (requires GOOGLE_MCP_ALLOW_DESTRUCTIVE_E2E=1):
 cargo nextest run -E 'test(destructive_)' -- --ignored
