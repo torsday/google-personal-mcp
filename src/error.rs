@@ -21,6 +21,15 @@ pub(crate) enum Error {
     #[error("not found: {what}")]
     NotFound { what: String },
 
+    /// Calendar recurring-event instance not found: the event series resolves
+    /// but the requested individual occurrence does not exist (e.g. a deleted
+    /// or out-of-range instance). Calendar-specific per
+    /// [ADR-0023](../docs/adr/0023-calendar-service-surface.md); distinct from
+    /// the generic [`Error::NotFound`] so callers can special-case recurrence
+    /// expansion.
+    #[error("calendar recurrence instance not found: {what}")]
+    RecurrenceInstanceNotFound { what: String },
+
     /// Tool received an argument it cannot use.
     #[error("invalid argument `{field}`: {detail}")]
     InvalidArgument { field: String, detail: String },
@@ -136,6 +145,7 @@ impl Error {
             Self::AuthRequired { .. } => "auth_required",
             Self::AccountNotFound { .. } => "account_not_found",
             Self::NotFound { .. } => "not_found",
+            Self::RecurrenceInstanceNotFound { .. } => "recurrence_instance_not_found",
             Self::InvalidArgument { .. } => "invalid_argument",
             Self::HeaderInjection { .. } => "header_injection",
             Self::RateLimited { .. } => "rate_limited",
@@ -315,6 +325,7 @@ pub(crate) fn to_mcp_error(e: &Error) -> rmcp::ErrorData {
         // Model-actionable: bad input or recoverable user state.
         Error::AccountNotFound { .. }
         | Error::NotFound { .. }
+        | Error::RecurrenceInstanceNotFound { .. }
         | Error::InvalidArgument { .. }
         | Error::AuthRequired { .. } => rmcp::ErrorData::invalid_params(msg, None),
 

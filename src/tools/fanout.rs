@@ -107,6 +107,7 @@ const fn error_kind(e: &Error) -> &'static str {
         Error::Network(_) => "Network",
         Error::Upstream { .. } => "Upstream",
         Error::NotFound { .. } => "NotFound",
+        Error::RecurrenceInstanceNotFound { .. } => "RecurrenceInstanceNotFound",
         Error::InvalidArgument { .. } => "InvalidArgument",
         Error::HeaderInjection { .. } => "HeaderInjection",
         Error::Parse { .. }
