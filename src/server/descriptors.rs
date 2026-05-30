@@ -150,9 +150,10 @@ fn batch_archive_descriptor() -> Tool {
     t.description = Some(
         "Archive multiple threads in parallel (remove INBOX label from each). \
          Implemented as N concurrent threads.modify calls (10 quota units each). \
-         Accepts 1–100 thread IDs. Never short-circuits: returns per-item ok/error \
-         for every id. dry_run: true returns ok: true for all ids without making any \
-         Gmail calls."
+         Accepts 1–100 thread IDs. Never short-circuits: every id is attempted \
+         regardless of sibling failures. See mode for response verbosity \
+         (default failures_only). dry_run: true reports success for all ids \
+         without making any Gmail calls."
             .into(),
     );
     t.input_schema = schema_object(&json!({
@@ -172,7 +173,13 @@ fn batch_archive_descriptor() -> Tool {
             "dry_run": {
                 "type": "boolean",
                 "default": false,
-                "description": "If true, returns ok: true for all ids without making any Gmail calls."
+                "description": "If true, reports success for all ids without making any Gmail calls."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["failures_only", "all", "summary"],
+                "default": "failures_only",
+                "description": "Response verbosity. failures_only (default): only failed items in `failures`, plus `succeeded_count`. all: per-item `results` (v1.0 shape) plus `succeeded_count`. summary: `succeeded_count` + `failed_count` + first 5 failures."
             }
         },
         "required": ["account", "thread_ids"]
@@ -480,9 +487,10 @@ fn batch_trash_descriptor() -> Tool {
     t.description = Some(
         "Move multiple threads to trash in parallel (recoverable for 30 days). \
          Implemented as N concurrent threads.trash calls (20 quota units each). \
-         Accepts 1–100 thread IDs. Never short-circuits: returns per-item ok/error \
-         for every id. dry_run: true returns ok: true for all ids without making any \
-         Gmail calls."
+         Accepts 1–100 thread IDs. Never short-circuits: every id is attempted \
+         regardless of sibling failures. See mode for response verbosity \
+         (default failures_only). dry_run: true reports success for all ids \
+         without making any Gmail calls."
             .into(),
     );
     t.input_schema = schema_object(&json!({
@@ -502,7 +510,13 @@ fn batch_trash_descriptor() -> Tool {
             "dry_run": {
                 "type": "boolean",
                 "default": false,
-                "description": "If true, returns ok: true for all ids without making any Gmail calls."
+                "description": "If true, reports success for all ids without making any Gmail calls."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["failures_only", "all", "summary"],
+                "default": "failures_only",
+                "description": "Response verbosity. failures_only (default): only failed items in `failures`, plus `succeeded_count`. all: per-item `results` (v1.0 shape) plus `succeeded_count`. summary: `succeeded_count` + `failed_count` + first 5 failures."
             }
         },
         "required": ["account", "thread_ids"]
@@ -560,8 +574,9 @@ fn batch_modify_thread_labels_descriptor() -> Tool {
         "Apply the same label add/remove operation to multiple threads in parallel. \
          Implemented as N concurrent threads.modify calls (10 quota units each). \
          Accepts 1–100 thread IDs. At least one of add_label_ids or remove_label_ids \
-         must be non-empty. Never short-circuits: returns per-item ok/error for every id. \
-         dry_run: true returns ok: true for all ids without making any Gmail calls."
+         must be non-empty. Never short-circuits: every id is attempted regardless of \
+         sibling failures. See mode for response verbosity (default failures_only). \
+         dry_run: true reports success for all ids without making any Gmail calls."
             .into(),
     );
     t.input_schema = schema_object(&json!({
@@ -591,7 +606,13 @@ fn batch_modify_thread_labels_descriptor() -> Tool {
             "dry_run": {
                 "type": "boolean",
                 "default": false,
-                "description": "If true, returns ok: true for all ids without making any Gmail calls."
+                "description": "If true, reports success for all ids without making any Gmail calls."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["failures_only", "all", "summary"],
+                "default": "failures_only",
+                "description": "Response verbosity. failures_only (default): only failed items in `failures`, plus `succeeded_count`. all: per-item `results` (v1.0 shape) plus `succeeded_count`. summary: `succeeded_count` + `failed_count` + first 5 failures."
             }
         },
         "required": ["account", "thread_ids"]

@@ -279,7 +279,7 @@ expression: json
   },
   {
     "aspect": "write",
-    "description": "Archive multiple threads in parallel (remove INBOX label from each). Implemented as N concurrent threads.modify calls (10 quota units each). Accepts 1–100 thread IDs. Never short-circuits: returns per-item ok/error for every id. dry_run: true returns ok: true for all ids without making any Gmail calls.",
+    "description": "Archive multiple threads in parallel (remove INBOX label from each). Implemented as N concurrent threads.modify calls (10 quota units each). Accepts 1–100 thread IDs. Never short-circuits: every id is attempted regardless of sibling failures. See mode for response verbosity (default failures_only). dry_run: true reports success for all ids without making any Gmail calls.",
     "input_schema": {
       "properties": {
         "account": {
@@ -288,8 +288,18 @@ expression: json
         },
         "dry_run": {
           "default": false,
-          "description": "If true, returns ok: true for all ids without making any Gmail calls.",
+          "description": "If true, reports success for all ids without making any Gmail calls.",
           "type": "boolean"
+        },
+        "mode": {
+          "default": "failures_only",
+          "description": "Response verbosity. failures_only (default): only failed items in `failures`, plus `succeeded_count`. all: per-item `results` (v1.0 shape) plus `succeeded_count`. summary: `succeeded_count` + `failed_count` + first 5 failures.",
+          "enum": [
+            "failures_only",
+            "all",
+            "summary"
+          ],
+          "type": "string"
         },
         "thread_ids": {
           "description": "List of Gmail thread IDs to archive (1–100).",
@@ -338,7 +348,7 @@ expression: json
   },
   {
     "aspect": "destructive",
-    "description": "Move multiple threads to trash in parallel (recoverable for 30 days). Implemented as N concurrent threads.trash calls (20 quota units each). Accepts 1–100 thread IDs. Never short-circuits: returns per-item ok/error for every id. dry_run: true returns ok: true for all ids without making any Gmail calls.",
+    "description": "Move multiple threads to trash in parallel (recoverable for 30 days). Implemented as N concurrent threads.trash calls (20 quota units each). Accepts 1–100 thread IDs. Never short-circuits: every id is attempted regardless of sibling failures. See mode for response verbosity (default failures_only). dry_run: true reports success for all ids without making any Gmail calls.",
     "input_schema": {
       "properties": {
         "account": {
@@ -347,8 +357,18 @@ expression: json
         },
         "dry_run": {
           "default": false,
-          "description": "If true, returns ok: true for all ids without making any Gmail calls.",
+          "description": "If true, reports success for all ids without making any Gmail calls.",
           "type": "boolean"
+        },
+        "mode": {
+          "default": "failures_only",
+          "description": "Response verbosity. failures_only (default): only failed items in `failures`, plus `succeeded_count`. all: per-item `results` (v1.0 shape) plus `succeeded_count`. summary: `succeeded_count` + `failed_count` + first 5 failures.",
+          "enum": [
+            "failures_only",
+            "all",
+            "summary"
+          ],
+          "type": "string"
         },
         "thread_ids": {
           "description": "List of Gmail thread IDs to trash (1–100).",
@@ -411,7 +431,7 @@ expression: json
   },
   {
     "aspect": "write",
-    "description": "Apply the same label add/remove operation to multiple threads in parallel. Implemented as N concurrent threads.modify calls (10 quota units each). Accepts 1–100 thread IDs. At least one of add_label_ids or remove_label_ids must be non-empty. Never short-circuits: returns per-item ok/error for every id. dry_run: true returns ok: true for all ids without making any Gmail calls.",
+    "description": "Apply the same label add/remove operation to multiple threads in parallel. Implemented as N concurrent threads.modify calls (10 quota units each). Accepts 1–100 thread IDs. At least one of add_label_ids or remove_label_ids must be non-empty. Never short-circuits: every id is attempted regardless of sibling failures. See mode for response verbosity (default failures_only). dry_run: true reports success for all ids without making any Gmail calls.",
     "input_schema": {
       "properties": {
         "account": {
@@ -427,8 +447,18 @@ expression: json
         },
         "dry_run": {
           "default": false,
-          "description": "If true, returns ok: true for all ids without making any Gmail calls.",
+          "description": "If true, reports success for all ids without making any Gmail calls.",
           "type": "boolean"
+        },
+        "mode": {
+          "default": "failures_only",
+          "description": "Response verbosity. failures_only (default): only failed items in `failures`, plus `succeeded_count`. all: per-item `results` (v1.0 shape) plus `succeeded_count`. summary: `succeeded_count` + `failed_count` + first 5 failures.",
+          "enum": [
+            "failures_only",
+            "all",
+            "summary"
+          ],
+          "type": "string"
         },
         "remove_label_ids": {
           "description": "Label IDs to remove from every thread.",

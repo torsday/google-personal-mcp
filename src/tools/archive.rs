@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::gmail::quota::GmailMethod;
 use crate::gmail::service::GmailService;
 use crate::http::percent_encode_path_segment;
-use crate::tools::batch::{self, BatchItem};
+use crate::tools::batch::{self, BatchMode, BatchResponse};
 use crate::tools::destructive::{Decision, DestructiveContext};
 
 // ── Input / output types ──────────────────────────────────────────────────────
@@ -36,11 +36,7 @@ pub(crate) struct BatchArchiveInput {
     pub account: String,
     pub thread_ids: Vec<String>,
     pub dry_run: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct BatchArchiveOutput {
-    pub results: Vec<BatchItem>,
+    pub mode: BatchMode,
 }
 
 // ── Core logic ────────────────────────────────────────────────────────────────
@@ -121,35 +117,33 @@ pub(crate) async fn archive_thread<T: RefreshTransport>(
 pub(crate) async fn batch_archive<T: RefreshTransport + Send + Sync + 'static>(
     gmail: Arc<GmailService<T>>,
     input: BatchArchiveInput,
-) -> Result<BatchArchiveOutput, Error> {
+) -> Result<BatchResponse, Error> {
     batch::validate_batch_input(&input.account, &input.thread_ids)?;
 
-    if input.dry_run {
-        return Ok(BatchArchiveOutput {
-            results: batch::dry_run_results(input.thread_ids),
-        });
-    }
+    let results = if input.dry_run {
+        batch::dry_run_results(input.thread_ids)
+    } else {
+        let account = Arc::new(input.account);
+        batch::run_thread_batch(input.thread_ids, |tid| {
+            let g = Arc::clone(&gmail);
+            let a = Arc::clone(&account);
+            async move {
+                archive_thread(
+                    &g,
+                    ArchiveThreadInput {
+                        account: (*a).clone(),
+                        thread_id: tid,
+                        dry_run: false,
+                    },
+                )
+                .await
+                .map(|_| ())
+            }
+        })
+        .await
+    };
 
-    let account = Arc::new(input.account);
-    let results = batch::run_thread_batch(input.thread_ids, |tid| {
-        let g = Arc::clone(&gmail);
-        let a = Arc::clone(&account);
-        async move {
-            archive_thread(
-                &g,
-                ArchiveThreadInput {
-                    account: (*a).clone(),
-                    thread_id: tid,
-                    dry_run: false,
-                },
-            )
-            .await
-            .map(|_| ())
-        }
-    })
-    .await;
-
-    Ok(BatchArchiveOutput { results })
+    Ok(BatchResponse::from_items(results, input.mode))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -285,12 +279,23 @@ mod tests {
                 account: "work".into(),
                 thread_ids: vec!["t1".into(), "t2".into()],
                 dry_run: true,
+                mode: BatchMode::All,
             },
         )
         .await
         .expect("batch dry_run must succeed");
-        assert_eq!(out.results.len(), 2);
-        assert!(out.results.iter().all(|r| r.ok && r.error.is_none()));
+        // mode: all surfaces every per-item row.
+        match out {
+            BatchResponse::All {
+                succeeded_count,
+                results,
+            } => {
+                assert_eq!(succeeded_count, 2);
+                assert_eq!(results.len(), 2);
+                assert!(results.iter().all(|r| r.ok && r.error.is_none()));
+            }
+            other => panic!("expected All variant, got {other:?}"),
+        }
         assert!(
             server
                 .received_requests()
@@ -322,24 +327,32 @@ mod tests {
             .await;
 
         let client = make_client(&server.uri());
+        // Default mode (failures_only): only the failed id appears in `failures`,
+        // and succeeded_count confirms the rest succeeded.
         let out = batch_archive(
             client,
             BatchArchiveInput {
                 account: "work".into(),
                 thread_ids: vec!["t1".into(), "t2".into()],
                 dry_run: false,
+                mode: BatchMode::FailuresOnly,
             },
         )
         .await
         .expect("batch must complete even with partial failures");
 
-        assert_eq!(out.results.len(), 2);
-        let r1 = out.results.iter().find(|r| r.thread_id == "t1").unwrap();
-        assert!(r1.ok, "t1 should succeed");
-        assert!(r1.error.is_none());
-        let r2 = out.results.iter().find(|r| r.thread_id == "t2").unwrap();
-        assert!(!r2.ok, "t2 should fail");
-        assert!(r2.error.is_some(), "t2 should have error message");
+        match out {
+            BatchResponse::FailuresOnly {
+                succeeded_count,
+                failures,
+            } => {
+                assert_eq!(succeeded_count, 1, "t1 succeeded");
+                assert_eq!(failures.len(), 1, "only the failed id is listed");
+                assert_eq!(failures[0].thread_id, "t2");
+                assert!(!failures[0].error.is_empty());
+            }
+            other => panic!("expected FailuresOnly variant, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -351,6 +364,7 @@ mod tests {
                 account: "work".into(),
                 thread_ids: vec![],
                 dry_run: false,
+                mode: BatchMode::FailuresOnly,
             },
         )
         .await
