@@ -27,6 +27,12 @@ use crate::rate_limit::KeyedRateLimiter;
 /// Production Calendar API root (no trailing slash).
 pub(crate) const CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
 
+/// Per-call quota cost for a Calendar API request. The Calendar API meters in
+/// flat "queries" (1 per call) against a per-minute/day budget, unlike Gmail's
+/// weighted unit model ([ADR-0023](../../docs/adr/0023-calendar-service-surface.md)),
+/// so every endpoint charges the shared rate limiter a single unit.
+pub(crate) const QUERY_COST: u32 = 1;
+
 pub(crate) struct CalendarClient<T: RefreshTransport = ReqwestRefreshTransport> {
     base_url: String,
     tokens: Arc<TokenManager<T>>,
