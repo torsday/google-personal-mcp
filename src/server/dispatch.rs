@@ -16,6 +16,7 @@ use rmcp::RoleServer;
 
 use crate::audit::AuditEntry;
 use crate::calendar::{calendars, events};
+use crate::contacts::people;
 use crate::error;
 use crate::tools::{
     archive, audit_summary, batch, cache_invalidate, cache_status, download_attachment, fanout,
@@ -767,6 +768,84 @@ impl GoogleServer {
                 .and_then(|out| ok_result("list_events serialize", &out))
             }
 
+            "list_contacts" => {
+                let account = extract_account_arg(&request, "list_contacts")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not yet implemented for `list_contacts` \
+                         — pass a single account alias",
+                        None,
+                    ));
+                }
+                let contacts = self.contacts.as_ref().ok_or_else(contacts_disabled_err)?;
+                let person_fields = extract_string_array_arg(&request, "person_fields")?;
+                let page_token = extract_optional_string_arg(&request, "page_token");
+                people::list_contacts(
+                    contacts,
+                    people::ListContactsInput {
+                        account,
+                        person_fields,
+                        page_token,
+                    },
+                )
+                .await
+                .map_err(|e| error::to_mcp_error(&e))
+                .and_then(|out| ok_result("list_contacts serialize", &out))
+            }
+
+            "search_contacts" => {
+                let account = extract_account_arg(&request, "search_contacts")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not yet implemented for `search_contacts` \
+                         — pass a single account alias",
+                        None,
+                    ));
+                }
+                let contacts = self.contacts.as_ref().ok_or_else(contacts_disabled_err)?;
+                let query = extract_string_arg(&request, "query")?;
+                let person_fields =
+                    extract_string_array_arg(&request, "person_fields").unwrap_or_default();
+                let read_mask = extract_string_array_arg(&request, "read_mask").ok();
+                people::search_contacts(
+                    contacts,
+                    people::SearchContactsInput {
+                        account,
+                        query,
+                        person_fields,
+                        read_mask,
+                    },
+                )
+                .await
+                .map_err(|e| error::to_mcp_error(&e))
+                .and_then(|out| ok_result("search_contacts serialize", &out))
+            }
+
+            "get_contact" => {
+                let account = extract_account_arg(&request, "get_contact")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not yet implemented for `get_contact` \
+                         — pass a single account alias",
+                        None,
+                    ));
+                }
+                let contacts = self.contacts.as_ref().ok_or_else(contacts_disabled_err)?;
+                let resource_name = extract_string_arg(&request, "resource_name")?;
+                let person_fields = extract_string_array_arg(&request, "person_fields")?;
+                people::get_contact(
+                    contacts,
+                    people::GetContactInput {
+                        account,
+                        resource_name,
+                        person_fields,
+                    },
+                )
+                .await
+                .map_err(|e| error::to_mcp_error(&e))
+                .and_then(|out| ok_result("get_contact serialize", &out))
+            }
+
             other => Err(rmcp::ErrorData::invalid_params(
                 format!("unknown tool `{other}`"),
                 None,
@@ -780,6 +859,15 @@ impl GoogleServer {
 fn calendar_disabled_err() -> rmcp::ErrorData {
     rmcp::ErrorData::invalid_params(
         "calendar service is not enabled — set `[services.calendar] enabled = true` in config.toml",
+        None,
+    )
+}
+
+/// Error returned when a Contacts tool is invoked but `[services.contacts]` is
+/// disabled (the default) — the service was never constructed at startup.
+fn contacts_disabled_err() -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_params(
+        "contacts service is not enabled — set `[services.contacts] enabled = true` in config.toml",
         None,
     )
 }
