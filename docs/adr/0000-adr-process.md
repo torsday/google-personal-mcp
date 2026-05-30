@@ -107,6 +107,11 @@ A proposed ADR can be withdrawn (status → `Withdrawn`) if the discussion concl
 | [0019](0019-data-retention-and-purge.md) | Data retention and purge — cache age cap, audit deletion opt-in, "right to forget" | Accepted, deferred to v1.0 |
 | [0020](0020-http-transport-authentication.md) | HTTP-transport authentication — bearer tokens at the daemon, mTLS optional at nginx | Accepted, deferred to v1.0 |
 | [0021](0021-attachment-download-policy.md) | Attachment download policy — path constraints, extension blocklist, size limits, MIME trust | Accepted, deferred to v0.3 |
+| [0022](0022-capability-gating.md) | Capability gating — service × aspect toggles layered on the OAuth scope ceiling | Accepted, target v1.1 |
+| [0023](0023-calendar-service-surface.md) | Calendar service surface — full read/write/destructive under the capability gate | Accepted, target v1.1 |
+| [0024](0024-contacts-service-surface.md) | Contacts (People API) service surface — full read/write/destructive under the capability gate | Accepted, target v1.1 |
+| [0025](0025-drive-service-surface.md) | Drive service surface — full read/write/destructive under the capability gate | Accepted, target v1.1 |
+| [0026](0026-gmail-tool-surface-phase-2.md) | Gmail tool surface — Phase 2 expansion (drafts, labels CRUD, filters, send-as, vacation, forward, permanent delete + multipart/full-body/forwarded-attachment/rate-cap consolidation) | Accepted, target v1.1 |
 
 ## Open questions (decisions queued for later)
 
