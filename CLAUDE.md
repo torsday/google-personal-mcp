@@ -2,16 +2,17 @@
 
 ## Status
 
-**v0.2 shipped** (28 issues closed, milestone closed). **v0.3 in active planning** — see the [v0.3 milestone](https://github.com/torsday/google-personal-mcp/milestone/2) for the current backlog. Source lives under `src/` (~37 `.rs` files across `auth/`, `gmail/`, `tools/` plus root modules `audit.rs`, `config.rs`, `error.rs`, `http.rs`, `observability.rs`, `perm_check.rs`, `project_quota.rs`, `rate_limit.rs`, `server.rs`). Architecture is captured in 22 ADRs under [`docs/adr/`](docs/adr/).
+**v0.2 and v1.0 shipped** (66 issues closed across both milestones). **v1.1 in active design** — see the [v1.1 milestone](https://github.com/torsday/google-personal-mcp/milestones) for the design program: capability gating ([ADR-0022](docs/adr/0022-capability-gating.md)), Calendar / Contacts / Drive service surfaces ([ADR-0023](docs/adr/0023-calendar-service-surface.md) / [0024](docs/adr/0024-contacts-service-surface.md) / [0025](docs/adr/0025-drive-service-surface.md)), and a Gmail Phase 2 surface expansion ([ADR-0026](docs/adr/0026-gmail-tool-surface-phase-2.md)). Source lives under `src/` (~74 `.rs` files across `auth/`, `gmail/`, `cache/`, `tools/`, `http/` plus root modules; ~28K LOC). Architecture is captured in 26 ADRs under [`docs/adr/`](docs/adr/).
 
 ## Where to read in what order
 
-1. [SPEC.md](SPEC.md) — what the project is *for*: 36 concrete user stories, search-excellence criteria, non-goals
+1. [SPEC.md](SPEC.md) — what the project is *for*: user stories, search-excellence criteria, non-goals (covers Gmail through v1.0; Calendar/Contacts/Drive added by [ADR-0023](docs/adr/0023-calendar-service-surface.md)/[0024](docs/adr/0024-contacts-service-surface.md)/[0025](docs/adr/0025-drive-service-surface.md))
 2. [ADR-0000](docs/adr/0000-adr-process.md) — ADR corpus + open-questions queue
 3. [ADR-0001](docs/adr/0001-monolithic-google-personal-mcp-architecture.md) — monolithic single-binary, Google-only, low-level-primitives-only
-4. [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md) — locked v0.2 tool inventory + per-tool schemas + cost model
-5. [ADR-0017](docs/adr/0017-secrets-at-rest.md) — token-file permissions, redacted Debug, deferred Keychain
+4. [ADR-0016](docs/adr/0016-tool-surface-and-conventions.md) — locked v1.0 Gmail tool inventory + per-tool schemas + cost model; [ADR-0026](docs/adr/0026-gmail-tool-surface-phase-2.md) extends to v1.1
+5. [ADR-0017](docs/adr/0017-secrets-at-rest.md) — token-file permissions, redacted Debug, macOS Keychain shipped behind `macos-keychain` feature
 6. [ADR-0018](docs/adr/0018-email-content-trust.md) — untrusted-content wrapping; prompt-injection mitigation
+7. [ADR-0022](docs/adr/0022-capability-gating.md) — capability gating model: service × aspect (read/write/destructive) layered on the OAuth scope ceiling; foundation for v1.1 services
 
 ## Verification
 
@@ -51,4 +52,4 @@ Per-user-per-minute cap: **6,000 units**. Per-project-per-minute: 1,200,000. His
 
 ## Tracker
 
-GitHub Issues + Project board for this repo. v0.3 milestone holds the active backlog; v1.0 milestone holds deferred work (HTTP transport, caching, fan-out, observability v1.0). Every issue carries exactly one `model:*` tier label per the global convention.
+GitHub Issues + Project board for this repo. **v1.1 milestone** holds the active design program (4 service-surface ADRs + 8 future-ADR deferral spikes + capability gating). v1.0 (HTTP transport, caching, fan-out, observability) and v0.2 (Gmail core + audit) are both closed. Note: the operator archives completed items off the board, so the board's `Done` column shows only the recent shipping cohort — `gh issue list --state closed` is the complete done-record. Every issue carries exactly one `model:*` tier label per the global convention.
