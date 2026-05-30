@@ -1,7 +1,7 @@
 # ADR-0020: HTTP-transport authentication — bearer tokens at the daemon, mTLS optional at nginx
 
 **Date:** 2026-05-22
-**Status:** Accepted, deferred to v1.0
+**Status:** Accepted (shipped in v1.0)
 
 ---
 

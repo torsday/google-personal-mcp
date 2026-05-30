@@ -24,15 +24,15 @@ The corpus table in ADR-0000 is the authoritative list with current statuses; th
 | [0003](0003-transport-stdio-and-streamable-http.md) | Dual transport (stdio + Streamable HTTP) | Accepted |
 | [0004](0004-oauth-token-refresh.md) | OAuth token refresh — proactive + lazy 401 fallback | Accepted |
 | [0005](0005-error-model.md) | Typed error model | Accepted |
-| [0020](0020-http-transport-authentication.md) | HTTP-transport authentication — bearer tokens + optional mTLS | Accepted, deferred to v1.0 |
+| [0020](0020-http-transport-authentication.md) | HTTP-transport authentication — bearer tokens + optional mTLS | Accepted (shipped in v1.0) |
 
 ### Quality, testing, observability, versioning (the discipline layer)
 
 | # | Title | Status |
 |---|---|---|
 | [0007](0007-testing-strategy.md) | Testing strategy — units, wiremock, ignored e2e, snapshot | Accepted |
-| [0008](0008-observability-and-deployment.md) | Observability and deployment | Accepted, deferred to v1.0 |
-| [0015](0015-tool-versioning-policy.md) | Tool versioning policy — additive-only, snapshot-enforced | Accepted, deferred to v1.0 |
+| [0008](0008-observability-and-deployment.md) | Observability and deployment | Accepted (shipped in v1.0) |
+| [0015](0015-tool-versioning-policy.md) | Tool versioning policy — additive-only, snapshot-enforced | Accepted (shipped in v1.0) |
 
 ### Persistence (data the daemon owns)
 
@@ -41,7 +41,7 @@ The corpus table in ADR-0000 is the authoritative list with current statuses; th
 | [0009](0009-caching-with-sqlite-and-history-api.md) | Caching with SQLite + Gmail History API | Accepted |
 | [0010](0010-mime-and-encoding.md) | MIME and encoding | Accepted |
 | [0011](0011-audit-log.md) | Append-only audit log | Accepted |
-| [0019](0019-data-retention-and-purge.md) | Data retention and purge | Accepted, deferred to v1.0 |
+| [0019](0019-data-retention-and-purge.md) | Data retention and purge | Accepted (shipped in v1.0) |
 
 ### Safety primitives (what protects operator data)
 
@@ -50,14 +50,14 @@ The corpus table in ADR-0000 is the authoritative list with current statuses; th
 | [0012](0012-idempotency-and-dry-run.md) | Idempotency and dry-run | Accepted |
 | [0017](0017-secrets-at-rest.md) | Secrets at rest | Accepted |
 | [0018](0018-email-content-trust.md) | Email content trust / prompt-injection mitigation | Accepted |
-| [0021](0021-attachment-download-policy.md) | Attachment download policy | Accepted, deferred to v0.3 |
+| [0021](0021-attachment-download-policy.md) | Attachment download policy | Accepted (shipped in v0.3) |
 
 ### Tool surface — Gmail v1.0 baseline + cross-cutting
 
 | # | Title | Status |
 |---|---|---|
-| [0013](0013-cross-account-fan-out.md) | Cross-account fan-out (`account: "*"`) | Accepted, deferred to v1.0 |
-| [0014](0014-status-introspection-tool.md) | `mcp_status` introspection tool | Accepted, deferred to v1.0 |
+| [0013](0013-cross-account-fan-out.md) | Cross-account fan-out (`account: "*"`) | Accepted (shipped in v1.0) |
+| [0014](0014-status-introspection-tool.md) | `mcp_status` introspection tool | Accepted (shipped in v1.0) |
 | [0016](0016-tool-surface-and-conventions.md) | Tool surface and parameter conventions (Gmail v1.0) | Accepted |
 
 ### v1.1 design program (capability gating + the three new services + Gmail Phase 2)

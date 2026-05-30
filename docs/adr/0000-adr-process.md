@@ -93,20 +93,20 @@ A proposed ADR can be withdrawn (status → `Withdrawn`) if the discussion concl
 | [0005](0005-error-model.md) | Typed error model | Accepted |
 | [0006](0006-config.md) | Config schema (TOML) | Accepted |
 | [0007](0007-testing-strategy.md) | Testing strategy — units, wiremock, ignored e2e | Accepted |
-| [0008](0008-observability-and-deployment.md) | Observability and deployment | Accepted, deferred to v1.0 |
+| [0008](0008-observability-and-deployment.md) | Observability and deployment | Accepted (shipped in v1.0) |
 | [0009](0009-caching-with-sqlite-and-history-api.md) | Caching with SQLite + Gmail History API | Accepted |
 | [0010](0010-mime-and-encoding.md) | MIME and encoding | Accepted |
 | [0011](0011-audit-log.md) | Append-only audit log | Accepted |
 | [0012](0012-idempotency-and-dry-run.md) | Idempotency and dry-run | Accepted |
-| [0013](0013-cross-account-fan-out.md) | Cross-account fan-out | Accepted, deferred to v1.0 |
-| [0014](0014-status-introspection-tool.md) | `mcp_status` introspection tool | Accepted, deferred to v1.0 |
-| [0015](0015-tool-versioning-policy.md) | Tool versioning policy | Accepted, deferred to v1.0 |
+| [0013](0013-cross-account-fan-out.md) | Cross-account fan-out | Accepted (shipped in v1.0) |
+| [0014](0014-status-introspection-tool.md) | `mcp_status` introspection tool | Accepted (shipped in v1.0) |
+| [0015](0015-tool-versioning-policy.md) | Tool versioning policy | Accepted (shipped in v1.0) |
 | [0016](0016-tool-surface-and-conventions.md) | Tool surface and parameter conventions | Accepted |
 | [0017](0017-secrets-at-rest.md) | Secrets at rest | Accepted |
 | [0018](0018-email-content-trust.md) | Email content trust / prompt-injection mitigation | Accepted |
-| [0019](0019-data-retention-and-purge.md) | Data retention and purge — cache age cap, audit deletion opt-in, "right to forget" | Accepted, deferred to v1.0 |
-| [0020](0020-http-transport-authentication.md) | HTTP-transport authentication — bearer tokens at the daemon, mTLS optional at nginx | Accepted, deferred to v1.0 |
-| [0021](0021-attachment-download-policy.md) | Attachment download policy — path constraints, extension blocklist, size limits, MIME trust | Accepted, deferred to v0.3 |
+| [0019](0019-data-retention-and-purge.md) | Data retention and purge — cache age cap, audit deletion opt-in, "right to forget" | Accepted (shipped in v1.0) |
+| [0020](0020-http-transport-authentication.md) | HTTP-transport authentication — bearer tokens at the daemon, mTLS optional at nginx | Accepted (shipped in v1.0) |
+| [0021](0021-attachment-download-policy.md) | Attachment download policy — path constraints, extension blocklist, size limits, MIME trust | Accepted (shipped in v0.3) |
 | [0022](0022-capability-gating.md) | Capability gating — service × aspect toggles layered on the OAuth scope ceiling | Accepted, target v1.1 |
 | [0023](0023-calendar-service-surface.md) | Calendar service surface — full read/write/destructive under the capability gate | Accepted, target v1.1 |
 | [0024](0024-contacts-service-surface.md) | Contacts (People API) service surface — full read/write/destructive under the capability gate | Accepted, target v1.1 |

@@ -1,7 +1,7 @@
 # ADR-0019: Data retention and purge — cache age cap, audit deletion opt-in, "right to forget"
 
 **Date:** 2026-05-22
-**Status:** Accepted, deferred to v1.0
+**Status:** Accepted (shipped in v1.0)
 
 ---
 

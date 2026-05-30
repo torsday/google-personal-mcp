@@ -1,7 +1,7 @@
 # ADR-0021: Attachment download policy — path constraints, extension blocklist, size limits, MIME trust
 
 **Date:** 2026-05-22
-**Status:** Accepted, deferred to v0.3
+**Status:** Accepted (shipped in v0.3)
 
 ---
 
