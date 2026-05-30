@@ -29,6 +29,12 @@ use crate::rate_limit::KeyedRateLimiter;
 /// Production People API root (no trailing slash).
 pub(crate) const PEOPLE_API_BASE: &str = "https://people.googleapis.com/v1";
 
+/// Per-call quota cost for a People API request. Like Calendar, the People API
+/// meters in flat per-request units against a per-minute budget rather than
+/// Gmail's weighted model ([ADR-0024](../../docs/adr/0024-contacts-service-surface.md)),
+/// so every endpoint charges the shared rate limiter a single unit.
+pub(crate) const QUERY_COST: u32 = 1;
+
 pub(crate) struct PeopleClient<T: RefreshTransport = ReqwestRefreshTransport> {
     base_url: String,
     tokens: Arc<TokenManager<T>>,
