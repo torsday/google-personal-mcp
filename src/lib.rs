@@ -4,6 +4,7 @@ pub mod audit;
 pub mod audit_retention;
 pub mod auth;
 pub mod cache;
+pub mod calendar;
 pub mod config;
 pub mod error;
 pub mod gmail;
@@ -135,6 +136,8 @@ use crate::audit::AuditWriter;
 use crate::auth::cli::AuthCommand;
 use crate::auth::secrets::SecretStore;
 use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager, TokenState};
+use crate::calendar::client::{CalendarClient, CALENDAR_API_BASE};
+use crate::calendar::service::CalendarService;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
 use crate::gmail::service::GmailService;
@@ -284,7 +287,27 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
         tokens_dir,
     ));
     let gmail_base = "https://gmail.googleapis.com/gmail/v1";
-    let gmail_client = Arc::new(GmailClient::new(gmail_base, tokens.clone(), http_client));
+    let gmail_client = Arc::new(GmailClient::new(
+        gmail_base,
+        tokens.clone(),
+        http_client.clone(),
+    ));
+
+    // Calendar service (ADR-0023). Constructed only when the operator enables
+    // `[services.calendar]`; otherwise `None`, so a disabled service contributes
+    // no surface. No tools are registered yet — this is the scaffold wiring so
+    // the client/service types are live and the follow-up tool tickets only add
+    // dispatch arms.
+    let calendar = if cfg.services.calendar.enabled {
+        let calendar_client = Arc::new(CalendarClient::new(
+            CALENDAR_API_BASE,
+            tokens.clone(),
+            http_client,
+        ));
+        Some(Arc::new(CalendarService::new(calendar_client)))
+    } else {
+        None
+    };
 
     let CacheWiring {
         cache,
@@ -384,7 +407,8 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
         config_dir: dir,
         cache_dir: cfg.cache.dir,
     };
-    let server = GoogleServer::new(accounts, tokens, gmail, audit, verbosity, purge_paths);
+    let server = GoogleServer::new(accounts, tokens, gmail, audit, verbosity, purge_paths)
+        .with_calendar(calendar);
 
     // Hold the cache-sync and eviction handles for the lifetime of the
     // daemon — drop aborts the background tasks, which is what we want
