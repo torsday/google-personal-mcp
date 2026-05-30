@@ -47,10 +47,10 @@ Atomic writes ([ADR-0004]'s tmpfile + rename pattern) set the destination mode t
 Tokens live on the filesystem under `~/.config/google-personal-mcp/tokens/<alias>.json`, JSON-encoded, plaintext. No in-app encryption in v1. Rationale:
 
 - A daemon that runs unattended must be able to refresh tokens without a passphrase prompt. Encryption-at-rest with no key derivation source means the key is also on disk — security theater.
-- Keyring backends (macOS Keychain, Linux Secret Service / libsecret, Windows Credential Manager) **do** solve this — the OS owns the key and gates access by process/user. They are deferred to v1.x as a feature flag, not v1, because:
-  - macOS Keychain access from a launchd-managed daemon requires keychain partitioning rules that materially complicate first-run UX.
+- Keyring backends (macOS Keychain, Linux Secret Service / libsecret, Windows Credential Manager) **do** solve this — the OS owns the key and gates access by process/user. **macOS Keychain shipped in v0.2** ([#20](https://github.com/torsday/google-personal-mcp/issues/20)) behind the `macos-keychain` Cargo feature flag (`src/auth/secrets/keychain.rs`); macOS CI covers the code path (#33). Linux Secret Service and Windows Credential Manager remain deferred, because:
+  - macOS Keychain access from a launchd-managed daemon requires keychain partitioning rules that materially complicate first-run UX — shipped, but the keychain-partitioning workflow is documented in INSTALL.md rather than auto-handled.
   - Linux Secret Service requires a desktop session by default; on a headless VPS the daemon would have to use a keyring backend that is itself unlocked at boot — back to "key is on disk."
-  - The keyring path is real and worth doing later. It is not what gates v1.
+  - The Linux/Windows keyring path is real and worth doing later. It is not what gates v1.
 
 ### What v1 explicitly does not do
 
