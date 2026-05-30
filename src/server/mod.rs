@@ -28,6 +28,7 @@ use crate::audit::{AuditEntry, AuditWriter, Verbosity};
 use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager};
 use crate::calendar::service::CalendarService;
 use crate::config::AccountEntry;
+use crate::contacts::service::ContactsService;
 use crate::error::{self, Error};
 use crate::gmail::service::GmailService;
 
@@ -47,6 +48,12 @@ pub(crate) struct GoogleServer {
     /// yet (they land in #200+), hence the `allow(dead_code)`.
     #[allow(dead_code)]
     pub(super) calendar: Option<Arc<CalendarService<ReqwestRefreshTransport>>>,
+    /// Contacts (People API) service per [ADR-0024](../../docs/adr/0024-contacts-service-surface.md).
+    /// `None` when `[services.contacts]` is disabled (the default) — set via
+    /// [`Self::with_contacts`] at startup. Scaffold: no contacts tools read it
+    /// yet (they land in #206+), hence the `allow(dead_code)`.
+    #[allow(dead_code)]
+    pub(super) contacts: Option<Arc<ContactsService<ReqwestRefreshTransport>>>,
     /// Best-effort JSONL audit writer per ADR-0011 v0.2 subset.
     pub(super) audit: AuditWriter,
     /// Audit verbosity configured via `[audit] verbose` in config.toml.
@@ -80,6 +87,7 @@ impl GoogleServer {
             tokens,
             gmail,
             calendar: None,
+            contacts: None,
             audit,
             verbosity,
             deprecations: Arc::new(deprecation::production()),
@@ -96,6 +104,17 @@ impl GoogleServer {
         calendar: Option<Arc<CalendarService<ReqwestRefreshTransport>>>,
     ) -> Self {
         self.calendar = calendar;
+        self
+    }
+
+    /// Attach the Contacts service (ADR-0024). `None` leaves the server with no
+    /// contacts surface (the default when `[services.contacts]` is disabled).
+    #[must_use]
+    pub(crate) fn with_contacts(
+        mut self,
+        contacts: Option<Arc<ContactsService<ReqwestRefreshTransport>>>,
+    ) -> Self {
+        self.contacts = contacts;
         self
     }
 
@@ -118,6 +137,7 @@ impl GoogleServer {
             tokens,
             gmail,
             calendar: None,
+            contacts: None,
             audit,
             verbosity,
             deprecations: Arc::new(deprecations),

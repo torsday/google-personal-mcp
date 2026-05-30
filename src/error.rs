@@ -34,6 +34,14 @@ pub(crate) enum Error {
     #[error("invalid argument `{field}`: {detail}")]
     InvalidArgument { field: String, detail: String },
 
+    /// Optimistic-concurrency failure: a resource (e.g. a People API contact)
+    /// changed between read and write, so the etag the client sent no longer
+    /// matches. Per [ADR-0024](../docs/adr/0024-contacts-service-surface.md);
+    /// the `hint` is the actionable remediation ("re-fetch `<resource>` and
+    /// re-apply") and carries no secrets.
+    #[error("concurrency conflict on `{resource}`: {hint}")]
+    ConcurrencyConflict { resource: String, hint: String },
+
     /// Header injection attempt detected (e.g. CR/LF in email subject).
     /// This is a security event — log loud, refuse the operation.
     #[error("header injection attempt in field `{field}`")]
@@ -146,6 +154,7 @@ impl Error {
             Self::AccountNotFound { .. } => "account_not_found",
             Self::NotFound { .. } => "not_found",
             Self::RecurrenceInstanceNotFound { .. } => "recurrence_instance_not_found",
+            Self::ConcurrencyConflict { .. } => "concurrency_conflict",
             Self::InvalidArgument { .. } => "invalid_argument",
             Self::HeaderInjection { .. } => "header_injection",
             Self::RateLimited { .. } => "rate_limited",
@@ -326,6 +335,7 @@ pub(crate) fn to_mcp_error(e: &Error) -> rmcp::ErrorData {
         Error::AccountNotFound { .. }
         | Error::NotFound { .. }
         | Error::RecurrenceInstanceNotFound { .. }
+        | Error::ConcurrencyConflict { .. }
         | Error::InvalidArgument { .. }
         | Error::AuthRequired { .. } => rmcp::ErrorData::invalid_params(msg, None),
 
