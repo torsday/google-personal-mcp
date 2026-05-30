@@ -650,6 +650,22 @@ pub(crate) fn registered_tools() -> Vec<Tool> {
 mod tests {
     use super::*;
 
+    /// ADR-0022 invariant: every dispatchable tool must declare an aspect.
+    /// Cross-checks the registry against the classifier so a newly registered
+    /// tool that nobody added to `TOOL_ASPECTS` fails CI instead of silently
+    /// having no capability classification.
+    #[test]
+    fn every_registered_tool_declares_an_aspect() {
+        for tool in registered_tools() {
+            assert!(
+                crate::tools::metadata::aspect(&tool.name).is_some(),
+                "registered tool `{}` has no declared aspect — add it to \
+                 crate::tools::metadata::TOOL_ASPECTS",
+                tool.name
+            );
+        }
+    }
+
     #[test]
     fn list_accounts_descriptor_shape() {
         let t = list_accounts_descriptor();
@@ -715,7 +731,12 @@ mod tests {
     }
 
     /// Snapshot the full tool registry so that any accidental rename, schema
-    /// change, or removal is caught by CI.  Update with `cargo insta review`.
+    /// change, removal, or aspect reclassification is caught by CI.  Per
+    /// [ADR-0022](../../docs/adr/0022-capability-gating.md) and
+    /// [ADR-0015](../../docs/adr/0015-tool-versioning-policy.md), each tool's
+    /// `aspect` is captured here so a silent read→write or write→destructive
+    /// reclassification surfaces as a reviewed snapshot diff. Update with
+    /// `cargo insta review`.
     #[test]
     fn tool_registry_snapshot() {
         let tools = registered_tools();
@@ -725,6 +746,7 @@ mod tests {
             .map(|t| {
                 serde_json::json!({
                     "name": t.name,
+                    "aspect": crate::tools::metadata::aspect(&t.name),
                     "description": t.description,
                     "input_schema": *t.input_schema,
                 })
