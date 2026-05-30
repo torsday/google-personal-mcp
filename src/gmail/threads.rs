@@ -129,6 +129,7 @@ pub(crate) struct RawThreadsList {
 /// no attachments.
 #[derive(Debug)]
 pub(crate) struct ThreadMetadataMessage {
+    pub message_id: String,
     pub internal_date_ms: String,
     pub label_ids: Vec<String>,
     pub size_estimate: u64,
@@ -143,6 +144,22 @@ pub(crate) struct ThreadMetadataMessage {
 pub(crate) struct ThreadMetadata {
     pub thread_id: String,
     pub messages: Vec<ThreadMetadataMessage>,
+}
+
+/// Minimal-format thread: IDs and label state only. Used by `get_thread` when
+/// `format = "minimal"` — callers that only need to check label state avoid the
+/// 40-quota-unit full-content fetch.
+#[derive(Debug)]
+pub(crate) struct ParsedThreadMinimal {
+    pub thread_id: String,
+    pub messages: Vec<ParsedMessageMinimal>,
+}
+
+/// Per-message slice of a `format=minimal` `threads.get` response.
+#[derive(Debug)]
+pub(crate) struct ParsedMessageMinimal {
+    pub message_id: String,
+    pub label_ids: Vec<String>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -255,6 +272,55 @@ pub(crate) async fn get_thread_metadata<T: RefreshTransport>(
     Ok(metadata_from_raw(raw))
 }
 
+/// Fetch a thread in `format=minimal`. Returns only message IDs and label
+/// state — no headers, no body.
+///
+/// Cost: 40 quota units regardless of format per Google's documented pricing.
+pub(crate) async fn get_thread_minimal<T: RefreshTransport>(
+    client: &GmailClient<T>,
+    account: &str,
+    thread_id: &str,
+) -> Result<ParsedThreadMinimal, Error> {
+    if account.is_empty() {
+        return Err(Error::InvalidArgument {
+            field: "account".into(),
+            detail: "account alias must not be empty".into(),
+        });
+    }
+    if thread_id.is_empty() {
+        return Err(Error::InvalidArgument {
+            field: "thread_id".into(),
+            detail: "thread_id must not be empty".into(),
+        });
+    }
+
+    let path = format!(
+        "/users/{a}/threads/{t}?format=minimal",
+        a = percent_encode_path_segment(account),
+        t = percent_encode_path_segment(thread_id),
+    );
+    let raw: RawThread = client
+        .authed_get(account, &path, GmailMethod::ThreadsGet.cost())
+        .await?;
+
+    Ok(minimal_from_raw(raw))
+}
+
+fn minimal_from_raw(raw: RawThread) -> ParsedThreadMinimal {
+    let messages = raw
+        .messages
+        .into_iter()
+        .map(|m| ParsedMessageMinimal {
+            message_id: m.id,
+            label_ids: m.label_ids,
+        })
+        .collect();
+    ParsedThreadMinimal {
+        thread_id: raw.id,
+        messages,
+    }
+}
+
 fn metadata_from_raw(raw: RawThread) -> ThreadMetadata {
     let messages = raw
         .messages
@@ -272,6 +338,7 @@ fn metadata_from_raw(raw: RawThread) -> ThreadMetadata {
                 }
             }
             ThreadMetadataMessage {
+                message_id: m.id,
                 internal_date_ms: m.internal_date,
                 label_ids: m.label_ids,
                 size_estimate: m.size_estimate,

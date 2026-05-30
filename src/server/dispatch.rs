@@ -219,7 +219,24 @@ impl GoogleServer {
                     ));
                 }
                 let thread_id = extract_string_arg(&request, "thread_id")?;
-                get_thread::get_thread(&self.gmail, &account, &thread_id)
+                let format = extract_optional_string_arg(&request, "format")
+                    .as_deref()
+                    .map(|s| {
+                        serde_json::from_value::<get_thread::ThreadFormat>(
+                            serde_json::Value::String(s.to_owned()),
+                        )
+                        .map_err(|_| {
+                            rmcp::ErrorData::invalid_params(
+                                format!(
+                                    "invalid format `{s}` — expected one of: full, metadata, minimal"
+                                ),
+                                None,
+                            )
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                get_thread::get_thread(&self.gmail, &account, &thread_id, format)
                     .await
                     .map_err(|e| error::to_mcp_error(&e))
                     .and_then(|out| ok_result("get_thread serialize", &out))
