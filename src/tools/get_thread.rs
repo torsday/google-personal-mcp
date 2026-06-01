@@ -15,9 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::tokens::RefreshTransport;
 use crate::error::Error;
 use crate::gmail::service::GmailService;
-use crate::gmail::threads::{
-    ParsedAttachment, ParsedThread, ParsedThreadMinimal, ThreadMetadata,
-};
+use crate::gmail::threads::{ParsedAttachment, ParsedThread, ParsedThreadMinimal, ThreadMetadata};
 use crate::gmail::untrusted::UntrustedString;
 
 // ── Format enum ───────────────────────────────────────────────────────────────
