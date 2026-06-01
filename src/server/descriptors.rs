@@ -741,6 +741,7 @@ pub(crate) fn registered_tools() -> Vec<Tool> {
         get_contact_descriptor(),
         list_contact_groups_descriptor(),
         get_contact_group_descriptor(),
+        modify_contact_group_membership_descriptor(),
     ]
 }
 
@@ -928,6 +929,49 @@ fn get_contact_group_descriptor() -> Tool {
             }
         },
         "required": ["account", "resource_name"]
+    }));
+    t
+}
+
+fn modify_contact_group_membership_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "modify_contact_group_membership".into();
+    t.description = Some(
+        "Add and/or remove contacts on a contact group (Google People API \
+         contactGroups.members.modify). Requires the `contacts` (read-write) \
+         scope and `[services.contacts]` enabled — `contacts.readonly` is not \
+         sufficient.\n\n\
+         At least one of `resource_names_to_add` / `resource_names_to_remove` \
+         must be non-empty (each a `people/<id>` from a contact read). Adding or \
+         removing members of system groups (`myContacts`, `starred`) is allowed; \
+         creating or deleting groups is not supported. This does not delete the \
+         contacts themselves, only their group membership.\n\n\
+         The call succeeds even when some members are skipped: \
+         `not_found_resource_names` lists ids the API couldn't find, and \
+         `cannot_remove_last_group_resource_names` lists removals refused because \
+         they'd drop a contact's last group."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {"type": "string", "description": "The account alias from accounts.toml."},
+            "contact_group_resource_name": {
+                "type": "string",
+                "description": "Target group, e.g. \"contactGroups/myContacts\" (from list_contact_groups)."
+            },
+            "resource_names_to_add": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "people/<id> resource names to add to the group."
+            },
+            "resource_names_to_remove": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "people/<id> resource names to remove from the group."
+            }
+        },
+        "required": ["account", "contact_group_resource_name"]
     }));
     t
 }

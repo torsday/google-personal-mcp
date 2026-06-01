@@ -65,6 +65,7 @@ const TOOL_ASPECTS: &[(&str, Aspect)] = &[
     ("batch_archive", Aspect::Write),
     ("modify_thread_labels", Aspect::Write),
     ("batch_modify_thread_labels", Aspect::Write),
+    ("modify_contact_group_membership", Aspect::Write),
     // ── destructive ─────────────────────────────────────────────────────────
     ("purge_account", Aspect::Destructive),
     ("trash_thread", Aspect::Destructive),
@@ -161,6 +162,7 @@ mod tests {
             "batch_archive",
             "modify_thread_labels",
             "batch_modify_thread_labels",
+            "modify_contact_group_membership",
         ] {
             assert_eq!(aspect(name), Some(Aspect::Write), "{name} should be write");
         }

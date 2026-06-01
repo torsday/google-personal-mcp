@@ -17,7 +17,12 @@
 //! identifiers, also trusted. This tool group therefore emits no `_untrusted`
 //! fields.
 //!
-//! `modify_contact_group_membership` (write) lands separately in #211.
+//! `modify_contact_group_membership` (write, `Aspect::Write`, scope `contacts`)
+//! adds/removes members on a group via `contactGroups.members.modify`; it does
+//! not create or delete groups (out of scope per ADR-0024). The People API
+//! reports per-member issues (`notFoundResourceNames`,
+//! `canNotRemoveLastContactGroupResourceNames`) which are surfaced verbatim —
+//! the call as a whole succeeds even when some members are skipped.
 
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +61,17 @@ pub(crate) struct GetContactGroupInput {
     /// Cap on member `resource_names` returned. Defaults to
     /// [`DEFAULT_MAX_MEMBERS`]; `0` returns none.
     pub max_members: Option<u32>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ModifyContactGroupMembershipInput {
+    pub account: String,
+    /// Target group, e.g. `contactGroups/myContacts`.
+    pub contact_group_resource_name: String,
+    /// `people/<id>` resource names to add to the group.
+    pub resource_names_to_add: Vec<String>,
+    /// `people/<id>` resource names to remove from the group.
+    pub resource_names_to_remove: Vec<String>,
 }
 
 // ── People API response shapes ────────────────────────────────────────────────
@@ -167,6 +183,56 @@ fn push_group_fields(qs: &mut String, group_fields: &[String]) {
     qs.push_str(&percent_encode_path_segment(&mask));
 }
 
+/// Validate that every entry looks like a `people/<id>` resource name. The
+/// People API rejects malformed member ids, so fail fast with a typed error
+/// naming the offending value rather than paying the round-trip.
+fn validate_people_resource_names(field: &'static str, names: &[String]) -> Result<(), Error> {
+    for n in names {
+        let ok = n
+            .strip_prefix("people/")
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'));
+        if !ok {
+            return Err(Error::InvalidArgument {
+                field: field.into(),
+                detail: format!("{field} entries must look like `people/<id>`, got {n:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+// ── modify_contact_group_membership request/response shapes ──────────────────────
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModifyMembersRequest<'a> {
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    resource_names_to_add: &'a [String],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    resource_names_to_remove: &'a [String],
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct RawModifyMembersResponse {
+    not_found_resource_names: Vec<String>,
+    can_not_remove_last_contact_group_resource_names: Vec<String>,
+}
+
+/// Outcome of a membership change. The call succeeds even when the API skips
+/// some members; these lists report which and why. All values are Google-side
+/// `people/<id>` identifiers — trusted, unwrapped.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct ModifyContactGroupMembershipOutput {
+    /// Requested ids the API could not find (neither added nor removed).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_found_resource_names: Vec<String>,
+    /// Ids that could not be removed because doing so would drop the contact's
+    /// last group membership (People API invariant).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cannot_remove_last_group_resource_names: Vec<String>,
+}
+
 // ── Core logic ────────────────────────────────────────────────────────────────
 
 /// List the account owner's contact groups (`contactGroups.list`), one page per
@@ -241,6 +307,69 @@ pub(crate) async fn get_contact_group<T: RefreshTransport>(
         .await?;
 
     Ok(map_group(group))
+}
+
+/// Add and/or remove members on a contact group
+/// (`contactGroups.members.modify`). At least one of add/remove must be
+/// non-empty. The call as a whole succeeds even if the API skips some members;
+/// the returned lists report which were not found or could not be removed.
+#[tracing::instrument(
+    skip_all,
+    err(Display),
+    fields(
+        tool.name = "modify_contact_group_membership",
+        tool.account = %input.account,
+        tool.add = input.resource_names_to_add.len(),
+        tool.remove = input.resource_names_to_remove.len(),
+    ),
+)]
+pub(crate) async fn modify_contact_group_membership<T: RefreshTransport>(
+    contacts: &ContactsService<T>,
+    input: ModifyContactGroupMembershipInput,
+) -> Result<ModifyContactGroupMembershipOutput, Error> {
+    require_non_empty("account", &input.account)?;
+
+    // contact_group_resource_name is caller-supplied; validate the
+    // `contactGroups/<id>` shape and encode only the id segment so a crafted
+    // value can't smuggle extra path segments or the `:modify` verb.
+    let id = input
+        .contact_group_resource_name
+        .strip_prefix("contactGroups/")
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+        .ok_or_else(|| Error::InvalidArgument {
+            field: "contact_group_resource_name".into(),
+            detail: "contact_group_resource_name must look like `contactGroups/<id>`".into(),
+        })?;
+
+    if input.resource_names_to_add.is_empty() && input.resource_names_to_remove.is_empty() {
+        return Err(Error::InvalidArgument {
+            field: "resource_names_to_add".into(),
+            detail: "at least one of resource_names_to_add / resource_names_to_remove \
+                     must be non-empty"
+                .into(),
+        });
+    }
+    validate_people_resource_names("resource_names_to_add", &input.resource_names_to_add)?;
+    validate_people_resource_names("resource_names_to_remove", &input.resource_names_to_remove)?;
+
+    let body = ModifyMembersRequest {
+        resource_names_to_add: &input.resource_names_to_add,
+        resource_names_to_remove: &input.resource_names_to_remove,
+    };
+    let path = format!(
+        "/contactGroups/{id}/members:modify",
+        id = percent_encode_path_segment(id),
+    );
+    let resp: RawModifyMembersResponse = contacts
+        .client()
+        .authed_post(&input.account, &path, QUERY_COST, &body)
+        .await?;
+
+    Ok(ModifyContactGroupMembershipOutput {
+        not_found_resource_names: resp.not_found_resource_names,
+        cannot_remove_last_group_resource_names: resp
+            .can_not_remove_last_contact_group_resource_names,
+    })
 }
 
 // ── Layer 1 unit tests ──────────────────────────────────────────────────────────
@@ -356,6 +485,54 @@ mod tests {
             );
         }
     }
+
+    fn modify_input() -> ModifyContactGroupMembershipInput {
+        ModifyContactGroupMembershipInput {
+            account: "work".into(),
+            contact_group_resource_name: "contactGroups/u1".into(),
+            resource_names_to_add: vec!["people/c1".into()],
+            resource_names_to_remove: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn modify_rejects_empty_add_and_remove() {
+        let svc = test_support::service("https://unused.example");
+        let mut input = modify_input();
+        input.resource_names_to_add = vec![];
+        let err = modify_contact_group_membership(&svc, input)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidArgument { ref field, .. } if field == "resource_names_to_add")
+        );
+    }
+
+    #[tokio::test]
+    async fn modify_rejects_malformed_group_name() {
+        let svc = test_support::service("https://unused.example");
+        let mut input = modify_input();
+        input.contact_group_resource_name = "people/c1".into();
+        let err = modify_contact_group_membership(&svc, input)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidArgument { ref field, .. } if field == "contact_group_resource_name")
+        );
+    }
+
+    #[tokio::test]
+    async fn modify_rejects_malformed_member_resource_name() {
+        let svc = test_support::service("https://unused.example");
+        let mut input = modify_input();
+        input.resource_names_to_add = vec!["c1".into()]; // missing people/ prefix
+        let err = modify_contact_group_membership(&svc, input)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidArgument { ref field, .. } if field == "resource_names_to_add")
+        );
+    }
 }
 
 // Shared test harness for the Layer 1 (`tests`) and Layer 2 (`wiremock_tests`)
@@ -408,7 +585,9 @@ mod test_support {
 mod wiremock_tests {
     use super::test_support;
     use super::*;
-    use wiremock::matchers::{method, path, path_regex, query_param, query_param_is_missing};
+    use wiremock::matchers::{
+        body_partial_json, method, path, path_regex, query_param, query_param_is_missing,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -560,5 +739,68 @@ mod wiremock_tests {
             matches!(err, Error::Upstream { status: 403, .. }),
             "got: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn modify_posts_members_and_maps_skipped_lists() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/contactGroups/u1/members:modify$"))
+            .and(body_partial_json(serde_json::json!({
+                "resourceNamesToAdd": ["people/c1", "people/c2"],
+                "resourceNamesToRemove": ["people/c3"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "notFoundResourceNames": ["people/c2"],
+                "canNotRemoveLastContactGroupResourceNames": ["people/c3"]
+            })))
+            .mount(&server)
+            .await;
+
+        let svc = test_support::service(&server.uri());
+        let out = modify_contact_group_membership(
+            &svc,
+            ModifyContactGroupMembershipInput {
+                account: "work".into(),
+                contact_group_resource_name: "contactGroups/u1".into(),
+                resource_names_to_add: vec!["people/c1".into(), "people/c2".into()],
+                resource_names_to_remove: vec!["people/c3".into()],
+            },
+        )
+        .await
+        .expect("ok");
+        assert_eq!(out.not_found_resource_names, vec!["people/c2".to_string()]);
+        assert_eq!(
+            out.cannot_remove_last_group_resource_names,
+            vec!["people/c3".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn modify_clean_success_returns_empty_lists() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/contactGroups/u1/members:modify$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+
+        let svc = test_support::service(&server.uri());
+        let out = modify_contact_group_membership(
+            &svc,
+            ModifyContactGroupMembershipInput {
+                account: "work".into(),
+                contact_group_resource_name: "contactGroups/u1".into(),
+                resource_names_to_add: vec!["people/c1".into()],
+                resource_names_to_remove: vec![],
+            },
+        )
+        .await
+        .expect("ok");
+        assert!(out.not_found_resource_names.is_empty());
+        assert!(out.cannot_remove_last_group_resource_names.is_empty());
+        // No skipped members ⇒ both lists omitted from the JSON envelope.
+        let json = serde_json::to_string(&out).unwrap();
+        assert_eq!(json, "{}");
     }
 }
