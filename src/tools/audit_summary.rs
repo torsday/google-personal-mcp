@@ -32,8 +32,9 @@
 //! ```
 //!
 //! `recent_destructive` lists at most 5 most-recent entries whose tool is
-//! in the [`DESTRUCTIVE_TOOLS`] set. Verbose-mode `params_summary` content
-//! is not surfaced.
+//! classified [`Aspect::Destructive`](crate::tools::aspect::Aspect) by the
+//! single source of truth in [`crate::tools::metadata`] (#235). Verbose-mode
+//! `params_summary` content is not surfaced.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -44,19 +45,6 @@ use serde::Serialize;
 
 use crate::audit::AuditEntry;
 use crate::error::Error;
-
-/// Tools considered destructive for the purposes of the `recent_destructive`
-/// shortlist. Mirrors the audit-log set in `src/server.rs` and the table in
-/// [ADR-0011 §Redaction rules per tool].
-pub(crate) const DESTRUCTIVE_TOOLS: &[&str] = &[
-    "archive_thread",
-    "batch_archive",
-    "trash_thread",
-    "batch_trash",
-    "modify_thread_labels",
-    "batch_modify_thread_labels",
-    "send_email",
-];
 
 const RECENT_DESTRUCTIVE_LIMIT: usize = 5;
 
@@ -161,7 +149,15 @@ pub(crate) fn aggregate(
         *counts_by_account.entry(entry.account.clone()).or_insert(0) += 1;
         first_at = Some(first_at.map_or(entry.timestamp, |x| x.min(entry.timestamp)));
         last_at = Some(last_at.map_or(entry.timestamp, |x| x.max(entry.timestamp)));
-        if DESTRUCTIVE_TOOLS.contains(&entry.tool.as_str()) {
+        // `recent_destructive` tracks the formal `Aspect::Destructive` set
+        // (ADR-0022), via the single source of truth in `tools::metadata` —
+        // not a second hand-maintained list (#235). This narrows the shortlist
+        // versus the pre-aspect "all mutating tools" set: recoverable `write`
+        // tools (`archive_thread`, `*_modify_thread_labels`) drop out, while
+        // `purge_account` (irreversible) is now correctly included. An unknown
+        // tool name classifies as not-destructive (`is_destructive` returns
+        // `false`), which is the safe default for this operator-facing view.
+        if crate::tools::metadata::is_destructive(&entry.tool) {
             destructive.push(DestructiveSummary {
                 timestamp: entry.timestamp,
                 tool: entry.tool,
@@ -325,30 +321,36 @@ mod tests {
     // ── recent_destructive ───────────────────────────────────────────────────
 
     #[test]
-    fn recent_destructive_includes_only_destructive_tools() {
-        // Mix destructive (send_email) and non-destructive (get_thread,
-        // list_labels, search_threads). Only destructive should land in
-        // recent_destructive.
+    fn recent_destructive_tracks_the_destructive_aspect_only() {
+        // Per #235 the shortlist is driven by `Aspect::Destructive` (the
+        // single source of truth), NOT the old "all mutating" set. So:
+        //   - send_email, trash_thread, purge_account  → destructive (kept)
+        //   - archive_thread, modify_thread_labels     → write (dropped)
+        //   - get_thread                                → read (dropped)
         let entries = vec![
             entry(at(1, 9), "work", "send_email", "ok"),
             entry(at(2, 10), "work", "get_thread", "ok"),
-            entry(at(3, 11), "work", "search_threads", "ok"),
-            entry(at(4, 12), "work", "archive_thread", "ok"),
+            entry(at(3, 11), "work", "archive_thread", "ok"),
+            entry(at(4, 12), "work", "modify_thread_labels", "ok"),
+            entry(at(5, 13), "work", "trash_thread", "ok"),
+            entry(at(6, 14), "work", "purge_account", "ok"),
         ];
         let out = aggregate(entries.into_iter(), &AuditSummaryInput::default());
-        let tools: Vec<&str> = out
+        let mut tools: Vec<&str> = out
             .recent_destructive
             .iter()
             .map(|d| d.tool.as_str())
             .collect();
-        assert_eq!(tools, vec!["archive_thread", "send_email"]);
+        tools.sort_unstable();
+        assert_eq!(tools, vec!["purge_account", "send_email", "trash_thread"]);
     }
 
     #[test]
     fn recent_destructive_caps_at_five() {
         let mut entries = Vec::new();
         for d in 1..=8 {
-            entries.push(entry(at(d, 12), "work", "archive_thread", "ok"));
+            // trash_thread is `Aspect::Destructive`; archive_thread (write) is not.
+            entries.push(entry(at(d, 12), "work", "trash_thread", "ok"));
         }
         let out = aggregate(entries.into_iter(), &AuditSummaryInput::default());
         assert_eq!(out.recent_destructive.len(), 5);
