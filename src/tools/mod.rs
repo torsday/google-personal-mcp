@@ -12,6 +12,7 @@ pub(crate) mod cache_status;
 pub(crate) mod destructive;
 pub(crate) mod download_attachment;
 pub(crate) mod fanout;
+pub(crate) mod get_message;
 pub(crate) mod get_thread;
 pub(crate) mod list_accounts;
 pub(crate) mod list_attachments;

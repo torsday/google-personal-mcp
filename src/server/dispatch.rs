@@ -21,8 +21,8 @@ use crate::contacts::people;
 use crate::error;
 use crate::tools::{
     archive, audit_summary, batch, cache_invalidate, cache_status, download_attachment, fanout,
-    get_thread, list_accounts, list_attachments, list_labels, mcp_status, modify_labels,
-    purge_account, search_threads, trash,
+    get_message, get_thread, list_accounts, list_attachments, list_labels, mcp_status,
+    modify_labels, purge_account, search_threads, trash,
 };
 
 use super::args::{
@@ -241,6 +241,56 @@ impl GoogleServer {
                     .await
                     .map_err(|e| error::to_mcp_error(&e))
                     .and_then(|out| ok_result("get_thread serialize", &out))
+            }
+
+            "get_message" => {
+                let account = extract_string_arg(&request, "account")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not supported for `get_message` \
+                         — message IDs are per-account; pass a single account alias",
+                        None,
+                    ));
+                }
+                let message_id = extract_string_arg(&request, "message_id")?;
+                let format = extract_optional_string_arg(&request, "format")
+                    .as_deref()
+                    .map(|s| {
+                        serde_json::from_value::<get_message::MessageFormat>(
+                            serde_json::Value::String(s.to_owned()),
+                        )
+                        .map_err(|_| {
+                            rmcp::ErrorData::invalid_params(
+                                format!(
+                                    "invalid format `{s}` — expected one of: full, metadata, minimal"
+                                ),
+                                None,
+                            )
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                get_message::get_message(&self.gmail, &account, &message_id, format)
+                    .await
+                    .map_err(|e| error::to_mcp_error(&e))
+                    .and_then(|out| ok_result("get_message serialize", &out))
+            }
+
+            "get_full_body" => {
+                let account = extract_string_arg(&request, "account")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not supported for `get_full_body` \
+                         — message IDs are per-account; pass a single account alias",
+                        None,
+                    ));
+                }
+                let message_id = extract_string_arg(&request, "message_id")?;
+                let part_id = extract_optional_string_arg(&request, "part_id");
+                get_message::get_full_body(&self.gmail, &account, &message_id, part_id.as_deref())
+                    .await
+                    .map_err(|e| error::to_mcp_error(&e))
+                    .and_then(|out| ok_result("get_full_body serialize", &out))
             }
 
             "list_attachments" => {

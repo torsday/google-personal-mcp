@@ -164,6 +164,21 @@ impl Cache {
         queries::insert_thread(conn, thread).await
     }
 
+    /// Look up a single message's cached `(body_text, body_html)` by message id
+    /// for `get_full_body`. Returns `Ok(None)` when the account is unknown, the
+    /// message is absent/soft-deleted, or only metadata is cached (no body).
+    /// Read-only — bodies are written by [`Self::insert_thread`].
+    pub(crate) async fn lookup_message_body(
+        &self,
+        account: &str,
+        message_id: &str,
+    ) -> Result<Option<(Option<String>, Option<String>)>, Error> {
+        let Some(conn) = self.connection(account) else {
+            return Ok(None);
+        };
+        queries::lookup_message_body(conn, message_id).await
+    }
+
     /// Look up metadata-shaped thread data (headers + label ids + size
     /// estimates, no bodies). Returns `Ok(None)` when the thread is absent
     /// or the account is unknown.

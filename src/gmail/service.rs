@@ -174,6 +174,41 @@ impl<T: RefreshTransport + 'static> GmailService<T> {
         threads_api::get_thread(&self.client, account, thread_id).await
     }
 
+    /// `messages.get` (20 quota units) — fetch one message in the requested
+    /// `format`. Passthrough: single-message reads are not cached (only full
+    /// threads and bodies are), so this never touches the cache.
+    pub(crate) async fn get_message(
+        &self,
+        account: &str,
+        message_id: &str,
+        format: &str,
+    ) -> Result<crate::gmail::threads::ParsedMessage, Error> {
+        threads_api::get_message(&self.client, account, message_id, format).await
+    }
+
+    /// Fetch a message's `(body_text, body_html)` parts for `get_full_body`,
+    /// cache-first. On a cache hit the stored bodies are returned without a
+    /// network call; on a miss (or no cache) it falls through to
+    /// `messages.get(format=FULL)` and extracts the parts. Read-only on the
+    /// cache — never writes back (ADR-0009 body storage is owned by
+    /// `insert_thread`). Bumps `gmcp_cache_{hits,misses}_total{kind="message_body"}`.
+    pub(crate) async fn get_full_body(
+        &self,
+        account: &str,
+        message_id: &str,
+    ) -> Result<(Option<String>, Option<String>), Error> {
+        self.maybe_sync(account).await;
+        if let Some(cache) = &self.cache {
+            if let Some(parts) = cache.lookup_message_body(account, message_id).await? {
+                cache.metrics().record_hit(account, "message_body");
+                return Ok(parts);
+            }
+            cache.metrics().record_miss(account, "message_body");
+        }
+        let raw = threads_api::fetch_raw_message(&self.client, account, message_id, "full").await?;
+        Ok(threads_api::extract_body_parts(&raw))
+    }
+
     /// `threads.list` (10 quota units) — returns Gmail's raw envelope so the
     /// caller can hydrate per-thread metadata separately.
     ///
@@ -523,6 +558,111 @@ mod tests {
 
         // `.expect(2)` on the wiremock enforces the upstream-call cap
         // when the server drops.
+    }
+
+    /// `get_full_body` cache HIT: a prior `get_thread` stored message `m1`'s
+    /// body, so a `get_full_body("m1")` returns it WITHOUT a `messages.get`
+    /// call. No messages.get mock is mounted — a stray call would 404 and fail.
+    #[tokio::test]
+    async fn get_full_body_cache_hit_uses_stored_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/threads/t-fb"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(thread_body("t-fb")))
+            .expect(1) // only the thread fetch; get_full_body must not hit the API
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let cache = make_cache(&["work"]).await;
+        let service = GmailService::new(client, Some(Arc::clone(&cache)));
+
+        // Prime: get_thread stores message m1 (body "the body", no html).
+        service.get_thread("work", "t-fb").await.expect("prime");
+        let (text, html) = service
+            .get_full_body("work", "m1")
+            .await
+            .expect("full body");
+        assert_eq!(text.as_deref(), Some("the body"));
+        assert_eq!(html, None);
+        assert_eq!(cache.metrics().hits(), 1, "message_body hit");
+    }
+
+    /// `get_full_body` cache MISS: an uncached message id falls through to
+    /// `messages.get(format=full)` exactly once and extracts the body parts.
+    #[tokio::test]
+    async fn get_full_body_cache_miss_falls_through_to_api() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let html_b64 = URL_SAFE_NO_PAD.encode(b"<p>hi</p>");
+        let text_b64 = URL_SAFE_NO_PAD.encode(b"hi");
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/messages/m-miss"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "m-miss",
+                "internalDate": "1717200000000",
+                "payload": {
+                    "mimeType": "multipart/alternative",
+                    "headers": [],
+                    "parts": [
+                        {"mimeType": "text/plain", "body": {"data": text_b64, "size": 2}, "parts": []},
+                        {"mimeType": "text/html", "body": {"data": html_b64, "size": 9}, "parts": []}
+                    ]
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let cache = make_cache(&["work"]).await;
+        let service = GmailService::new(client, Some(Arc::clone(&cache)));
+
+        let (text, html) = service
+            .get_full_body("work", "m-miss")
+            .await
+            .expect("full body");
+        assert_eq!(text.as_deref(), Some("hi"));
+        assert_eq!(html.as_deref(), Some("<p>hi</p>"));
+        assert_eq!(cache.metrics().misses(), 1, "message_body miss");
+        assert_eq!(cache.metrics().hits(), 0);
+    }
+
+    /// `get_full_body` with NO cache configured: straight passthrough to
+    /// `messages.get`, no metrics.
+    #[tokio::test]
+    async fn get_full_body_no_cache_passthrough() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let text_b64 = URL_SAFE_NO_PAD.encode(b"plain only");
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/messages/m-nc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "m-nc",
+                "internalDate": "1717200000000",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [],
+                    "body": {"data": text_b64, "size": 10},
+                    "parts": []
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let service = GmailService::new(client, None);
+        let (text, html) = service
+            .get_full_body("work", "m-nc")
+            .await
+            .expect("full body");
+        assert_eq!(text.as_deref(), Some("plain only"));
+        assert_eq!(html, None);
     }
 
     /// `list_threads` warm-cache path: distinct `(query, max_results,
