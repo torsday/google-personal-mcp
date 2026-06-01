@@ -132,6 +132,33 @@ pub(super) async fn lookup_thread(
     }))
 }
 
+/// Look up a single message's cached body parts by message id, returning
+/// `(body_text, body_html)`. Returns `Ok(None)` on a miss — either the row is
+/// absent, soft-deleted, or metadata-only (`body_text IS NULL`, the same
+/// "not fetched yet" sentinel [`lookup_thread`] honors). Read-only: the body is
+/// populated by [`insert_thread`]; `get_full_body` never writes here.
+pub(super) async fn lookup_message_body(
+    conn: &Arc<Connection>,
+    message_id: &str,
+) -> Result<Option<(Option<String>, Option<String>)>, Error> {
+    let id = message_id.to_owned();
+    conn.call(
+        move |c| -> rusqlite::Result<Option<(Option<String>, Option<String>)>> {
+            let mut stmt = c.prepare(
+                "SELECT body_text, body_html FROM messages \
+             WHERE id = ?1 AND deleted_at IS NULL AND body_text IS NOT NULL",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![id])?;
+            match rows.next()? {
+                Some(row) => Ok(Some((row.get(0)?, row.get(1)?))),
+                None => Ok(None),
+            }
+        },
+    )
+    .await
+    .map_err(map_tokio_err)
+}
+
 pub(super) async fn insert_thread(
     conn: &Arc<Connection>,
     thread: &ParsedThread,

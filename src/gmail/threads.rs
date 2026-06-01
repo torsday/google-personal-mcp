@@ -195,6 +195,64 @@ pub(crate) async fn get_thread<T: RefreshTransport>(
     Ok(parse_thread(raw))
 }
 
+/// Fetch a single message by ID via `messages.get` (20 quota units). `format`
+/// is forwarded to Gmail's `format` parameter (`full` / `metadata` / `minimal`);
+/// `parse_message` tolerates the lighter formats by leaving absent fields empty.
+pub(crate) async fn get_message<T: RefreshTransport>(
+    client: &GmailClient<T>,
+    account: &str,
+    message_id: &str,
+    format: &str,
+) -> Result<ParsedMessage, Error> {
+    let raw = fetch_raw_message(client, account, message_id, format).await?;
+    Ok(parse_message(raw))
+}
+
+/// Fetch the raw `messages.get(format=FULL)` payload for `message_id` — the
+/// input to [`extract_body_parts`] for `get_full_body`.
+pub(crate) async fn fetch_raw_message<T: RefreshTransport>(
+    client: &GmailClient<T>,
+    account: &str,
+    message_id: &str,
+    format: &str,
+) -> Result<RawMessage, Error> {
+    if account.is_empty() {
+        return Err(Error::InvalidArgument {
+            field: "account".into(),
+            detail: "account alias must not be empty".into(),
+        });
+    }
+    if message_id.is_empty() {
+        return Err(Error::InvalidArgument {
+            field: "message_id".into(),
+            detail: "message_id must not be empty".into(),
+        });
+    }
+    let path = format!(
+        "/users/{a}/messages/{m}?format={f}",
+        a = percent_encode_path_segment(account),
+        m = percent_encode_path_segment(message_id),
+        f = percent_encode_path_segment(format),
+    );
+    client
+        .authed_get(account, &path, GmailMethod::MessagesGet.cost())
+        .await
+}
+
+/// Walk a raw message's MIME tree and return its decoded `(text/plain,
+/// text/html)` leaf bodies — the raw parts `get_full_body` selects between.
+/// Unlike [`parse_message`], which collapses to a single `body_text`, this
+/// preserves both representations.
+pub(crate) fn extract_body_parts(raw: &RawMessage) -> (Option<String>, Option<String>) {
+    let mut text_plain: Option<String> = None;
+    let mut text_html: Option<String> = None;
+    let mut attachments: Vec<ParsedAttachment> = Vec::new();
+    if let Some(payload) = raw.payload.as_ref() {
+        walk_part(payload, &mut text_plain, &mut text_html, &mut attachments);
+    }
+    (text_plain, text_html)
+}
+
 /// Issue `users.threads.list` with optional `q` (Gmail search syntax),
 /// `max_results`, and `page_token`. Returns Gmail's raw envelope so the
 /// caller can hydrate per-thread metadata separately.
@@ -363,7 +421,7 @@ fn parse_thread(raw: RawThread) -> ParsedThread {
     }
 }
 
-fn parse_message(raw: RawMessage) -> ParsedMessage {
+pub(crate) fn parse_message(raw: RawMessage) -> ParsedMessage {
     let mut subject = String::new();
     let mut from = String::new();
     let mut to: Vec<String> = Vec::new();

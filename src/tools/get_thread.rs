@@ -207,7 +207,7 @@ fn map_message(parsed: crate::gmail::threads::ParsedMessage) -> MessageOutput {
     }
 }
 
-fn map_attachment(att: ParsedAttachment) -> AttachmentSummaryOutput {
+pub(crate) fn map_attachment(att: ParsedAttachment) -> AttachmentSummaryOutput {
     AttachmentSummaryOutput {
         attachment_id: att.attachment_id,
         filename_untrusted: UntrustedString::new("FILENAME", att.filename),
@@ -278,7 +278,7 @@ fn map_thread_minimal(minimal: ParsedThreadMinimal) -> GetThreadMinimalOutput {
 }
 
 /// Convert Gmail's `internalDate` (Unix ms as string) to RFC 3339 UTC.
-fn parse_internal_date(ms_str: &str) -> String {
+pub(crate) fn parse_internal_date(ms_str: &str) -> String {
     ms_str
         .parse::<i64>()
         .ok()
