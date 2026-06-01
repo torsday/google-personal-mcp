@@ -1023,6 +1023,32 @@ impl GoogleServer {
                 .and_then(|out| ok_result("get_contact_group serialize", &out))
             }
 
+            "modify_contact_group_membership" => {
+                // Write tool: single-account only (no fan-out marker handling —
+                // `extract_account_arg` already rejects "*" for non-read tools).
+                let account = extract_account_arg(&request, "modify_contact_group_membership")?;
+                let contacts = self.contacts.as_ref().ok_or_else(contacts_disabled_err)?;
+                let contact_group_resource_name =
+                    extract_string_arg(&request, "contact_group_resource_name")?;
+                let resource_names_to_add =
+                    extract_string_array_arg(&request, "resource_names_to_add").unwrap_or_default();
+                let resource_names_to_remove =
+                    extract_string_array_arg(&request, "resource_names_to_remove")
+                        .unwrap_or_default();
+                groups::modify_contact_group_membership(
+                    contacts,
+                    groups::ModifyContactGroupMembershipInput {
+                        account,
+                        contact_group_resource_name,
+                        resource_names_to_add,
+                        resource_names_to_remove,
+                    },
+                )
+                .await
+                .map_err(|e| error::to_mcp_error(&e))
+                .and_then(|out| ok_result("modify_contact_group_membership serialize", &out))
+            }
+
             other => Err(rmcp::ErrorData::invalid_params(
                 format!("unknown tool `{other}`"),
                 None,
