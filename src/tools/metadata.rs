@@ -53,6 +53,8 @@ const TOOL_ASPECTS: &[(&str, Aspect)] = &[
     ("list_contacts", Aspect::Read),
     ("search_contacts", Aspect::Read),
     ("get_contact", Aspect::Read),
+    ("list_contact_groups", Aspect::Read),
+    ("get_contact_group", Aspect::Read),
     // ── write ───────────────────────────────────────────────────────────────
     ("cache_invalidate", Aspect::Write),
     ("archive_thread", Aspect::Write),
@@ -136,6 +138,8 @@ mod tests {
             "list_contacts",
             "search_contacts",
             "get_contact",
+            "list_contact_groups",
+            "get_contact_group",
         ] {
             assert_eq!(aspect(name), Some(Aspect::Read), "{name} should be read");
         }

@@ -16,6 +16,7 @@ use rmcp::RoleServer;
 
 use crate::audit::AuditEntry;
 use crate::calendar::{calendars, events};
+use crate::contacts::groups;
 use crate::contacts::people;
 use crate::error;
 use crate::tools::{
@@ -861,6 +862,60 @@ impl GoogleServer {
                 .await
                 .map_err(|e| error::to_mcp_error(&e))
                 .and_then(|out| ok_result("get_contact serialize", &out))
+            }
+
+            "list_contact_groups" => {
+                let account = extract_account_arg(&request, "list_contact_groups")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not yet implemented for `list_contact_groups` \
+                         — pass a single account alias",
+                        None,
+                    ));
+                }
+                let contacts = self.contacts.as_ref().ok_or_else(contacts_disabled_err)?;
+                let group_fields =
+                    extract_string_array_arg(&request, "group_fields").unwrap_or_default();
+                let page_token = extract_optional_string_arg(&request, "page_token");
+                groups::list_contact_groups(
+                    contacts,
+                    groups::ListContactGroupsInput {
+                        account,
+                        group_fields,
+                        page_token,
+                    },
+                )
+                .await
+                .map_err(|e| error::to_mcp_error(&e))
+                .and_then(|out| ok_result("list_contact_groups serialize", &out))
+            }
+
+            "get_contact_group" => {
+                let account = extract_account_arg(&request, "get_contact_group")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not yet implemented for `get_contact_group` \
+                         — pass a single account alias",
+                        None,
+                    ));
+                }
+                let contacts = self.contacts.as_ref().ok_or_else(contacts_disabled_err)?;
+                let resource_name = extract_string_arg(&request, "resource_name")?;
+                let group_fields =
+                    extract_string_array_arg(&request, "group_fields").unwrap_or_default();
+                let max_members = extract_optional_u32_arg(&request, "max_members");
+                groups::get_contact_group(
+                    contacts,
+                    groups::GetContactGroupInput {
+                        account,
+                        resource_name,
+                        group_fields,
+                        max_members,
+                    },
+                )
+                .await
+                .map_err(|e| error::to_mcp_error(&e))
+                .and_then(|out| ok_result("get_contact_group serialize", &out))
             }
 
             other => Err(rmcp::ErrorData::invalid_params(

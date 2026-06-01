@@ -667,5 +667,68 @@ expression: json
       "type": "object"
     },
     "name": "get_contact"
+  },
+  {
+    "aspect": "read",
+    "description": "List the account owner's contact groups (Google People API contactGroups.list), one page per call. Requires the `contacts.readonly` scope and `[services.contacts]` enabled.\n\nReturns both Google system groups (`myContacts`, `starred`, …) and user-created groups, distinguished by `group_type` (SYSTEM_CONTACT_GROUP / USER_CONTACT_GROUP). Members are not included here — use get_contact_group for a single group's members.\n\n`group_fields` is optional; omit it for the API default field set. Group names are operator-owned or Google-assigned and are returned unwrapped (trusted), consistent with list_labels.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml.",
+          "type": "string"
+        },
+        "group_fields": {
+          "description": "Optional People API groupFields mask, e.g. [\"name\", \"groupType\"].",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "page_token": {
+          "description": "Opaque token returned as `next_page_token` from a previous call.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account"
+      ],
+      "type": "object"
+    },
+    "name": "list_contact_groups"
+  },
+  {
+    "aspect": "read",
+    "description": "Fetch a single contact group by resource name (Google People API contactGroups.get), including its member contact resource names. Requires the `contacts.readonly` scope and `[services.contacts]` enabled.\n\n`max_members` caps the returned member `resource_names` (default 100; pass 0 for none). A group larger than the cap is truncated — compare `member_count` to the returned list length to detect this and raise `max_members`. Member resource names feed get_contact.\n\nGroup fields are operator-owned or Google-assigned and returned unwrapped (trusted), consistent with list_labels.",
+    "input_schema": {
+      "properties": {
+        "account": {
+          "description": "The account alias from accounts.toml.",
+          "type": "string"
+        },
+        "group_fields": {
+          "description": "Optional People API groupFields mask.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_members": {
+          "default": 100,
+          "description": "Max member resource_names to return. 0 returns none.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resource_name": {
+          "description": "Group identifier from list_contact_groups, e.g. \"contactGroups/myContacts\".",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "resource_name"
+      ],
+      "type": "object"
+    },
+    "name": "get_contact_group"
   }
 ]
