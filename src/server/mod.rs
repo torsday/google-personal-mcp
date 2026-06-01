@@ -44,9 +44,8 @@ pub(crate) struct GoogleServer {
     pub(super) gmail: Arc<GmailService<ReqwestRefreshTransport>>,
     /// Calendar service per [ADR-0023](../../docs/adr/0023-calendar-service-surface.md).
     /// `None` when `[services.calendar]` is disabled (the default) — set via
-    /// [`Self::with_calendar`] at startup. Scaffold: no calendar tools read it
-    /// yet (they land in #200+), hence the `allow(dead_code)`.
-    #[allow(dead_code)]
+    /// [`Self::with_calendar`] at startup. Read by the calendar dispatch arms
+    /// (`list_calendars`, `list_events`, `get_event`, `query_freebusy`).
     pub(super) calendar: Option<Arc<CalendarService<ReqwestRefreshTransport>>>,
     /// Contacts (People API) service per [ADR-0024](../../docs/adr/0024-contacts-service-surface.md).
     /// `None` when `[services.contacts]` is disabled (the default) — set via
@@ -67,6 +66,11 @@ pub(crate) struct GoogleServer {
     /// Filesystem paths used by the `purge_account` tool (#166). Built
     /// at startup from `cfg.cache.dir` + the daemon's `config_dir()`.
     pub(super) purge_paths: Arc<crate::tools::purge_account::PurgePaths>,
+    /// MCP-side cap on the `query_freebusy` time window, in days
+    /// ([ADR-0023](../../docs/adr/0023-calendar-service-surface.md)). Sourced
+    /// from `[services.calendar].freebusy_max_window_days` at startup via
+    /// [`Self::with_freebusy_window`]; defaults to 31.
+    pub(super) freebusy_max_window_days: u32,
 }
 
 impl GoogleServer {
@@ -92,7 +96,17 @@ impl GoogleServer {
             verbosity,
             deprecations: Arc::new(deprecation::production()),
             purge_paths: Arc::new(purge_paths),
+            freebusy_max_window_days: 31,
         }
+    }
+
+    /// Override the `query_freebusy` window cap from
+    /// `[services.calendar].freebusy_max_window_days`. Returns `self` so the
+    /// startup path can chain off [`Self::new`]. Defaults to 31 when unset.
+    #[must_use]
+    pub(crate) const fn with_freebusy_window(mut self, days: u32) -> Self {
+        self.freebusy_max_window_days = days;
+        self
     }
 
     /// Attach the Calendar service (ADR-0023). `None` leaves the server with no
@@ -147,6 +161,7 @@ impl GoogleServer {
                 config_dir: std::path::PathBuf::from("/tmp/.gpm-test-stub"),
                 cache_dir: std::path::PathBuf::from("/tmp/.gpm-test-stub/cache"),
             }),
+            freebusy_max_window_days: 31,
         }
     }
 

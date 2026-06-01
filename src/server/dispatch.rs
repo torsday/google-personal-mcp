@@ -15,7 +15,7 @@ use rmcp::service::RequestContext;
 use rmcp::RoleServer;
 
 use crate::audit::AuditEntry;
-use crate::calendar::{calendars, events};
+use crate::calendar::{calendars, events, freebusy};
 use crate::contacts::groups;
 use crate::contacts::people;
 use crate::error;
@@ -784,6 +784,61 @@ impl GoogleServer {
                 .await
                 .map_err(|e| error::to_mcp_error(&e))
                 .and_then(|out| ok_result("list_events serialize", &out))
+            }
+
+            "get_event" => {
+                let account = extract_account_arg(&request, "get_event")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not yet implemented for `get_event` \
+                         — pass a single account alias",
+                        None,
+                    ));
+                }
+                let calendar = self.calendar.as_ref().ok_or_else(calendar_disabled_err)?;
+                let calendar_id = extract_string_arg(&request, "calendar_id")?;
+                let event_id = extract_string_arg(&request, "event_id")?;
+                let instance_id = extract_optional_string_arg(&request, "instance_id");
+                events::get_event(
+                    calendar,
+                    events::GetEventInput {
+                        account,
+                        calendar_id,
+                        event_id,
+                        instance_id,
+                    },
+                )
+                .await
+                .map_err(|e| error::to_mcp_error(&e))
+                .and_then(|out| ok_result("get_event serialize", &out))
+            }
+
+            "query_freebusy" => {
+                let account = extract_account_arg(&request, "query_freebusy")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not yet implemented for `query_freebusy` \
+                         — pass a single account alias",
+                        None,
+                    ));
+                }
+                let calendar = self.calendar.as_ref().ok_or_else(calendar_disabled_err)?;
+                let calendar_ids = extract_string_array_arg(&request, "calendar_ids")?;
+                let time_min = extract_string_arg(&request, "time_min")?;
+                let time_max = extract_string_arg(&request, "time_max")?;
+                freebusy::query_freebusy(
+                    calendar,
+                    freebusy::QueryFreebusyInput {
+                        account,
+                        calendar_ids,
+                        time_min,
+                        time_max,
+                        max_window_days: self.freebusy_max_window_days,
+                    },
+                )
+                .await
+                .map_err(|e| error::to_mcp_error(&e))
+                .and_then(|out| ok_result("query_freebusy serialize", &out))
             }
 
             "list_contacts" => {

@@ -345,6 +345,12 @@ pub(crate) struct ServiceEntry {
     /// any key not in [`SANCTIONED_TOOL_OVERRIDES`].
     #[serde(default)]
     pub(crate) tools: HashMap<String, ToolOverride>,
+    /// Calendar-only: MCP-side cap on the `query_freebusy` time window, in days
+    /// ([ADR-0023](../../docs/adr/0023-calendar-service-surface.md)). A query
+    /// spanning more than this is refused before calling Google. Defaults to 31.
+    /// Unused by non-calendar services (mirrors how `profile` is Gmail-only).
+    #[serde(default = "default_freebusy_max_window_days")]
+    pub(crate) freebusy_max_window_days: u32,
 }
 
 impl Default for ServiceEntry {
@@ -356,8 +362,15 @@ impl Default for ServiceEntry {
             capabilities: CapabilityOverride::default(),
             accounts: HashMap::new(),
             tools: HashMap::new(),
+            freebusy_max_window_days: default_freebusy_max_window_days(),
         }
     }
+}
+
+/// Default cap on the `query_freebusy` window (days). 31 covers a calendar
+/// month, the common scheduling horizon, while bounding payload + quota.
+const fn default_freebusy_max_window_days() -> u32 {
+    31
 }
 
 impl ServiceEntry {
