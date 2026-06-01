@@ -674,6 +674,8 @@ pub(crate) fn registered_tools() -> Vec<Tool> {
         list_contacts_descriptor(),
         search_contacts_descriptor(),
         get_contact_descriptor(),
+        list_contact_groups_descriptor(),
+        get_contact_group_descriptor(),
     ]
 }
 
@@ -786,6 +788,81 @@ fn get_contact_descriptor() -> Tool {
             }
         },
         "required": ["account", "resource_name", "person_fields"]
+    }));
+    t
+}
+
+fn list_contact_groups_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "list_contact_groups".into();
+    t.description = Some(
+        "List the account owner's contact groups (Google People API \
+         contactGroups.list), one page per call. Requires the `contacts.readonly` \
+         scope and `[services.contacts]` enabled.\n\n\
+         Returns both Google system groups (`myContacts`, `starred`, …) and \
+         user-created groups, distinguished by `group_type` \
+         (SYSTEM_CONTACT_GROUP / USER_CONTACT_GROUP). Members are not included \
+         here — use get_contact_group for a single group's members.\n\n\
+         `group_fields` is optional; omit it for the API default field set. Group \
+         names are operator-owned or Google-assigned and are returned unwrapped \
+         (trusted), consistent with list_labels."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {"type": "string", "description": "The account alias from accounts.toml."},
+            "group_fields": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional People API groupFields mask, e.g. [\"name\", \"groupType\"]."
+            },
+            "page_token": {
+                "type": "string",
+                "description": "Opaque token returned as `next_page_token` from a previous call."
+            }
+        },
+        "required": ["account"]
+    }));
+    t
+}
+
+fn get_contact_group_descriptor() -> Tool {
+    let mut t = Tool::default();
+    t.name = "get_contact_group".into();
+    t.description = Some(
+        "Fetch a single contact group by resource name (Google People API \
+         contactGroups.get), including its member contact resource names. \
+         Requires the `contacts.readonly` scope and `[services.contacts]` enabled.\n\n\
+         `max_members` caps the returned member `resource_names` (default 100; \
+         pass 0 for none). A group larger than the cap is truncated — compare \
+         `member_count` to the returned list length to detect this and raise \
+         `max_members`. Member resource names feed get_contact.\n\n\
+         Group fields are operator-owned or Google-assigned and returned \
+         unwrapped (trusted), consistent with list_labels."
+            .into(),
+    );
+    t.input_schema = schema_object(&json!({
+        "type": "object",
+        "properties": {
+            "account": {"type": "string", "description": "The account alias from accounts.toml."},
+            "resource_name": {
+                "type": "string",
+                "description": "Group identifier from list_contact_groups, e.g. \"contactGroups/myContacts\"."
+            },
+            "group_fields": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional People API groupFields mask."
+            },
+            "max_members": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 100,
+                "description": "Max member resource_names to return. 0 returns none."
+            }
+        },
+        "required": ["account", "resource_name"]
     }));
     t
 }
