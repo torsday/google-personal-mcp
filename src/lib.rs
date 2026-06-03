@@ -431,7 +431,8 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
     let server = GoogleServer::new(accounts, tokens, gmail, audit, verbosity, purge_paths)
         .with_calendar(calendar)
         .with_contacts(contacts)
-        .with_freebusy_window(cfg.services.calendar.freebusy_max_window_days);
+        .with_freebusy_window(cfg.services.calendar.freebusy_max_window_days)
+        .with_parse_forwarded_ceiling(cfg.services.gmail.parse_forwarded_max_depth_ceiling);
 
     // Hold the cache-sync and eviction handles for the lifetime of the
     // daemon — drop aborts the background tasks, which is what we want

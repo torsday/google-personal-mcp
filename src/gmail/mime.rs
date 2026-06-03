@@ -12,7 +12,7 @@ use std::io::Cursor;
 use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
 
 use crate::error::Error;
-use crate::gmail::types::{AttachmentMeta, BodyContent, Headers, ParsedMessage};
+use crate::gmail::types::{AttachmentMeta, BodyContent, ForwardedMessage, Headers, ParsedMessage};
 
 /// HTML→text rendering width. Wide enough that wrapping rarely fires for
 /// the typical email body; matched to ADR-0010's "100 columns" decision.
@@ -42,6 +42,82 @@ pub(crate) fn parse_message(raw_rfc822: &[u8]) -> Result<ParsedMessage, Error> {
         body,
         attachments: collector.attachments,
     })
+}
+
+/// Recursively parse a forwarded `message/rfc822` byte stream into a
+/// [`ForwardedMessage`] tree, descending into nested `message/rfc822` parts up
+/// to `max_depth` total levels (the top message is level 1). Per
+/// [ADR-0026](../../docs/adr/0026-gmail-tool-surface-phase-2.md)
+/// §`parse_forwarded_attachment`.
+///
+/// `max_depth` is the *total* number of levels parsed, not the number of
+/// descents: `max_depth == 1` parses only the directly-attached message and
+/// leaves `forwarded` empty even when nested forwards exist; `max_depth == 0`
+/// is clamped to 1 (always at least the top message). The cap bounds both stack
+/// depth and output size against a forwarded-within-forwarded `DoS`.
+///
+/// Returns [`Error::Parse`] only when the *top-level* stream is unparseable;
+/// individual nested parts that fail to parse are silently skipped (best-effort,
+/// matching [`parse_message`]'s leaf-level tolerance) rather than failing the
+/// whole tree.
+pub(crate) fn parse_forwarded(
+    raw_rfc822: &[u8],
+    max_depth: u32,
+) -> Result<ForwardedMessage, Error> {
+    let mail = mailparse::parse_mail(raw_rfc822).map_err(|e| Error::Parse {
+        context: "parse_forwarded".to_owned(),
+        source: serde::de::Error::custom(e.to_string()),
+    })?;
+    Ok(build_forwarded(&mail, max_depth.max(1), 1))
+}
+
+/// Build one [`ForwardedMessage`] level and, while `depth < max_depth`, recurse
+/// into its direct `message/rfc822` children.
+fn build_forwarded(mail: &ParsedMail<'_>, max_depth: u32, depth: u32) -> ForwardedMessage {
+    let headers = extract_headers(mail);
+    let mut collector = LeafCollector::default();
+    walk(mail, &mut Vec::new(), &mut collector);
+    let message = ParsedMessage {
+        headers,
+        body: build_body(&collector),
+        attachments: collector.attachments,
+    };
+
+    let mut forwarded = Vec::new();
+    if depth < max_depth {
+        let mut nested = Vec::new();
+        collect_direct_rfc822(mail, &mut nested);
+        for inner_raw in nested {
+            // Best-effort: a corrupt nested forward drops out rather than
+            // failing the whole parse (the outer message is still useful).
+            if let Ok(inner) = mailparse::parse_mail(&inner_raw) {
+                forwarded.push(build_forwarded(&inner, max_depth, depth + 1));
+            }
+        }
+    }
+
+    ForwardedMessage {
+        depth,
+        message,
+        forwarded,
+    }
+}
+
+/// Collect the raw bytes of every `message/rfc822` part directly contained in
+/// `part` (recursing only through `multipart/*` containers, never *into* an
+/// rfc822 part — that descent is [`build_forwarded`]'s job, one level down).
+fn collect_direct_rfc822(part: &ParsedMail<'_>, out: &mut Vec<Vec<u8>>) {
+    let mime = part.ctype.mimetype.to_ascii_lowercase();
+    if mime == "message/rfc822" {
+        // The part body *is* the embedded message's raw RFC 822 stream.
+        if let Ok(raw) = part.get_body_raw() {
+            out.push(raw);
+        }
+        return; // do not descend; the inner message is parsed by recursion
+    }
+    for sub in &part.subparts {
+        collect_direct_rfc822(sub, out);
+    }
 }
 
 // ── Tree walk ─────────────────────────────────────────────────────────────────
@@ -516,5 +592,150 @@ mod tests {
         assert_eq!(positional_id(&[]), "part-root");
         assert_eq!(positional_id(&[0]), "part-0");
         assert_eq!(positional_id(&[1, 2]), "part-1-2");
+    }
+
+    // ── parse_forwarded: nested message/rfc822 recursion + depth cap ──────────
+
+    /// A `multipart/mixed` message carrying `inner` as a nested `message/rfc822`
+    /// attachment, using the given MIME `boundary`. `inner` is itself a full RFC
+    /// 822 message, so embedding one of these inside another produces a
+    /// forward-of-a-forward. Distinct boundaries per nesting level are required —
+    /// a reused boundary would let the outer parser mis-split on the inner
+    /// delimiter.
+    fn fwd_eml_with(subject: &str, body: &str, inner: Option<&str>, boundary: &str) -> String {
+        let attachment = inner.map_or(String::new(), |raw| {
+            format!(
+                "--{boundary}\r\n\
+                 Content-Type: message/rfc822\r\n\
+                 Content-Disposition: attachment; filename=\"inner.eml\"\r\n\
+                 \r\n\
+                 {raw}\r\n"
+            )
+        });
+        format!(
+            "From: outer@example.com\r\n\
+             To: me@example.com\r\n\
+             Subject: {subject}\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\
+             \r\n\
+             --{boundary}\r\n\
+             Content-Type: text/plain; charset=us-ascii\r\n\
+             \r\n\
+             {body}\r\n\
+             {attachment}\
+             --{boundary}--\r\n"
+        )
+    }
+
+    /// Single-level convenience over [`fwd_eml_with`] with a fixed boundary.
+    fn fwd_eml(subject: &str, body: &str, inner: Option<&str>) -> Vec<u8> {
+        fwd_eml_with(subject, body, inner, "BOUND").into_bytes()
+    }
+
+    fn inner_eml(subject: &str, body: &str) -> String {
+        format!(
+            "From: inner@example.com\r\n\
+             To: outer@example.com\r\n\
+             Subject: {subject}\r\n\
+             Content-Type: text/plain; charset=us-ascii\r\n\
+             \r\n\
+             {body}"
+        )
+    }
+
+    #[test]
+    fn parse_forwarded_extracts_top_level() {
+        let raw = fwd_eml("Fwd: hello", "outer body", None);
+        let fwd = parse_forwarded(&raw, 5).expect("parses");
+        assert_eq!(fwd.depth, 1);
+        assert_eq!(
+            fwd.message.headers.subject_untrusted.as_deref(),
+            Some("Fwd: hello")
+        );
+        assert_eq!(
+            fwd.message.body.text_untrusted.as_deref(),
+            Some("outer body")
+        );
+        assert!(fwd.forwarded.is_empty(), "no nested forward present");
+    }
+
+    #[test]
+    fn parse_forwarded_descends_into_nested_rfc822() {
+        let inner = inner_eml("the inner message", "inner body");
+        let raw = fwd_eml("Fwd: nested", "outer body", Some(&inner));
+        let fwd = parse_forwarded(&raw, 5).expect("parses");
+
+        assert_eq!(fwd.depth, 1);
+        assert_eq!(fwd.forwarded.len(), 1, "one nested forward");
+        let child = &fwd.forwarded[0];
+        assert_eq!(child.depth, 2);
+        assert_eq!(
+            child.message.headers.subject_untrusted.as_deref(),
+            Some("the inner message")
+        );
+        assert_eq!(
+            child.message.body.text_untrusted.as_deref(),
+            Some("inner body")
+        );
+    }
+
+    #[test]
+    fn parse_forwarded_respects_depth_cap() {
+        let inner = inner_eml("inner", "inner body");
+        let raw = fwd_eml("outer", "outer body", Some(&inner));
+        // max_depth = 1 means only the top message; the nested forward is not
+        // descended into even though it exists.
+        let fwd = parse_forwarded(&raw, 1).expect("parses");
+        assert_eq!(fwd.depth, 1);
+        assert!(
+            fwd.forwarded.is_empty(),
+            "depth cap of 1 must not descend into the nested forward"
+        );
+    }
+
+    #[test]
+    fn parse_forwarded_clamps_zero_depth_to_one() {
+        // A max_depth of 0 is clamped to 1 — always at least the top message.
+        let raw = fwd_eml("outer", "outer body", None);
+        let fwd = parse_forwarded(&raw, 0).expect("parses");
+        assert_eq!(fwd.depth, 1);
+    }
+
+    #[test]
+    fn parse_forwarded_handles_three_levels_of_nesting() {
+        // ADR-0026 AC: Layer 1 covers a 3-level-nested rfc822. Each level uses a
+        // distinct MIME boundary so the outer parser doesn't mis-split on an
+        // inner delimiter.
+        let level3 = inner_eml("level 3", "deepest body");
+        let level2 = fwd_eml_with("level 2", "mid body", Some(&level3), "BOUNDB");
+        let top = fwd_eml_with("level 1", "top body", Some(&level2), "BOUNDA");
+
+        let fwd = parse_forwarded(top.as_bytes(), 5).expect("parses");
+        assert_eq!(fwd.depth, 1);
+        assert_eq!(
+            fwd.message.headers.subject_untrusted.as_deref(),
+            Some("level 1")
+        );
+
+        assert_eq!(fwd.forwarded.len(), 1);
+        let l2 = &fwd.forwarded[0];
+        assert_eq!(l2.depth, 2);
+        assert_eq!(
+            l2.message.headers.subject_untrusted.as_deref(),
+            Some("level 2")
+        );
+
+        assert_eq!(l2.forwarded.len(), 1);
+        let l3 = &l2.forwarded[0];
+        assert_eq!(l3.depth, 3);
+        assert_eq!(
+            l3.message.headers.subject_untrusted.as_deref(),
+            Some("level 3")
+        );
+        assert_eq!(
+            l3.message.body.text_untrusted.as_deref(),
+            Some("deepest body")
+        );
     }
 }

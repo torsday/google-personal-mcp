@@ -253,6 +253,27 @@ pub(crate) fn extract_body_parts(raw: &RawMessage) -> (Option<String>, Option<St
     (text_plain, text_html)
 }
 
+/// Find the declared MIME type of the part carrying `attachment_id` within a
+/// raw message tree. Walks the full `MessagePart` tree (not just filename-bearing
+/// attachments, unlike [`walk_part`]) so a `message/rfc822` part with no filename
+/// is still located. Returns `None` when no part references that attachment id.
+///
+/// Used by `parse_forwarded_attachment` to validate that the referenced
+/// attachment is `message/rfc822` *before* downloading and parsing it.
+pub(crate) fn find_attachment_mime_type(raw: &RawMessage, attachment_id: &str) -> Option<String> {
+    fn walk(part: &MessagePart, attachment_id: &str) -> Option<String> {
+        if part.body.as_ref().and_then(|b| b.attachment_id.as_deref()) == Some(attachment_id) {
+            return Some(part.mime_type.clone().unwrap_or_default());
+        }
+        part.parts
+            .iter()
+            .find_map(|child| walk(child, attachment_id))
+    }
+    raw.payload
+        .as_ref()
+        .and_then(|payload| walk(payload, attachment_id))
+}
+
 /// Issue `users.threads.list` with optional `q` (Gmail search syntax),
 /// `max_results`, and `page_token`. Returns Gmail's raw envelope so the
 /// caller can hydrate per-thread metadata separately.

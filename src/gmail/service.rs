@@ -209,6 +209,45 @@ impl<T: RefreshTransport + 'static> GmailService<T> {
         Ok(threads_api::extract_body_parts(&raw))
     }
 
+    /// `parse_forwarded_attachment` ([ADR-0026](../../docs/adr/0026-gmail-tool-surface-phase-2.md)):
+    /// fetch a `message/rfc822` attachment and parse it — and any nested
+    /// forwarded messages within it — into a [`ForwardedMessage`] tree, bounded
+    /// at `max_depth` levels.
+    ///
+    /// Two upstream calls, neither cached: `messages.get(format=FULL)` (20 units)
+    /// to locate the attachment part and validate its MIME type, then
+    /// `messages.attachments.get` to fetch the raw bytes. Returns
+    /// [`Error::UnsupportedMimeType`] when the attachment is not
+    /// `message/rfc822`, or [`Error::NotFound`] when `attachment_id` matches no
+    /// part on the message.
+    pub(crate) async fn parse_forwarded_attachment(
+        &self,
+        account: &str,
+        message_id: &str,
+        attachment_id: &str,
+        max_depth: u32,
+    ) -> Result<crate::gmail::types::ForwardedMessage, Error> {
+        let raw = threads_api::fetch_raw_message(&self.client, account, message_id, "full").await?;
+        match threads_api::find_attachment_mime_type(&raw, attachment_id) {
+            None => {
+                return Err(Error::NotFound {
+                    what: format!("attachment `{attachment_id}` on message `{message_id}`"),
+                })
+            }
+            Some(mime) if !mime.eq_ignore_ascii_case("message/rfc822") => {
+                return Err(Error::UnsupportedMimeType {
+                    found: mime,
+                    expected: "message/rfc822",
+                })
+            }
+            Some(_) => {}
+        }
+        let attachment =
+            crate::gmail::attachments::download(&self.client, account, message_id, attachment_id)
+                .await?;
+        crate::gmail::mime::parse_forwarded(&attachment.bytes, max_depth)
+    }
+
     /// `threads.list` (10 quota units) — returns Gmail's raw envelope so the
     /// caller can hydrate per-thread metadata separately.
     ///
@@ -748,5 +787,130 @@ mod tests {
         assert_eq!(m2.messages[0].subject, "meta");
         assert_eq!(cache.metrics().misses(), 1);
         assert_eq!(cache.metrics().hits(), 1);
+    }
+
+    // ── parse_forwarded_attachment: two-call fetch + validate + parse ─────────
+
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+
+    /// A `messages.get(format=full)` body whose payload carries a single
+    /// attachment part with the given `mime_type` and attachment id `att1`.
+    fn message_with_attachment(mid: &str, mime_type: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": mid,
+            "labelIds": ["INBOX"],
+            "internalDate": "1717200000000",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [{"name": "Subject", "value": "carrier"}],
+                "body": {"size": 0},
+                "parts": [{
+                    "mimeType": mime_type,
+                    "headers": [
+                        {"name": "Content-Disposition", "value": "attachment; filename=\"x\""}
+                    ],
+                    "body": {"attachmentId": "att1", "size": 100}
+                }]
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn parse_forwarded_attachment_happy_path() {
+        let server = MockServer::start().await;
+
+        // 1. messages.get → message exposing a message/rfc822 part (att1).
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/messages/m1$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(message_with_attachment("m1", "message/rfc822")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // 2. attachments.get → raw RFC 822 bytes of the forwarded message.
+        let forwarded_raw = "From: inner@example.com\r\n\
+                             To: outer@example.com\r\n\
+                             Subject: forwarded subject\r\n\
+                             Content-Type: text/plain\r\n\
+                             \r\n\
+                             forwarded body";
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/messages/m1/attachments/att1$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": URL_SAFE_NO_PAD.encode(forwarded_raw.as_bytes()),
+                "size": forwarded_raw.len(),
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let service = GmailService::new(client, None);
+        let fwd = service
+            .parse_forwarded_attachment("work", "m1", "att1", 5)
+            .await
+            .expect("parses forwarded attachment");
+        assert_eq!(fwd.depth, 1);
+        assert_eq!(
+            fwd.message.headers.subject_untrusted.as_deref(),
+            Some("forwarded subject")
+        );
+        assert_eq!(
+            fwd.message.body.text_untrusted.as_deref(),
+            Some("forwarded body")
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_forwarded_attachment_rejects_non_rfc822() {
+        let server = MockServer::start().await;
+        // messages.get reports the attachment is a PDF — no download should happen.
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/messages/m1$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(message_with_attachment("m1", "application/pdf")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let service = GmailService::new(client, None);
+        let err = service
+            .parse_forwarded_attachment("work", "m1", "att1", 5)
+            .await
+            .expect_err("non-rfc822 must be rejected");
+        assert!(
+            matches!(err, Error::UnsupportedMimeType { ref found, expected }
+                if found == "application/pdf" && expected == "message/rfc822"),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_forwarded_attachment_unknown_id_is_not_found() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/users/work/messages/m1$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(message_with_attachment("m1", "message/rfc822")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let service = GmailService::new(client, None);
+        let err = service
+            .parse_forwarded_attachment("work", "m1", "does-not-exist", 5)
+            .await
+            .expect_err("unknown attachment id must be NotFound");
+        assert!(matches!(err, Error::NotFound { .. }), "got: {err:?}");
     }
 }

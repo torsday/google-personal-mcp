@@ -22,7 +22,7 @@ use crate::error;
 use crate::tools::{
     archive, audit_summary, batch, cache_invalidate, cache_status, download_attachment, fanout,
     get_message, get_thread, list_accounts, list_attachments, list_labels, mcp_status,
-    modify_labels, purge_account, search_threads, trash,
+    modify_labels, parse_forwarded_attachment, purge_account, search_threads, trash,
 };
 
 use super::args::{
@@ -291,6 +291,31 @@ impl GoogleServer {
                     .await
                     .map_err(|e| error::to_mcp_error(&e))
                     .and_then(|out| ok_result("get_full_body serialize", &out))
+            }
+
+            "parse_forwarded_attachment" => {
+                let account = extract_string_arg(&request, "account")?;
+                if account == fanout::FANOUT_MARKER {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "cross-account fan-out is not supported for `parse_forwarded_attachment` \
+                         — message and attachment IDs are per-account; pass a single account alias",
+                        None,
+                    ));
+                }
+                let message_id = extract_string_arg(&request, "message_id")?;
+                let attachment_id = extract_string_arg(&request, "attachment_id")?;
+                let max_depth = extract_optional_u32_arg(&request, "max_depth");
+                parse_forwarded_attachment::parse_forwarded_attachment(
+                    &self.gmail,
+                    &account,
+                    &message_id,
+                    &attachment_id,
+                    max_depth,
+                    self.parse_forwarded_max_depth_ceiling,
+                )
+                .await
+                .map_err(|e| error::to_mcp_error(&e))
+                .and_then(|out| ok_result("parse_forwarded_attachment serialize", &out))
             }
 
             "list_attachments" => {
