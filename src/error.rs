@@ -47,6 +47,18 @@ pub(crate) enum Error {
     #[error("header injection attempt in field `{field}`")]
     HeaderInjection { field: String },
 
+    /// A tool was handed an attachment whose MIME type it cannot process.
+    /// Raised by `parse_forwarded_attachment` per
+    /// [ADR-0026](../docs/adr/0026-gmail-tool-surface-phase-2.md) when the
+    /// referenced attachment is not `message/rfc822`. Model-actionable: the
+    /// caller passed the wrong `attachment_id`. `found`/`expected` are
+    /// server-derived MIME tokens, never attacker free-text bodies.
+    #[error("unsupported MIME type `{found}`: expected `{expected}`")]
+    UnsupportedMimeType {
+        found: String,
+        expected: &'static str,
+    },
+
     /// Upstream rate-limited us. Surfaced only AFTER the HTTP layer's bounded retries are exhausted.
     #[error("rate limited on account `{account}`; retry after {retry_after:?}")]
     RateLimited {
@@ -157,6 +169,7 @@ impl Error {
             Self::ConcurrencyConflict { .. } => "concurrency_conflict",
             Self::InvalidArgument { .. } => "invalid_argument",
             Self::HeaderInjection { .. } => "header_injection",
+            Self::UnsupportedMimeType { .. } => "unsupported_mime_type",
             Self::RateLimited { .. } => "rate_limited",
             Self::Upstream { .. } => "upstream",
             Self::Network(_) => "network",
@@ -337,6 +350,7 @@ pub(crate) fn to_mcp_error(e: &Error) -> rmcp::ErrorData {
         | Error::RecurrenceInstanceNotFound { .. }
         | Error::ConcurrencyConflict { .. }
         | Error::InvalidArgument { .. }
+        | Error::UnsupportedMimeType { .. }
         | Error::AuthRequired { .. } => rmcp::ErrorData::invalid_params(msg, None),
 
         // Security event: refuse and log loud.
@@ -416,6 +430,30 @@ mod tests {
             field: "subject".into(),
         };
         assert_eq!(e.to_string(), "header injection attempt in field `subject`");
+    }
+
+    #[test]
+    fn unsupported_mime_type_display_and_kind() {
+        let e = Error::UnsupportedMimeType {
+            found: "application/pdf".into(),
+            expected: "message/rfc822",
+        };
+        assert_eq!(
+            e.to_string(),
+            "unsupported MIME type `application/pdf`: expected `message/rfc822`"
+        );
+        assert_eq!(e.kind(), "unsupported_mime_type");
+    }
+
+    #[test]
+    fn mcp_mapping_unsupported_mime_type_is_invalid_params() {
+        let e = Error::UnsupportedMimeType {
+            found: "image/png".into(),
+            expected: "message/rfc822",
+        };
+        // Model-actionable bad input → invalid_params, not internal_error.
+        let mcp = to_mcp_error(&e);
+        assert_eq!(mcp.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 
     #[test]

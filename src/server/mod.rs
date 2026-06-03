@@ -71,6 +71,11 @@ pub(crate) struct GoogleServer {
     /// from `[services.calendar].freebusy_max_window_days` at startup via
     /// [`Self::with_freebusy_window`]; defaults to 31.
     pub(super) freebusy_max_window_days: u32,
+    /// Hard server-side ceiling on `parse_forwarded_attachment` recursion depth
+    /// ([ADR-0026](../../docs/adr/0026-gmail-tool-surface-phase-2.md)). Sourced
+    /// from `[services.gmail].parse_forwarded_max_depth_ceiling` at startup via
+    /// [`Self::with_parse_forwarded_ceiling`]; defaults to 10.
+    pub(super) parse_forwarded_max_depth_ceiling: u32,
 }
 
 impl GoogleServer {
@@ -97,6 +102,7 @@ impl GoogleServer {
             deprecations: Arc::new(deprecation::production()),
             purge_paths: Arc::new(purge_paths),
             freebusy_max_window_days: 31,
+            parse_forwarded_max_depth_ceiling: 10,
         }
     }
 
@@ -106,6 +112,15 @@ impl GoogleServer {
     #[must_use]
     pub(crate) const fn with_freebusy_window(mut self, days: u32) -> Self {
         self.freebusy_max_window_days = days;
+        self
+    }
+
+    /// Override the `parse_forwarded_attachment` recursion-depth ceiling from
+    /// `[services.gmail].parse_forwarded_max_depth_ceiling`. Returns `self` so
+    /// the startup path can chain off [`Self::new`]. Defaults to 10 when unset.
+    #[must_use]
+    pub(crate) const fn with_parse_forwarded_ceiling(mut self, depth: u32) -> Self {
+        self.parse_forwarded_max_depth_ceiling = depth;
         self
     }
 
@@ -162,6 +177,7 @@ impl GoogleServer {
                 cache_dir: std::path::PathBuf::from("/tmp/.gpm-test-stub/cache"),
             }),
             freebusy_max_window_days: 31,
+            parse_forwarded_max_depth_ceiling: 10,
         }
     }
 

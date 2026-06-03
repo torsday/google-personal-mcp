@@ -62,3 +62,20 @@ pub(crate) struct ParsedMessage {
     pub body: BodyContent,
     pub attachments: Vec<AttachmentMeta>,
 }
+
+/// A forwarded `message/rfc822` attachment parsed into a tree, produced by
+/// [`crate::gmail::mime::parse_forwarded`] for the `parse_forwarded_attachment`
+/// tool ([ADR-0026](../../docs/adr/0026-gmail-tool-surface-phase-2.md)).
+///
+/// `message` is this level's parsed content (same shape as a top-level
+/// [`ParsedMessage`]). `forwarded` holds any nested `message/rfc822` parts found
+/// *within* this message, each recursively parsed — a forward-within-a-forward.
+/// `depth` is the 1-based nesting level (the directly-attached message is 1).
+/// Recursion is bounded by the caller's `max_depth` so a deeply self-nested
+/// forward cannot exhaust the stack ([ADR-0026] §`parse_forwarded_attachment`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ForwardedMessage {
+    pub depth: u32,
+    pub message: ParsedMessage,
+    pub forwarded: Vec<Self>,
+}

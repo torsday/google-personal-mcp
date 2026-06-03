@@ -351,6 +351,13 @@ pub(crate) struct ServiceEntry {
     /// Unused by non-calendar services (mirrors how `profile` is Gmail-only).
     #[serde(default = "default_freebusy_max_window_days")]
     pub(crate) freebusy_max_window_days: u32,
+    /// Gmail-only: hard server-side ceiling on `parse_forwarded_attachment`
+    /// recursion depth ([ADR-0026](../../docs/adr/0026-gmail-tool-surface-phase-2.md)).
+    /// A per-call `max_depth` is clamped to this value; the per-call default
+    /// (5) applies when the caller omits it. Defaults to 10. Unused by
+    /// non-Gmail services.
+    #[serde(default = "default_parse_forwarded_max_depth_ceiling")]
+    pub(crate) parse_forwarded_max_depth_ceiling: u32,
 }
 
 impl Default for ServiceEntry {
@@ -363,6 +370,7 @@ impl Default for ServiceEntry {
             accounts: HashMap::new(),
             tools: HashMap::new(),
             freebusy_max_window_days: default_freebusy_max_window_days(),
+            parse_forwarded_max_depth_ceiling: default_parse_forwarded_max_depth_ceiling(),
         }
     }
 }
@@ -371,6 +379,13 @@ impl Default for ServiceEntry {
 /// month, the common scheduling horizon, while bounding payload + quota.
 const fn default_freebusy_max_window_days() -> u32 {
     31
+}
+
+/// Default hard ceiling on `parse_forwarded_attachment` recursion depth. 10 is
+/// double the per-call default (5) — deep enough for any realistic
+/// forward-of-a-forward chain, shallow enough to bound work per ADR-0026.
+const fn default_parse_forwarded_max_depth_ceiling() -> u32 {
+    10
 }
 
 impl ServiceEntry {

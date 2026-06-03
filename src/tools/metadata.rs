@@ -47,6 +47,7 @@ const TOOL_ASPECTS: &[(&str, Aspect)] = &[
     ("get_thread", Aspect::Read),
     ("get_message", Aspect::Read),
     ("get_full_body", Aspect::Read),
+    ("parse_forwarded_attachment", Aspect::Read),
     ("list_attachments", Aspect::Read),
     ("download_attachment", Aspect::Read),
     ("cache_status", Aspect::Read),

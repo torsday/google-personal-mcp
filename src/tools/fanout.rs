@@ -111,6 +111,7 @@ const fn error_kind(e: &Error) -> &'static str {
         Error::ConcurrencyConflict { .. } => "ConcurrencyConflict",
         Error::InvalidArgument { .. } => "InvalidArgument",
         Error::HeaderInjection { .. } => "HeaderInjection",
+        Error::UnsupportedMimeType { .. } => "UnsupportedMimeType",
         Error::Parse { .. }
         | Error::Io(_)
         | Error::Config { .. }
