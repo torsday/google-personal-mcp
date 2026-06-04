@@ -282,6 +282,12 @@ pub(crate) struct ServicesConfig {
     pub(crate) calendar: ServiceEntry,
     #[serde(default)]
     pub(crate) contacts: ServiceEntry,
+    /// Drive service per [ADR-0025](../../docs/adr/0025-drive-service-surface.md).
+    /// Disabled by default like calendar/contacts; the per-account `scopes`
+    /// override and load-time scope validation are Drive-specific (see
+    /// [`super::parse`] and [`crate::drive::scopes`]).
+    #[serde(default)]
+    pub(crate) drive: ServiceEntry,
 }
 
 impl Default for ServicesConfig {
@@ -294,11 +300,12 @@ impl ServicesConfig {
     /// The configured services paired with their canonical names — the single
     /// place that maps a service string to its [`ServiceEntry`]. Adding a new
     /// service (Drive, ADR-0025) means adding one row here.
-    pub(super) const fn all(&self) -> [(&'static str, &ServiceEntry); 3] {
+    pub(super) const fn all(&self) -> [(&'static str, &ServiceEntry); 4] {
         [
             ("gmail", &self.gmail),
             ("calendar", &self.calendar),
             ("contacts", &self.contacts),
+            ("drive", &self.drive),
         ]
     }
 
@@ -316,6 +323,7 @@ pub(super) fn default_services() -> ServicesConfig {
         gmail: default_gmail_service(),
         calendar: ServiceEntry::default(),
         contacts: ServiceEntry::default(),
+        drive: ServiceEntry::default(),
     }
 }
 
@@ -394,6 +402,23 @@ impl ServiceEntry {
     pub(crate) fn gmail_profile(&self) -> Result<GmailProfile, Error> {
         GmailProfile::from_str(&self.profile)
     }
+
+    /// Resolve the effective OAuth scopes for `account`: the per-account
+    /// override (`[services.<svc>.accounts.<account>] scopes`) when it is
+    /// present and non-empty, otherwise the service-level `scopes`
+    /// (`[services.<svc>] scopes`). The single precedence rule for the
+    /// per-account scope override (ADR-0025); the load-time validator and any
+    /// future auth-flow consumer call through here rather than re-deriving it.
+    ///
+    /// An account with an empty (or absent) override inherits the service-level
+    /// scopes — mirroring how an omitted capability override falls through to
+    /// the service level.
+    pub(crate) fn resolve_account_scopes(&self, account: &str) -> &[String] {
+        match self.accounts.get(account) {
+            Some(over) if !over.scopes.is_empty() => &over.scopes,
+            _ => &self.scopes,
+        }
+    }
 }
 
 /// Tools for which a `[services.<svc>.tools.<tool>]` per-tool override is
@@ -459,6 +484,15 @@ impl CapabilityOverride {
 pub(crate) struct AccountOverride {
     #[serde(default)]
     pub(crate) capabilities: CapabilityOverride,
+    /// Per-account OAuth scope override. When non-empty it replaces the
+    /// service-level `scopes` for this account (resolved by
+    /// [`ServiceEntry::resolve_account_scopes`]). Currently consumed only by
+    /// Drive ([ADR-0025](../../docs/adr/0025-drive-service-surface.md)), whose
+    /// load-time validator in [`super::parse`] rejects any value outside the
+    /// allowed Drive scope set; an empty vec means "no override — inherit the
+    /// service-level scopes."
+    #[serde(default)]
+    pub(crate) scopes: Vec<String>,
 }
 
 /// Per-tool override — disables a single sanctioned tool inside an otherwise
@@ -946,6 +980,7 @@ mod tests {
                     destructive: Some(true),
                     ..CapabilityOverride::default()
                 },
+                scopes: vec![],
             },
         );
         cfg.services.calendar = calendar;
@@ -969,6 +1004,7 @@ mod tests {
                     destructive: Some(true),
                     ..CapabilityOverride::default()
                 },
+                scopes: vec![],
             },
         );
         cfg.services.calendar = calendar;
