@@ -29,6 +29,7 @@ use crate::auth::tokens::{ReqwestRefreshTransport, TokenManager};
 use crate::calendar::service::CalendarService;
 use crate::config::AccountEntry;
 use crate::contacts::service::ContactsService;
+use crate::drive::service::DriveService;
 use crate::error::{self, Error};
 use crate::gmail::service::GmailService;
 
@@ -53,6 +54,12 @@ pub(crate) struct GoogleServer {
     /// yet (they land in #206+), hence the `allow(dead_code)`.
     #[allow(dead_code)]
     pub(super) contacts: Option<Arc<ContactsService<ReqwestRefreshTransport>>>,
+    /// Drive service per [ADR-0025](../../docs/adr/0025-drive-service-surface.md).
+    /// `None` when `[services.drive]` is disabled (the default) — set via
+    /// [`Self::with_drive`] at startup. Scaffold: no drive tools read it yet
+    /// (they land in #213/#215/#217/#220), hence the `allow(dead_code)`.
+    #[allow(dead_code)]
+    pub(super) drive: Option<Arc<DriveService<ReqwestRefreshTransport>>>,
     /// Best-effort JSONL audit writer per ADR-0011 v0.2 subset.
     pub(super) audit: AuditWriter,
     /// Audit verbosity configured via `[audit] verbose` in config.toml.
@@ -97,6 +104,7 @@ impl GoogleServer {
             gmail,
             calendar: None,
             contacts: None,
+            drive: None,
             audit,
             verbosity,
             deprecations: Arc::new(deprecation::production()),
@@ -147,6 +155,18 @@ impl GoogleServer {
         self
     }
 
+    /// Attach the Drive service (ADR-0025). `None` leaves the server with no
+    /// drive surface (the default when `[services.drive]` is disabled).
+    /// Returns `self` so the startup path can chain off [`Self::new`].
+    #[must_use]
+    pub(crate) fn with_drive(
+        mut self,
+        drive: Option<Arc<DriveService<ReqwestRefreshTransport>>>,
+    ) -> Self {
+        self.drive = drive;
+        self
+    }
+
     /// Test-only constructor that injects a populated deprecation
     /// registry. Production code uses [`Self::new`], which always wires
     /// the empty `deprecation::production()` registry. Gated behind
@@ -167,6 +187,7 @@ impl GoogleServer {
             gmail,
             calendar: None,
             contacts: None,
+            drive: None,
             audit,
             verbosity,
             deprecations: Arc::new(deprecations),

@@ -112,6 +112,8 @@ const fn error_kind(e: &Error) -> &'static str {
         Error::InvalidArgument { .. } => "InvalidArgument",
         Error::HeaderInjection { .. } => "HeaderInjection",
         Error::UnsupportedMimeType { .. } => "UnsupportedMimeType",
+        Error::ExportRequired { .. } => "ExportRequired",
+        Error::UnsupportedExportType { .. } => "UnsupportedExportType",
         Error::Parse { .. }
         | Error::Io(_)
         | Error::Config { .. }

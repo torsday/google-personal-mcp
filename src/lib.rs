@@ -7,6 +7,7 @@ pub mod cache;
 pub mod calendar;
 pub mod config;
 pub mod contacts;
+pub mod drive;
 pub mod error;
 pub mod gmail;
 pub mod healthz;
@@ -146,6 +147,8 @@ use crate::calendar::client::{CalendarClient, CALENDAR_API_BASE};
 use crate::calendar::service::CalendarService;
 use crate::contacts::client::{PeopleClient, PEOPLE_API_BASE};
 use crate::contacts::service::ContactsService;
+use crate::drive::client::{DriveClient, DRIVE_API_BASE};
+use crate::drive::service::DriveService;
 use crate::error::Error;
 use crate::gmail::client::GmailClient;
 use crate::gmail::service::GmailService;
@@ -317,6 +320,19 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
         None
     };
 
+    // Drive service (ADR-0025). Same conditional-on-enabled scaffold wiring as
+    // Calendar; no tools are registered yet (they land in #213/#215/#217/#220).
+    let drive = if cfg.services.drive.enabled {
+        let drive_client = Arc::new(DriveClient::new(
+            DRIVE_API_BASE,
+            tokens.clone(),
+            http_client.clone(),
+        ));
+        Some(Arc::new(DriveService::new(drive_client)))
+    } else {
+        None
+    };
+
     // Contacts service (ADR-0024). Same conditional-on-enabled scaffold wiring
     // as Calendar; `http_client` is moved here as its last use.
     let contacts = if cfg.services.contacts.enabled {
@@ -431,6 +447,7 @@ fn run_serve_blocking(transport: Transport) -> Result<(), Error> {
     let server = GoogleServer::new(accounts, tokens, gmail, audit, verbosity, purge_paths)
         .with_calendar(calendar)
         .with_contacts(contacts)
+        .with_drive(drive)
         .with_freebusy_window(cfg.services.calendar.freebusy_max_window_days)
         .with_parse_forwarded_ceiling(cfg.services.gmail.parse_forwarded_max_depth_ceiling);
 

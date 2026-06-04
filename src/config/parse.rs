@@ -103,6 +103,43 @@ impl Config {
                 }
             }
         }
+        // Drive scope vocabulary (ADR-0025). Both the service-level
+        // `[services.drive] scopes` and every per-account override
+        // `[services.drive.accounts.<alias>] scopes` may name only scopes in the
+        // allowed Drive set — reject anything else at load time so a typo or an
+        // over-broad grant fails the daemon at startup, not at first call.
+        self.validate_drive_scopes(&display)?;
+        Ok(())
+    }
+
+    /// Reject any configured Drive scope outside the allowed set
+    /// ([`crate::drive::scopes::ALLOWED_DRIVE_SCOPES`]). Checks the
+    /// service-level scopes and each per-account override. Split out of
+    /// [`Self::validate`] so the (otherwise long) validator stays readable.
+    fn validate_drive_scopes(&self, display: &impl Fn() -> String) -> Result<(), Error> {
+        use crate::drive::scopes::{is_allowed_drive_scope, ALLOWED_DRIVE_SCOPES};
+
+        let reject = |location: String, scope: &str| Error::Config {
+            path: display(),
+            message: format!(
+                "[services.drive{location}].scopes contains `{scope}`, which is not an \
+                 allowed Drive scope; expected one of {ALLOWED_DRIVE_SCOPES:?} (ADR-0025)"
+            ),
+        };
+
+        let drive = &self.services.drive;
+        for scope in &drive.scopes {
+            if !is_allowed_drive_scope(scope) {
+                return Err(reject(String::new(), scope));
+            }
+        }
+        for (alias, over) in &drive.accounts {
+            for scope in &over.scopes {
+                if !is_allowed_drive_scope(scope) {
+                    return Err(reject(format!(".accounts.{alias}"), scope));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -275,6 +312,116 @@ mod tests {
             }
             other => panic!("wrong error variant: {other:?}"),
         }
+    }
+
+    // ── drive scopes + per-account override (ADR-0025) ────────────────────────
+
+    #[test]
+    fn config_drive_valid_scopes_load_and_resolve() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r#"
+            [services.drive]
+            enabled = true
+            scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+
+            [services.drive.accounts.work]
+            scopes = ["https://www.googleapis.com/auth/drive"]
+            "#,
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.services.drive.enabled);
+        // `work` has an override → it wins over the service-level scope.
+        assert_eq!(
+            cfg.services.drive.resolve_account_scopes("work"),
+            &["https://www.googleapis.com/auth/drive".to_owned()]
+        );
+        // `personal` has no override → inherits the service-level scope.
+        assert_eq!(
+            cfg.services.drive.resolve_account_scopes("personal"),
+            &["https://www.googleapis.com/auth/drive.readonly".to_owned()]
+        );
+    }
+
+    #[test]
+    fn config_drive_invalid_service_scope_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r#"
+            [services.drive]
+            enabled = true
+            scopes = ["https://www.googleapis.com/auth/drive.metadata.readonly"]
+            "#,
+        );
+        let err = Config::load(&path).expect_err("disallowed drive scope should fail");
+        match err {
+            Error::Config { message, .. } => {
+                assert!(
+                    message.contains("[services.drive].scopes"),
+                    "got: {message}"
+                );
+                assert!(
+                    message.contains("not an allowed Drive scope"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_drive_invalid_account_override_scope_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r#"
+            [services.drive]
+            enabled = true
+            scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+
+            [services.drive.accounts.work]
+            scopes = ["https://example.com/not-a-drive-scope"]
+            "#,
+        );
+        let err = Config::load(&path).expect_err("disallowed per-account scope should fail");
+        match err {
+            Error::Config { message, .. } => {
+                assert!(
+                    message.contains("[services.drive.accounts.work].scopes"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_drive_empty_account_override_inherits_service_scopes() {
+        // An account block with no `scopes` (only a capabilities override) must
+        // inherit the service-level scopes, not resolve to empty.
+        let tmp = TempDir::new().unwrap();
+        let path = write(
+            &tmp,
+            "config.toml",
+            r#"
+            [services.drive]
+            enabled = true
+            scopes = ["https://www.googleapis.com/auth/drive.file"]
+
+            [services.drive.accounts.work.capabilities]
+            write = true
+            "#,
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(
+            cfg.services.drive.resolve_account_scopes("work"),
+            &["https://www.googleapis.com/auth/drive.file".to_owned()]
+        );
     }
 
     // ── profile field ────────────────────────────────────────────────────────

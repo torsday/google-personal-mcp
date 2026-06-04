@@ -59,6 +59,32 @@ pub(crate) enum Error {
         expected: &'static str,
     },
 
+    /// A Drive file has no directly downloadable binary content because it is a
+    /// Google-native document (Docs/Sheets/Slides). `download_file` raises this
+    /// per [ADR-0025](../docs/adr/0025-drive-service-surface.md); the caller
+    /// should retry via `export_file` with one of `supported_export_types`.
+    /// Both fields are server-derived MIME tokens — never secrets or
+    /// attacker-free-text, so `Debug` needs no redaction.
+    #[error(
+        "file requires export: source type `{mime_type}` has no direct download; \
+         use export_file with one of {supported_export_types:?}"
+    )]
+    ExportRequired {
+        mime_type: String,
+        supported_export_types: Vec<String>,
+    },
+
+    /// `export_file` was asked to export a Google-native document to a target
+    /// MIME type its source type does not support. Per ADR-0025; both fields are
+    /// server-derived MIME tokens, never secrets. The source-type field is named
+    /// `source_type` (not `source`) because `thiserror` reserves a field named
+    /// `source` for the error-chain source, which a plain `String` cannot be.
+    #[error("unsupported export: source `{source_type}` cannot export to `{requested}`")]
+    UnsupportedExportType {
+        source_type: String,
+        requested: String,
+    },
+
     /// Upstream rate-limited us. Surfaced only AFTER the HTTP layer's bounded retries are exhausted.
     #[error("rate limited on account `{account}`; retry after {retry_after:?}")]
     RateLimited {
@@ -170,6 +196,8 @@ impl Error {
             Self::InvalidArgument { .. } => "invalid_argument",
             Self::HeaderInjection { .. } => "header_injection",
             Self::UnsupportedMimeType { .. } => "unsupported_mime_type",
+            Self::ExportRequired { .. } => "export_required",
+            Self::UnsupportedExportType { .. } => "unsupported_export_type",
             Self::RateLimited { .. } => "rate_limited",
             Self::Upstream { .. } => "upstream",
             Self::Network(_) => "network",
@@ -351,6 +379,8 @@ pub(crate) fn to_mcp_error(e: &Error) -> rmcp::ErrorData {
         | Error::ConcurrencyConflict { .. }
         | Error::InvalidArgument { .. }
         | Error::UnsupportedMimeType { .. }
+        | Error::ExportRequired { .. }
+        | Error::UnsupportedExportType { .. }
         | Error::AuthRequired { .. } => rmcp::ErrorData::invalid_params(msg, None),
 
         // Security event: refuse and log loud.
